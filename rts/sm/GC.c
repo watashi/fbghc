@@ -48,6 +48,7 @@
 #include "Stable.h"
 #include "CheckUnload.h"
 #include "CNF.h"
+#include "RtsFlags.h"
 
 #include <string.h> // for memset()
 #include <unistd.h>
@@ -788,11 +789,6 @@ GarbageCollect (nat collect_gen,
    Initialise the gc_thread structures.
    -------------------------------------------------------------------------- */
 
-#define GC_THREAD_INACTIVE             0
-#define GC_THREAD_STANDING_BY          1
-#define GC_THREAD_RUNNING              2
-#define GC_THREAD_WAITING_TO_CONTINUE  3
-
 static void
 new_gc_thread (nat n, gc_thread *t)
 {
@@ -1095,6 +1091,9 @@ waitForGcThreads (Capability *cap USED_IF_THREADS, rtsBool idle_cap[])
     const nat me = cap->no;
     nat i, j;
     rtsBool retry = rtsTrue;
+    Time t0, t1, t2;
+
+    t0 = t1 = t2 = getProcessElapsedTime();
 
     while(retry) {
         for (i=0; i < n_threads; i++) {
@@ -1116,6 +1115,19 @@ waitForGcThreads (Capability *cap USED_IF_THREADS, rtsBool idle_cap[])
             if (!retry) break;
             yieldThread();
         }
+
+        t2 = getProcessElapsedTime();
+        if (RtsFlags.GcFlags.longGCSync != 0 &&
+            t2 - t1 > RtsFlags.GcFlags.longGCSync) {
+            /* call this every longGCSync of delay */
+            rtsConfig.longGCSync(cap->no, t2 - t0);
+            t1 = t2;
+        }
+    }
+
+    if (RtsFlags.GcFlags.longGCSync != 0 &&
+        t2 - t0 > RtsFlags.GcFlags.longGCSync) {
+        rtsConfig.longGCSyncEnd(t2 - t0);
     }
 }
 

@@ -22,9 +22,9 @@ TYPE SIGNATURES
     (Num b, Num t, Functor f) =>
     (t -> f b) -> f b
   test2d ::
-    forall (f :: * -> *) t1 b t2.
+    forall t t1 b (f :: * -> *).
     (Num b, Num t1, Functor f) =>
-    (t1 -> f t2) -> f b
+    (t1 -> f t) -> f b
   test3 ::
     forall a t (m :: * -> *) t1.
     (Num t1, Monad m) =>
