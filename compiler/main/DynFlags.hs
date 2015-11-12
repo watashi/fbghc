@@ -171,10 +171,8 @@ import qualified Pretty
 import SrcLoc
 import FastString
 import Outputable
-#ifdef GHCI
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
-#endif
 import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessage )
 
 import System.IO.Unsafe ( unsafePerformIO )
@@ -1592,9 +1590,10 @@ defaultWays settings = if pc_DYNAMIC_BY_DEFAULT (sPlatformConstants settings)
                        else []
 
 interpWays :: [Way]
-interpWays = if dynamicGhc
-             then [WayDyn]
-             else []
+interpWays
+  | dynamicGhc = [WayDyn]
+  | rtsIsProfiled = [WayProf]
+  | otherwise = []
 
 --------------------------------------------------------------------------
 
@@ -3454,14 +3453,12 @@ glasgowExtsFlags = [
            , Opt_UnicodeSyntax
            , Opt_UnliftedFFITypes ]
 
-#ifdef GHCI
 -- Consult the RTS to find whether GHC itself has been built profiled
 -- If so, you can't use Template Haskell
 foreign import ccall unsafe "rts_isProfiled" rtsIsProfiledIO :: IO CInt
 
 rtsIsProfiled :: Bool
 rtsIsProfiled = unsafeDupablePerformIO rtsIsProfiledIO /= 0
-#endif
 
 #ifdef GHCI
 -- Consult the RTS to find whether GHC itself has been built with
@@ -4093,6 +4090,8 @@ compilerInfo dflags
                                        then "YES" else "NO"),
        ("GHC Dynamic",                 if dynamicGhc
                                        then "YES" else "NO"),
+       ("GHC Profiled",                if rtsIsProfiled
+                                       then "YES" else "NO"),
        ("Leading underscore",          cLeadingUnderscore),
        ("Debug on",                    show debugIsOn),
        ("LibDir",                      topDir dflags),
@@ -4180,6 +4179,14 @@ makeDynFlagsConsistent dflags
            "Enabling -fPIC as it is always on for this platform"
  | Left err <- checkOptLevel (optLevel dflags) dflags
     = loop (updOptLevel 0 dflags) err
+
+ | LinkInMemory <- ghcLink dflags
+ , rtsIsProfiled
+ , isObjectTarget (hscTarget dflags)
+ , WayProf `notElem` ways dflags
+    = loop dflags{ways = WayProf : ways dflags}
+         "Enabling -prof, because -fobject-code is enabled and GHCi is profiled"
+
  | otherwise = (dflags, [])
     where loc = mkGeneralSrcSpan (fsLit "when making flags consistent")
           loop updated_dflags warning
