@@ -137,7 +137,6 @@ static void searchHeapBlocks (HashTable *addrs, bdescr *bd)
                 size = sizeW_fromITBL(info);
                 break;
 
-            case IND_PERM:
             case BLACKHOLE:
             case BLOCKING_QUEUE:
                 prim = rtsTrue;
