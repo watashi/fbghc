@@ -11,9 +11,7 @@ module Coverage (addTicksToBinds, hpcInitCode) where
 import qualified GHCi
 import GHCi.RemoteTypes
 import Data.Array
-import qualified Data.ByteString as B
 import ByteCodeTypes
-import Foreign.C
 import GHC.Stack
 #endif
 import Type
