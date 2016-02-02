@@ -37,8 +37,8 @@ endif
 ghc_NO_CHECK = YES
 
 ghc_stage1_MORE_HC_OPTS = $(GhcStage1HcOpts)
-ghc_stage2_MORE_HC_OPTS = $(GhcStage2HcOpts)
-ghc_stage3_MORE_HC_OPTS = $(GhcStage3HcOpts)
+ghc_stage2_MORE_HC_OPTS = $(GhcStage2HcOpts) -optc-DSTAGE2
+ghc_stage3_MORE_HC_OPTS = $(GhcStage3HcOpts) -optc-DSTAGE2
 
 # We need __GLASGOW_HASKELL__ in hschooks.c, so we have to build C
 # sources with GHC:
@@ -178,7 +178,7 @@ INSTALL_LIBS += settings
 ifeq "$(Windows_Host)" "NO"
 install: install_ghc_link
 .PHONY: install_ghc_link
-install_ghc_link: 
+install_ghc_link:
 	$(call removeFiles,"$(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc")
 	$(LN_S) $(CrossCompilePrefix)ghc-$(ProjectVersion) "$(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc"
 else
@@ -190,4 +190,3 @@ install_ghc_post: install_bins
 	$(call removeFiles,"$(DESTDIR)$(bindir)/ghc.exe")
 	"$(MV)" -f $(DESTDIR)$(bindir)/ghc-stage$(INSTALL_GHC_STAGE).exe $(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc.exe
 endif
-

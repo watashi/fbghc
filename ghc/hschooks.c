@@ -57,7 +57,7 @@ StackOverflowHook (StgWord stack_size)    /* in bytes */
 int main (int argc, char *argv[])
 {
     RtsConfig conf = defaultRtsConfig;
-#if __GLASGOW_HASKELL__ >= 710
+#ifdef STAGE2
     conf.defaultsHook = defaultsHook;
     conf.rts_opts_enabled = RtsOptsAll;
     conf.stackOverflowHook = StackOverflowHook;
