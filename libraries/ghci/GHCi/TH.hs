@@ -129,7 +129,6 @@ finishTH pipe rstate = do
   qstateref <- localRef rstate
   qstate <- readIORef qstateref
   _ <- runGHCiQ runModFinalizers qstate { qsPipe = pipe }
-  freeRemoteRef rstate
   return ()
 
 runTH
