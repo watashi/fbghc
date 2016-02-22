@@ -63,7 +63,7 @@ test('T5314', [extra_ways(extra_prof_ways)], compile_and_run, [''])
 test('T680', [], compile_and_run,
      ['-fno-full-laziness']) # Note [consistent stacks]
 
-test('T2552', [expect_broken_for(10037, opt_ways)], compile_and_run, [''])
+test('T2552', [expect_broken_for_10037], compile_and_run, [''])
 
 test('T949', [extra_ways(extra_prof_ways)], compile_and_run, [''])
 
@@ -97,8 +97,7 @@ test('T5559', [], compile_and_run, [''])
 
 test('callstack001',
      # unoptimised results are different w.r.t. CAF attribution
-     [ expect_broken_for_10037,
-       omit_ways(['ghci-ext-prof']), # produces a different stack
+     [ omit_ways(['ghci-ext-prof']), # produces a different stack
      ], compile_and_run,
      ['-fprof-auto-calls -fno-full-laziness -fno-state-hack'])
 
