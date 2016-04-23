@@ -1078,6 +1078,15 @@ AC_ARG_ENABLE(libdw,
 )
 AC_SUBST(HaveLibdw)
 
+dnl ** Have libnuma?
+dnl --------------------------------------------------------------
+AC_CHECK_HEADERS([numa.h numaif.h])
+AC_CHECK_LIB(numa, numa_available,
+        [AC_DEFINE([HAVE_LIBNUMA], [1], [Define to 1 if you have libnuma.])]
+        [])
+
+dnl ** Documentation
+dnl --------------------------------------------------------------
 if test -n "$SPHINXBUILD"; then
     BUILD_MAN=YES
     BUILD_SPHINX_HTML=YES
