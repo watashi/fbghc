@@ -710,7 +710,8 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
     n_wanted_caps = sparkPoolSizeCap(cap) + spare_threads;
     if (n_wanted_caps == 0) return;
 
-    // First grab as many free Capabilities as we can.
+    // First grab as many free Capabilities as we can.  ToDo: we should use
+    // capabilities on the same NUMA node preferably, but not exclusively.
     for (i = (cap->no + 1) % n_capabilities, n_free_caps=0;
          n_free_caps < n_wanted_caps && i != cap->no;
          i = (i + 1) % n_capabilities) {
@@ -1121,7 +1122,7 @@ scheduleHandleHeapOverflow( Capability *cap, StgTSO *t )
                                                // nursery has only one
                                                // block.
 
-            bd = allocGroup_lock(blocks);
+            bd = allocGroupOnNode_lock(cap->node,blocks);
             cap->r.rNursery->n_blocks += blocks;
 
             // link the new group after CurrentNursery
