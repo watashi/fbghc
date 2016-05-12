@@ -479,10 +479,12 @@ Bugs in GHC
    in the compiler's internal representation and can be unified producing
    unexpected results. See :ghc-ticket:`11715` for one example.
 
--  There is known to be maleficent interactions between weak references and
-   laziness. Particularly, it has been observed that placing a thunk containing
-   a reference to a weak reference inside of another weak reference may cause
-   runtime crashes. See :ghc-ticket:`11108` for details.
+-  :ghc-flag:`-XTypeInType` still has a few rough edges, especially where
+   it interacts with other advanced type-system features. For instance,
+   this definition causes the typechecker to loop (:ghc-ticket:`11559`), ::
+
+     data A :: Type where
+       B :: forall (a :: A). A
 
 .. _bugs-ghci:
 
