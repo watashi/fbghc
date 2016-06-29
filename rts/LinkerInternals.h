@@ -172,12 +172,6 @@ typedef struct _ObjectCode {
 #endif
 
     ForeignExportStablePtr *stable_ptrs;
-
-    /* Indicates whether if the .o file comes from
-       an import library. In which case we shouldn't
-       execute code from it. */
-    HsBool isImportLib;
-
 } ObjectCode;
 
 #define OC_INFORMATIVE_FILENAME(OC)             \
