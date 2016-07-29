@@ -45,6 +45,7 @@ module DynFlags (
         GhcMode(..), isOneShot,
         GhcLink(..), isNoLink,
         PackageFlag(..), PackageArg(..), ModRenaming(..),
+        ExposeFlag(..),
         IgnorePackageFlag(..), TrustFlag(..),
         PkgConfRef(..),
         Option(..), showOpt,
@@ -1170,6 +1171,16 @@ data ModRenaming = ModRenaming {
                                                --   under name @n@.
   } deriving (Eq)
 
+-- | Decides if the package should be eagerly linked when running inside
+-- the interpreter.
+-- @-package foo@ makes it eager
+-- @-expose-package foo@ makes it lazy
+-- This speeds up TH when the packages are explicitly listed. See #2437
+data ExposeFlag
+  = ExposeEager
+  | ExposeLazy
+  deriving (Eq)
+
 -- | Flags for manipulating the set of non-broken packages.
 newtype IgnorePackageFlag = IgnorePackage String -- ^ @-ignore-package@
   deriving (Eq)
@@ -1182,7 +1193,10 @@ data TrustFlag
 
 -- | Flags for manipulating packages visibility.
 data PackageFlag
-  = ExposePackage   String PackageArg ModRenaming -- ^ @-package@, @-package-id@
+  = ExposePackage   String
+                    PackageArg
+                    ExposeFlag
+                    ModRenaming -- ^ @-package@, @-package-id@
   | HidePackage     String -- ^ @-hide-package@
   deriving (Eq)
 -- NB: equality instance is used by InteractiveUI to test if
@@ -3030,6 +3044,7 @@ package_flags_deps = [
                                                   "Use -this-unit-id instead"
   , make_ord_flag defGhcFlag "this-unit-id"       (hasArg setUnitId)
   , make_ord_flag defFlag "package"               (HasArg exposePackage)
+  , make_ord_flag defFlag "expose-package"        (HasArg onlyExposePackage)
   , make_ord_flag defFlag "plugin-package-id"     (HasArg exposePluginPackageId)
   , make_ord_flag defFlag "plugin-package"        (HasArg exposePluginPackage)
   , make_ord_flag defFlag "package-id"            (HasArg exposePackageId)
@@ -4226,17 +4241,18 @@ parseModuleName = fmap mkModuleName
                 $ munch1 (\c -> isAlphaNum c || c `elem` "_.")
 
 parsePackageFlag :: String                 -- the flag
+                 -> ExposeFlag
                  -> (String -> PackageArg) -- type of argument
                  -> String                 -- string to parse
                  -> PackageFlag
-parsePackageFlag flag constr str
+parsePackageFlag flag exposeFlag constr str
  = case filter ((=="").snd) (readP_to_S parse str) of
     [(r, "")] -> r
     _ -> throwGhcException $ CmdLineError ("Can't parse package flag: " ++ str)
   where doc = flag ++ " " ++ str
         parse = do
             pkg <- tok $ munch1 (\c -> isAlphaNum c || c `elem` ":-_.")
-            let mk_expose = ExposePackage doc (constr pkg)
+            let mk_expose = ExposePackage doc (constr pkg) exposeFlag
             ( do _ <- tok $ string "with"
                  fmap (mk_expose . ModRenaming True) parseRns
              <++ fmap (mk_expose . ModRenaming False) parseRns
@@ -4254,20 +4270,23 @@ parsePackageFlag flag constr str
              return (orig, orig))
         tok m = m >>= \x -> skipSpaces >> return x
 
-exposePackage, exposePackageId, hidePackage,
+exposePackage, onlyExposePackage, exposePackageId, hidePackage,
         exposePluginPackage, exposePluginPackageId,
         ignorePackage,
         trustPackage, distrustPackage :: String -> DynP ()
-exposePackage p = upd (exposePackage' p)
+exposePackage p = upd (exposePackage' p ExposeEager)
+onlyExposePackage p = upd (exposePackage' p ExposeLazy)
 exposePackageId p =
   upd (\s -> s{ packageFlags =
-    parsePackageFlag "-package-id" UnitIdArg p : packageFlags s })
+    parsePackageFlag "-package-id" ExposeEager UnitIdArg p : packageFlags s })
 exposePluginPackage p =
   upd (\s -> s{ pluginPackageFlags =
-    parsePackageFlag "-plugin-package" PackageArg p : pluginPackageFlags s })
+    parsePackageFlag "-plugin-package" ExposeEager PackageArg p
+      : pluginPackageFlags s })
 exposePluginPackageId p =
   upd (\s -> s{ pluginPackageFlags =
-    parsePackageFlag "-plugin-package-id" UnitIdArg p : pluginPackageFlags s })
+    parsePackageFlag "-plugin-package-id" ExposeEager UnitIdArg p
+      : pluginPackageFlags s })
 hidePackage p =
   upd (\s -> s{ packageFlags = HidePackage p : packageFlags s })
 ignorePackage p =
@@ -4278,10 +4297,11 @@ trustPackage p = exposePackage p >> -- both trust and distrust also expose a pac
 distrustPackage p = exposePackage p >>
   upd (\s -> s{ trustFlags = DistrustPackage p : trustFlags s })
 
-exposePackage' :: String -> DynFlags -> DynFlags
-exposePackage' p dflags
+exposePackage' :: String -> ExposeFlag -> DynFlags -> DynFlags
+exposePackage' p exposeFlag dflags
     = dflags { packageFlags =
-            parsePackageFlag "-package" PackageArg p : packageFlags dflags }
+            parsePackageFlag "-package" exposeFlag PackageArg p
+              : packageFlags dflags }
 
 setUnitId :: String -> DynFlags -> DynFlags
 setUnitId p s =  s{ thisPackage = stringToUnitId p }
