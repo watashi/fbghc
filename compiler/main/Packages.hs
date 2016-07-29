@@ -547,7 +547,7 @@ applyPackageFlag
 
 applyPackageFlag dflags unusable no_hide_others pkgs vm flag =
   case flag of
-    ExposePackage _ arg (ModRenaming b rns) ->
+    ExposePackage _ arg _ (ModRenaming b rns) ->
        case selectPackages (matching arg) pkgs unusable of
          Left ps         -> packageFlagErr dflags flag ps
          Right (p:_,_) -> return vm'
@@ -626,7 +626,7 @@ packageFlagErr :: DynFlags
 
 -- for missing DPH package we emit a more helpful error message, because
 -- this may be the result of using -fdph-par or -fdph-seq.
-packageFlagErr dflags (ExposePackage _ (PackageArg pkg) _) []
+packageFlagErr dflags (ExposePackage _ (PackageArg pkg) _ _) []
   | is_dph_package pkg
   = throwGhcExceptionIO (CmdLineError (showSDoc dflags $ dph_err))
   where dph_err = text "the " <> text pkg <> text " package is not installed."
@@ -659,7 +659,7 @@ packageFlagErr' dflags flag_doc reasons
 pprFlag :: PackageFlag -> SDoc
 pprFlag flag = case flag of
     HidePackage p   -> text "-hide-package " <> text p
-    ExposePackage doc _ _ -> text doc
+    ExposePackage doc _ _ _ -> text doc
 
 pprTrustFlag :: TrustFlag -> SDoc
 pprTrustFlag flag = case flag of
@@ -1088,10 +1088,9 @@ mkPackageState dflags0 dbs preload0 = do
                    in fromMaybe key (Map.lookup key wired_map)
                  | f <- other_flags, p <- get_exposed f ]
 
-      get_exposed (ExposePackage _ a _) = take 1 . sortByVersion
-                                      . filter (matching a)
-                                      $ pkgs1
-      get_exposed _                 = []
+      get_exposed (ExposePackage _ a ExposeEager _)
+        = take 1 . sortByVersion . filter (matching a) $ pkgs1
+      get_exposed _ = []
 
   let pkg_db = extendPackageConfigMap emptyPackageConfigMap pkgs2
 
