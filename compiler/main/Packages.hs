@@ -733,7 +733,7 @@ applyPackageFlag
 
 applyPackageFlag dflags prec_map pkg_db unusable no_hide_others pkgs vm flag =
   case flag of
-    ExposePackage _ arg (ModRenaming b rns) ->
+    ExposePackage _ arg exposeFlag (ModRenaming b rns) ->
        case findPackages prec_map pkg_db arg pkgs unusable of
          Left ps         -> packageFlagErr dflags flag ps
          Right (p:_) -> return vm'
@@ -767,7 +767,7 @@ applyPackageFlag dflags prec_map pkg_db unusable no_hide_others pkgs vm flag =
                 , uv_renamings = rns
                 , uv_package_name = First (Just n)
                 , uv_requirements = reqs
-                , uv_explicit = True
+                , uv_explicit = exposeFlag == ExposeEager
                 }
            vm' = Map.insertWith mappend (packageConfigId p) uv vm_cleared
            -- In the old days, if you said `ghc -package p-0.1 -package p-0.2`
@@ -914,7 +914,7 @@ packageFlagErr :: DynFlags
 
 -- for missing DPH package we emit a more helpful error message, because
 -- this may be the result of using -fdph-par or -fdph-seq.
-packageFlagErr dflags (ExposePackage _ (PackageArg pkg) _) []
+packageFlagErr dflags (ExposePackage _ (PackageArg pkg) _ _) []
   | is_dph_package pkg
   = throwGhcExceptionIO (CmdLineError (showSDoc dflags $ dph_err))
   where dph_err = text "the " <> text pkg <> text " package is not installed."
@@ -947,7 +947,7 @@ packageFlagErr' dflags flag_doc reasons
 pprFlag :: PackageFlag -> SDoc
 pprFlag flag = case flag of
     HidePackage p   -> text "-hide-package " <> text p
-    ExposePackage doc _ _ -> text doc
+    ExposePackage doc _ _ _ -> text doc
 
 pprTrustFlag :: TrustFlag -> SDoc
 pprTrustFlag flag = case flag of
@@ -1533,7 +1533,6 @@ mkPackageState dflags dbs preload0 = do
   let explicit_pkgs = Map.keys vis_map
       req_ctx = Map.map (Set.toList)
               $ Map.unionsWith Set.union (map uv_requirements (Map.elems vis_map))
-
 
   let preload2 = preload1
 
