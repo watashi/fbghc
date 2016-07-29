@@ -387,7 +387,7 @@ printClosure( StgClosure *obj )
 
     case COMPACT_NFDATA:
         debugBelch("COMPACT_NFDATA(size=%" FMT_Word ")\n",
-                   (W_)((StgCompactNFData *)obj)->totalDataW * sizeof(W_));
+                   (W_)((StgCompactNFData *)obj)->totalW * sizeof(W_));
         break;
 
 

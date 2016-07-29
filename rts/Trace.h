@@ -62,6 +62,7 @@ extern int DEBUG_linker;
 extern int DEBUG_squeeze;
 extern int DEBUG_hpc;
 extern int DEBUG_sparks;
+extern int DEBUG_compact;
 
 // events
 extern int TRACE_sched;

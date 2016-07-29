@@ -217,7 +217,7 @@ checkClosure( StgClosure* p )
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
 
-    p = UNTAG_CONST_CLOSURE(p);
+    p = UNTAG_CLOSURE(p);
 
     info = p->header.info;
 
@@ -273,6 +273,7 @@ checkClosure( StgClosure* p )
     case TVAR:
     case THUNK_STATIC:
     case FUN_STATIC:
+    case COMPACT_NFDATA:
         {
             nat i;
             for (i = 0; i < info->layout.payload.ptrs; i++) {
@@ -870,7 +871,8 @@ genBlocks (generation *gen)
     ASSERT(countCompactBlocks(gen->compact_blocks_in_import) == gen->n_compact_blocks_in_import);
     return gen->n_blocks + gen->n_old_blocks +
         countAllocdBlocks(gen->large_objects) +
-        gen->n_compact_blocks + gen->n_compact_blocks_in_import;
+        countAllocdCompactBlocks(gen->compact_objects) +
+        countAllocdCompactBlocks(gen->compact_blocks_in_import);
 }
 
 void

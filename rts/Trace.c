@@ -43,6 +43,7 @@ int DEBUG_linker;
 int DEBUG_squeeze;
 int DEBUG_hpc;
 int DEBUG_sparks;
+int DEBUG_compact;
 #endif
 
 // events
