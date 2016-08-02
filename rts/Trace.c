@@ -52,6 +52,7 @@ int TRACE_gc;
 int TRACE_spark_sampled;
 int TRACE_spark_full;
 int TRACE_user;
+int TRACE_cap;
 
 #ifdef THREADED_RTS
 static Mutex trace_utx;
@@ -114,6 +115,14 @@ void initTracing (void)
 
     TRACE_user =
         RtsFlags.TraceFlags.user;
+
+    // We trace cap events if we're tracing anything else
+    TRACE_cap =
+        TRACE_sched ||
+        TRACE_gc ||
+        TRACE_spark_sampled ||
+        TRACE_spark_full ||
+        TRACE_user;
 
     eventlog_enabled = RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG;
 
@@ -379,8 +388,8 @@ void traceEventGcStats_  (Capability *cap,
     }
 }
 
-void traceCapEvent (Capability   *cap,
-                    EventTypeNum  tag)
+void traceCapEvent_ (Capability   *cap,
+                     EventTypeNum  tag)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
@@ -411,9 +420,9 @@ void traceCapEvent (Capability   *cap,
     }
 }
 
-void traceCapsetEvent (EventTypeNum tag,
-                       CapsetID     capset,
-                       StgWord      info)
+void traceCapsetEvent_ (EventTypeNum tag,
+                        CapsetID     capset,
+                        StgWord      info)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_sched)
