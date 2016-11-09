@@ -122,8 +122,7 @@ printClosure( StgClosure *obj )
     case CONSTR:
     case CONSTR_1_0: case CONSTR_0_1:
     case CONSTR_1_1: case CONSTR_0_2: case CONSTR_2_0:
-    case CONSTR_STATIC:
-    case CONSTR_NOCAF_STATIC:
+    case CONSTR_NOCAF:
         {
             StgWord i, j;
             StgConInfoTable *con_info = get_con_itbl (obj);
@@ -833,8 +832,7 @@ void prettyPrintClosure_ (StgClosure *obj)
         case CONSTR_1_1:
         case CONSTR_0_2:
         case CONSTR_2_0:
-        case CONSTR_STATIC:
-        case CONSTR_NOCAF_STATIC:
+        case CONSTR_NOCAF:
         {
            nat i;
            char *descriptor;
@@ -903,8 +901,7 @@ char *closure_type_names[] = {
  [CONSTR_2_0]            = "CONSTR_2_0",
  [CONSTR_1_1]            = "CONSTR_1_1",
  [CONSTR_0_2]            = "CONSTR_0_2",
- [CONSTR_STATIC]         = "CONSTR_STATIC",
- [CONSTR_NOCAF_STATIC]   = "CONSTR_NOCAF_STATIC",
+ [CONSTR_NOCAF]          = "CONSTR_NOCAF",
  [FUN]                   = "FUN",
  [FUN_1_0]               = "FUN_1_0",
  [FUN_0_1]               = "FUN_0_1",

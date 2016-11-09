@@ -18,10 +18,8 @@ module CLabel (
         mkEntryLabel,
         mkSlowEntryLabel,
         mkConEntryLabel,
-        mkStaticConEntryLabel,
         mkRednCountsLabel,
         mkConInfoTableLabel,
-        mkStaticInfoTableLabel,
         mkLargeSRTLabel,
         mkApEntryLabel,
         mkApInfoTableLabel,
@@ -31,9 +29,7 @@ module CLabel (
         mkLocalInfoTableLabel,
         mkLocalEntryLabel,
         mkLocalConEntryLabel,
-        mkLocalStaticConEntryLabel,
         mkLocalConInfoTableLabel,
-        mkLocalStaticInfoTableLabel,
         mkLocalClosureTableLabel,
 
         mkReturnPtLabel,
@@ -302,8 +298,6 @@ data IdLabelInfo
 
   | ConEntry            -- ^ Constructor entry point
   | ConInfoTable        -- ^ Corresponding info table
-  | StaticConEntry      -- ^ Static constructor entry point
-  | StaticInfoTable     -- ^ Corresponding info table
 
   | ClosureTable        -- ^ Table of closures for Enum tycons
 
@@ -391,25 +385,17 @@ mkEntryLabel                :: Name -> CafInfo -> CLabel
 mkClosureTableLabel         :: Name -> CafInfo -> CLabel
 mkLocalConInfoTableLabel    :: CafInfo -> Name -> CLabel
 mkLocalConEntryLabel        :: CafInfo -> Name -> CLabel
-mkLocalStaticInfoTableLabel :: CafInfo -> Name -> CLabel
-mkLocalStaticConEntryLabel  :: CafInfo -> Name -> CLabel
 mkConInfoTableLabel         :: Name -> CafInfo -> CLabel
-mkStaticInfoTableLabel      :: Name -> CafInfo -> CLabel
 mkClosureLabel name         c     = IdLabel name c Closure
 mkInfoTableLabel name       c     = IdLabel name c InfoTable
 mkEntryLabel name           c     = IdLabel name c Entry
 mkClosureTableLabel name    c     = IdLabel name c ClosureTable
 mkLocalConInfoTableLabel    c con = IdLabel con c ConInfoTable
 mkLocalConEntryLabel        c con = IdLabel con c ConEntry
-mkLocalStaticInfoTableLabel c con = IdLabel con c StaticInfoTable
-mkLocalStaticConEntryLabel  c con = IdLabel con c StaticConEntry
 mkConInfoTableLabel name    c     = IdLabel name c ConInfoTable
-mkStaticInfoTableLabel name c     = IdLabel name c StaticInfoTable
 
 mkConEntryLabel       :: Name -> CafInfo -> CLabel
-mkStaticConEntryLabel :: Name -> CafInfo -> CLabel
 mkConEntryLabel name        c     = IdLabel name c ConEntry
-mkStaticConEntryLabel name  c     = IdLabel name c StaticConEntry
 
 -- Constructing Cmm Labels
 mkDirty_MUT_VAR_Label, mkSplitMarkerLabel, mkUpdInfoLabel,
@@ -589,7 +575,6 @@ toSlowEntryLbl l = pprPanic "toSlowEntryLbl" (ppr l)
 toEntryLbl :: CLabel -> CLabel
 toEntryLbl (IdLabel n c LocalInfoTable)  = IdLabel n c LocalEntry
 toEntryLbl (IdLabel n c ConInfoTable)    = IdLabel n c ConEntry
-toEntryLbl (IdLabel n c StaticInfoTable) = IdLabel n c StaticConEntry
 toEntryLbl (IdLabel n c _)               = IdLabel n c Entry
 toEntryLbl (CaseLabel n CaseReturnInfo)  = CaseLabel n CaseReturnPt
 toEntryLbl (CmmLabel m str CmmInfo)      = CmmLabel m str CmmEntry
@@ -600,7 +585,6 @@ toInfoLbl :: CLabel -> CLabel
 toInfoLbl (IdLabel n c Entry)          = IdLabel n c InfoTable
 toInfoLbl (IdLabel n c LocalEntry)     = IdLabel n c LocalInfoTable
 toInfoLbl (IdLabel n c ConEntry)       = IdLabel n c ConInfoTable
-toInfoLbl (IdLabel n c StaticConEntry) = IdLabel n c StaticInfoTable
 toInfoLbl (IdLabel n c _)              = IdLabel n c InfoTable
 toInfoLbl (CaseLabel n CaseReturnPt)   = CaseLabel n CaseReturnInfo
 toInfoLbl (CmmLabel m str CmmEntry)    = CmmLabel m str CmmInfo
@@ -856,7 +840,6 @@ idInfoLabelType info =
     LocalInfoTable -> DataLabel
     Closure       -> GcPtrLabel
     ConInfoTable  -> DataLabel
-    StaticInfoTable -> DataLabel
     ClosureTable  -> DataLabel
     RednCounts    -> DataLabel
     _             -> CodeLabel
@@ -1143,8 +1126,6 @@ ppIdFlavor x = pp_cSEP <>
                        RednCounts       -> text "ct"
                        ConEntry         -> text "con_entry"
                        ConInfoTable     -> text "con_info"
-                       StaticConEntry   -> text "static_entry"
-                       StaticInfoTable  -> text "static_info"
                        ClosureTable     -> text "closure_tbl"
                       )
 

@@ -213,7 +213,13 @@ thread_static( StgClosure* p )
     case FUN_STATIC:
         p = *FUN_STATIC_LINK(p);
         continue;
-    case CONSTR_STATIC:
+    case CONSTR:
+    case CONSTR_NOCAF:
+    case CONSTR_1_0:
+    case CONSTR_0_1:
+    case CONSTR_2_0:
+    case CONSTR_1_1:
+    case CONSTR_0_2:
         p = *STATIC_LINK(info,p);
         continue;
 
@@ -608,6 +614,7 @@ thread_obj (StgInfoTable *info, StgPtr p)
 
     case FUN:
     case CONSTR:
+    case CONSTR_NOCAF:
     case PRIM:
     case MUT_PRIM:
     case MUT_VAR_CLEAN:
