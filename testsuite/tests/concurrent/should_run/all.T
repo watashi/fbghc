@@ -272,7 +272,7 @@ test('hs_try_putmvar002',
      extra_run_opts('1 8 10000')
      ],
      compile_and_run,
-     ['hs_try_putmvar002_c.c'])
+     ['hs_try_putmvar002_c.c -optc-std=c99'])
 
 # Another benchmark for hs_try_putmvar() vs. foreign export
 test('hs_try_putmvar003',
