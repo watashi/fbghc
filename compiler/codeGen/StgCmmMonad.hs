@@ -15,7 +15,7 @@ module StgCmmMonad (
         returnFC, fixC,
         newUnique, newUniqSupply,
 
-        newLabelC, emitLabel,
+        emitLabel,
 
         emit, emitDecl, emitProc,
         emitProcWithConvention, emitProcWithStackFrame,
@@ -748,11 +748,6 @@ emitAssign l r = emitCgStmt (CgStmt (CmmAssign l r))
 emitStore :: CmmExpr  -> CmmExpr -> FCode ()
 emitStore l r = emitCgStmt (CgStmt (CmmStore l r))
 
-
-newLabelC :: FCode BlockId
-newLabelC = do { u <- newUnique
-               ; return $ mkBlockId u }
-
 emit :: CmmAGraph -> FCode ()
 emit ag
   = do  { state <- getState
@@ -805,7 +800,7 @@ emitProc_ :: Maybe CmmInfoTable -> CLabel -> [GlobalReg] -> CmmAGraphScoped
           -> Int -> Bool -> FCode ()
 emitProc_ mb_info lbl live blocks offset do_layout
   = do  { dflags <- getDynFlags
-        ; l <- newLabelC
+        ; l <- newBlockId
         ; let
               blks = labelAGraph l blocks
 
@@ -838,23 +833,23 @@ getCmm code
 mkCmmIfThenElse :: CmmExpr -> CmmAGraph -> CmmAGraph -> FCode CmmAGraph
 mkCmmIfThenElse e tbranch fbranch = do
   tscp  <- getTickScope
-  endif <- newLabelC
-  tid   <- newLabelC
-  fid   <- newLabelC
+  endif <- newBlockId
+  tid   <- newBlockId
+  fid   <- newBlockId
   return $ catAGraphs [ mkCbranch e tid fid Nothing
                       , mkLabel tid tscp, tbranch, mkBranch endif
                       , mkLabel fid tscp, fbranch, mkLabel endif tscp ]
 
 mkCmmIfGoto :: CmmExpr -> BlockId -> FCode CmmAGraph
 mkCmmIfGoto e tid = do
-  endif <- newLabelC
+  endif <- newBlockId
   tscp  <- getTickScope
   return $ catAGraphs [ mkCbranch e tid endif Nothing, mkLabel endif tscp ]
 
 mkCmmIfThen :: CmmExpr -> CmmAGraph -> FCode CmmAGraph
 mkCmmIfThen e tbranch = do
-  endif <- newLabelC
-  tid   <- newLabelC
+  endif <- newBlockId
+  tid   <- newBlockId
   tscp  <- getTickScope
   return $ catAGraphs [ mkCbranch e tid endif Nothing
                       , mkLabel tid tscp, tbranch, mkLabel endif tscp ]
@@ -864,7 +859,7 @@ mkCall :: CmmExpr -> (Convention, Convention) -> [CmmFormal] -> [CmmActual]
        -> UpdFrameOffset -> [CmmActual] -> FCode CmmAGraph
 mkCall f (callConv, retConv) results actuals updfr_off extra_stack = do
   dflags <- getDynFlags
-  k      <- newLabelC
+  k      <- newBlockId
   tscp   <- getTickScope
   let area = Young k
       (off, _, copyin) = copyInOflow dflags retConv area results []
@@ -882,5 +877,5 @@ mkCmmCall f results actuals updfr_off
 
 aGraphToGraph :: CmmAGraphScoped -> FCode CmmGraph
 aGraphToGraph stmts
-  = do  { l <- newLabelC
+  = do  { l <- newBlockId
         ; return (labelAGraph l stmts) }
