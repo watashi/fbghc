@@ -39,6 +39,7 @@ module DynFlags (
         DynFlags(..),
         FlagSpec(..),
         HasDynFlags(..), ContainsDynFlags(..),
+        OverridingBool(..), overrideWith,
         RtsOptsEnabled(..),
         HscTarget(..), isObjectTarget, defaultObjectTarget,
         targetRetainsAllBindings,
@@ -850,7 +851,9 @@ data DynFlags = DynFlags {
   pprCols               :: Int,
   traceLevel            :: Int, -- Standard level is 1. Less verbose is 0.
 
-  useUnicode      :: Bool,
+  useUnicode            :: Bool,
+  useColor              :: OverridingBool,
+  canUseColor           :: Bool,
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
@@ -1240,6 +1243,17 @@ data DynLibLoader
 data RtsOptsEnabled = RtsOptsNone | RtsOptsSafeOnly | RtsOptsAll
   deriving (Show)
 
+data OverridingBool
+  = Auto
+  | Always
+  | Never
+  deriving Show
+
+overrideWith :: Bool -> OverridingBool -> Bool
+overrideWith b Auto   = b
+overrideWith _ Always = True
+overrideWith _ Never  = False
+
 -----------------------------------------------------------------------------
 -- Ways
 
@@ -1441,6 +1455,7 @@ initDynFlags dflags = do
                           do str' <- peekCString enc cstr
                              return (str == str'))
                          `catchIOError` \_ -> return False
+ canUseColor <- return False -- FIXME: Not implemented
  return dflags{
         canGenerateDynamicToo = refCanGenerateDynamicToo,
         nextTempSuffix = refNextTempSuffix,
@@ -1450,6 +1465,7 @@ initDynFlags dflags = do
         generatedDumps = refGeneratedDumps,
         nextWrapperNum = wrapperNum,
         useUnicode    = canUseUnicode,
+        canUseColor   = canUseColor,
         rtldInfo      = refRtldInfo,
         rtccInfo      = refRtccInfo
         }
@@ -1604,6 +1620,8 @@ defaultDynFlags mySettings =
         pprCols = 100,
         useUnicode = False,
         traceLevel = 1,
+        useColor = Auto,
+        canUseColor = False,
         profAuto = NoProfAuto,
         interactivePrint = Nothing,
         nextWrapperNum = panic "defaultDynFlags: No nextWrapperNum",
@@ -2595,6 +2613,13 @@ dynamic_flags_deps = [
                                                              d { pprCols = n }))
   , make_ord_flag defGhcFlag "dtrace-level"  (intSuffix (\n d ->
                                                           d { traceLevel = n }))
+  , make_ord_flag defFlag "fdiagnostics-color=auto"
+      (NoArg (upd (\d -> d { useColor = Auto })))
+  , make_ord_flag defFlag "fdiagnostics-color=always"
+      (NoArg (upd (\d -> d { useColor = Always })))
+  , make_ord_flag defFlag "fdiagnostics-color=never"
+      (NoArg (upd (\d -> d { useColor = Never })))
+
   -- Suppress all that is suppressable in core dumps.
   -- Except for uniques, as some simplifier phases introduce new variables that
   -- have otherwise identical names.
