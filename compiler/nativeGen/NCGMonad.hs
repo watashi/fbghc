@@ -99,6 +99,14 @@ instance Monad NatM where
   (>>=) = thenNat
   return = pure
 
+instance MonadUnique NatM where
+  getUniqueSupplyM = NatM $ \st ->
+      case splitUniqSupply (natm_us st) of
+          (us1, us2) -> (us1, st {natm_us = us2})
+
+  getUniqueM = NatM $ \st ->
+      case takeUniqFromSupply (natm_us st) of
+          (uniq, us') -> (uniq, st {natm_us = us'})
 
 thenNat :: NatM a -> (a -> NatM b) -> NatM b
 thenNat expr cont
