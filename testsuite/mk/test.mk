@@ -50,6 +50,12 @@ ifeq "$(MinGhcVersion711)" "YES"
 TEST_HC_OPTS += -fno-warn-missed-specialisations
 endif
 
+ifeq "$(MinGhcVersion801)" "YES"
+# Turn off any VT800 codes in the output or they wreak havoc on the
+# testsuite output.
+TEST_HC_OPTS += -fdiagnostics-color=never
+endif
+
 TEST_HC_OPTS_INTERACTIVE = $(TEST_HC_OPTS) --interactive -v0 -ignore-dot-ghci
 
 RUNTEST_OPTS =
