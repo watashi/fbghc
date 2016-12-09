@@ -33,9 +33,10 @@ prep:
 	cp p1/A2.hs p1/A.hs
 	cd p1 && ./setup build -v0
 
+
 prep.%:
 	cd $* && "$(TEST_HC)" $(TEST_HC_OPTS_NO_RECOMP) -v0 --make -o setup Setup.hs
-	cd $* && ./setup configure $(CABAL_MINIMAL_BUILD) -v0 --with-compiler="$(TEST_HC)" --with-hc-pkg="$(GHC_PKG)" --package-db=../$(LOCAL_PKGCONF)
+	cd $* && ./setup configure $(CABAL_MINIMAL_BUILD) -v0 --with-compiler="$(TEST_HC)" --ghc-options="$(TEST_HC_OPTS_NO_RECOMP)" --with-hc-pkg="$(GHC_PKG)" --package-db=../$(LOCAL_PKGCONF)
 	cd $* && ./setup build -v0
 	cd $* && ./setup register -v0 --inplace
 
