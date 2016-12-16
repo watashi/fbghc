@@ -157,6 +157,10 @@ tcTyClGroup tyclds
                  -- Kind and type check declarations for this group
              mapM (tcTyClDecl rec_flags) decls }
 
+       ; traceTc "Starting family consistency check" (ppr tyclss)
+       ; forM_ tyclss checkRecFamInstConsistency
+       ; traceTc "Done family consistency" (ppr tyclss)
+
            -- Step 3: Perform the validity check
            -- We can do this now because we are done with the recursive knot
            -- Do it before Step 4 (adding implicit things) because the latter
