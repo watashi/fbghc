@@ -54,6 +54,7 @@ ifeq "$(MinGhcVersion801)" "YES"
 # Turn off any VT800 codes in the output or they wreak havoc on the
 # testsuite output.
 TEST_HC_OPTS += -fdiagnostics-color=never
+TEST_HC_OPTS += -fno-diagnostics-show-caret
 endif
 
 TEST_HC_OPTS_INTERACTIVE = $(TEST_HC_OPTS) --interactive -v0 -ignore-dot-ghci

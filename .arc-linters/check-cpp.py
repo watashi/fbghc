@@ -26,9 +26,9 @@ logger.debug(sys.argv)
 path = sys.argv[1]
 warnings = []
 if os.path.isfile(path):
-    with open(path) as f:
+    with open(path, 'rb') as f:
         for lineno, line in enumerate(f):
-            if re.search('ASSERT \(', line) is not None:
+            if re.search(rb'ASSERT \(', line) is not None:
                 warning = {
                     'severity': 'warning',
                     'message': 'CPP macros should not have a space between the macro name and their argument list',
