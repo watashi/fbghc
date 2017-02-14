@@ -478,7 +478,7 @@ LOC this information will end up in is Y.
 -}
 
 -- | A label associated with an 'UnwindTable'
-data UnwindPoint = UnwindPoint !Label !UnwindTable
+data UnwindPoint = UnwindPoint !CLabel !UnwindTable
 
 instance Outputable UnwindPoint where
   ppr (UnwindPoint lbl uws) =

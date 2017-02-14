@@ -67,6 +67,7 @@ import Outputable
 import FastString
 import DynFlags
 import Util
+import UniqSupply       ( getUniqueM )
 
 import Control.Monad
 import Data.Bits
@@ -161,7 +162,7 @@ addSpUnwindings :: Instr -> NatM (OrdList Instr)
 addSpUnwindings instr@(DELTA d) = do
     dflags <- getDynFlags
     if debugLevel dflags >= 1
-        then do lbl <- newBlockId
+        then do lbl <- mkAsmTempLabel <$> getUniqueM
                 let unwind = M.singleton MachSp (Just $ UwReg MachSp $ negate d)
                 return $ toOL [ instr, UNWIND lbl unwind ]
         else return (unitOL instr)
@@ -187,7 +188,7 @@ stmtToInstrs stmt = do
       case foldMap to_unwind_entry regs of
         tbl | M.null tbl -> return nilOL
             | otherwise  -> do
-                lbl <- newBlockId
+                lbl <- mkAsmTempLabel <$> getUniqueM
                 return $ unitOL $ UNWIND lbl tbl
 
     CmmAssign reg src
