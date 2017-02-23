@@ -2,6 +2,10 @@ TOP=../../..
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
+T13317:
+	$(RM) -f T13317.o T13317.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) $(T8832_WORDSIZE_OPTS) -O -c -ddump-simpl-stats T13317.hs | grep 'KnownBranch'
+
 T8832:
 	$(RM) -f T8832.o T8832.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) $(T8832_WORDSIZE_OPTS) -O -c -ddump-simpl T8832.hs | grep '^[a-zA-Z0-9]\+ ='
