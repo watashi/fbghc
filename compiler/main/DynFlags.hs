@@ -496,6 +496,7 @@ data GeneralFlag
    | Opt_ExternalInterpreter
    | Opt_VersionMacros
    | Opt_OptimalApplicativeDo
+   | Opt_WholeArchiveHsLibs
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -3449,7 +3450,8 @@ fFlagsDeps = [
   flagSpec "vectorise"                        Opt_Vectorise,
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
-  flagSpec "show-warning-groups"              Opt_ShowWarnGroups
+  flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
+  flagSpec "whole-archive-hs-libs"            Opt_WholeArchiveHsLibs
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
