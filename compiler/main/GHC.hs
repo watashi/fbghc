@@ -29,7 +29,7 @@ module GHC (
         GhcMode(..), GhcLink(..), defaultObjectTarget,
         parseDynamicFlags,
         getSessionDynFlags, setSessionDynFlags,
-        getProgramDynFlags, setProgramDynFlags,
+        getProgramDynFlags, setProgramDynFlags, setLogAction,
         getInteractiveDynFlags, setInteractiveDynFlags,
         parseStaticFlags,
 
@@ -591,14 +591,33 @@ setSessionDynFlags dflags = do
   invalidateModSummaryCache
   return preload
 
--- | Sets the program 'DynFlags'.
+-- | Sets the program 'DynFlags'.  Note: this invalidates the internal
+-- cached module graph, causing more work to be done the next time
+-- 'load' is called.
 setProgramDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
-setProgramDynFlags dflags = do
+setProgramDynFlags dflags = setProgramDynFlags_ True dflags
+
+-- | Set the action taken when the compiler produces a message.  This
+-- can also be accomplished using 'setProgramDynFlags', but using
+-- 'setLogAction' avoids invalidating the cached module graph.
+setLogAction :: GhcMonad m => LogAction -> m ()
+setLogAction action = do
+  dflags' <- getProgramDynFlags
+  void $ setProgramDynFlags_ False $
+    dflags' { log_action = action }
+
+setProgramDynFlags_ :: GhcMonad m => Bool -> DynFlags -> m [UnitId]
+setProgramDynFlags_ invalidate_needed dflags = do
   dflags' <- checkNewDynFlags dflags
-  (dflags'', preload) <- liftIO $ initPackages dflags'
+  dflags_prev <- getProgramDynFlags
+  (dflags'', preload) <-
+    if (packageFlagsChanged dflags_prev dflags')
+       then liftIO $ initPackages dflags'
+       else return (dflags', [])
   modifySession $ \h -> h{ hsc_dflags = dflags'' }
-  invalidateModSummaryCache
+  when invalidate_needed $ invalidateModSummaryCache
   return preload
+
 
 -- When changing the DynFlags, we want the changes to apply to future
 -- loads, but without completely discarding the program.  But the
