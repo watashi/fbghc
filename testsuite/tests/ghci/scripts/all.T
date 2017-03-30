@@ -92,6 +92,7 @@ test('ghci056',
 
 test('ghci057', extra_hc_opts('-fwarn-tabs'), ghci_script, ['ghci057.script'])
 test('ghci062', extra_ways(['ghci-ext']), ghci_script, ['ghci062.script'])
+test('ghci063', normal, ghci_script, ['ghci063.script'])
 
 test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
