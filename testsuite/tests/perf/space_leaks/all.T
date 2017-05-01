@@ -57,10 +57,10 @@ test('T4018',
 
 test('T4029',
      [stats_num_field('peak_megabytes_allocated',
-          [(wordsize(64), 66, 10)]),
+          [(wordsize(64), 55, 10)]),
             # 2016-02-26: 66 (amd64/Linux)           INITIAL
       stats_num_field('max_bytes_used',
-          [(wordsize(64), 21863296, 5)])
+          [(wordsize(64), 19461712, 5)])
             # 2016-02-26: 24071720 (amd64/Linux)     INITIAL
             # 2016-09-05: 21863296 (amd64/Linux)     Fix laziness of instance visibility check
       ],
