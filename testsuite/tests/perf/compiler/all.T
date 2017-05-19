@@ -828,8 +828,9 @@ test('T12227',
 
 test('T13719',
      [ compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 49907410784, 10),
+          [(wordsize(64), 5187889872, 10),
           # initial:    49907410784
+          # 2017-05-31: 5187889872   Faster checkFamInstConsistency
           ]),
        pre_cmd('./genT13719'),
        extra_files(['genT13719']),
