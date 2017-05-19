@@ -625,17 +625,20 @@ foldModuleEnv f x (ModuleEnv e) = Map.foldRightWithKey (\_ v -> f v) x e
 -- | A set of 'Module's
 type ModuleSet = Set NDModule
 
-mkModuleSet     :: [Module] -> ModuleSet
-extendModuleSet :: ModuleSet -> Module -> ModuleSet
-emptyModuleSet  :: ModuleSet
-moduleSetElts   :: ModuleSet -> [Module]
-elemModuleSet   :: Module -> ModuleSet -> Bool
+mkModuleSet :: [Module] -> ModuleSet
+mkModuleSet = Set.fromList . coerce
 
-emptyModuleSet    = Set.empty
-mkModuleSet       = Set.fromList . coerce
+extendModuleSet :: ModuleSet -> Module -> ModuleSet
 extendModuleSet s m = Set.insert (NDModule m) s
-moduleSetElts     = sort . coerce . Set.toList
-elemModuleSet     = Set.member . coerce
+
+emptyModuleSet :: ModuleSet
+emptyModuleSet = Set.empty
+
+moduleSetElts :: ModuleSet -> [Module]
+moduleSetElts = sort . coerce . Set.toList
+
+elemModuleSet :: Module -> ModuleSet -> Bool
+elemModuleSet = Set.member . coerce
 
 {-
 A ModuleName has a Unique, so we can build mappings of these using
