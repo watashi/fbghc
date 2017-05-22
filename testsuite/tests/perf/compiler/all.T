@@ -825,3 +825,14 @@ test('T12227',
      compile,
      # Use `-M1G` to prevent memory thrashing with ghc-8.0.1.
      ['-O2 -ddump-hi -ddump-to-file +RTS -M1G'])
+
+test('T13719',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 49907410784, 10),
+          # initial:    49907410784
+          ]),
+       pre_cmd('./genT13719'),
+       extra_files(['genT13719']),
+     ],
+     multimod_compile,
+     ['T13719', '-v0'])
