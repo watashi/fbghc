@@ -347,6 +347,7 @@ import qualified Parser
 import Lexer
 import ApiAnnotation
 import qualified GHC.LanguageExtensions as LangExt
+import Data.Set (Set)
 
 import System.Directory ( doesFileExist )
 import Data.Maybe
@@ -1460,7 +1461,7 @@ isModuleTrusted m = withSession $ \hsc_env ->
     liftIO $ hscCheckSafe hsc_env m noSrcSpan
 
 -- | Return if a module is trusted and the pkgs it depends on to be trusted.
-moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [UnitId])
+moduleTrustReqs :: GhcMonad m => Module -> m (Bool, Set UnitId)
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 

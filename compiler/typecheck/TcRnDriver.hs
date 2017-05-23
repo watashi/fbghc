@@ -110,6 +110,8 @@ import Bag
 import Inst (tcGetInsts)
 import qualified GHC.LanguageExtensions as LangExt
 
+import qualified Data.Set as S
+
 import Control.Monad
 
 #include "HsVersions.h"
@@ -2472,7 +2474,7 @@ pprTcGblEnv (TcGblEnv { tcg_type_env  = type_env,
          , text "Dependent modules:" <+>
                 ppr (sortBy cmp_mp $ eltsUFM (imp_dep_mods imports))
          , text "Dependent packages:" <+>
-                ppr (sortBy stableUnitIdCmp $ imp_dep_pkgs imports)]
+                ppr (S.toList $ imp_dep_pkgs imports)]
   where         -- The two uses of sortBy are just to reduce unnecessary
                 -- wobbling in testsuite output
     cmp_mp (mod_name1, is_boot1) (mod_name2, is_boot2)
