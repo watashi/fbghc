@@ -77,7 +77,7 @@ module Module
         -- * Sets of Modules
         ModuleSet,
         emptyModuleSet, mkModuleSet, moduleSetElts,
-        extendModuleSet, extendModuleSetList,
+        extendModuleSet, extendModuleSetList, delModuleSet,
         elemModuleSet, intersectModuleSet, minusModuleSet, unionModuleSet,
         unitModuleSet
     ) where
@@ -651,6 +651,9 @@ intersectModuleSet = coerce Set.intersection
 
 minusModuleSet :: ModuleSet -> ModuleSet -> ModuleSet
 minusModuleSet = coerce Set.difference
+
+delModuleSet :: ModuleSet -> Module -> ModuleSet
+delModuleSet = coerce (flip Set.delete)
 
 unionModuleSet :: ModuleSet -> ModuleSet -> ModuleSet
 unionModuleSet = coerce Set.union

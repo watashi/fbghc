@@ -126,9 +126,11 @@ depanal excluded_mods allow_dup_roots = do
     -- cached finder data.
     liftIO $ flushFinderCaches hsc_env
 
-    mod_graphE <- liftIO $ downsweep hsc_env old_graph
+    mod_summariesE <- liftIO $ downsweep hsc_env (mgModSummaries old_graph)
                                      excluded_mods allow_dup_roots
-    mod_graph <- reportImportErrors mod_graphE
+    mod_summaries <- reportImportErrors mod_summariesE
+
+    let mod_graph = mkModuleGraph mod_summaries
     modifySession $ \_ -> hsc_env { hsc_mod_graph = mod_graph }
     return mod_graph
 
@@ -171,7 +173,7 @@ load how_much = do
     -- (see msDeps)
     let all_home_mods =
           mkUniqSet [ ms_mod_name s
-                    | s <- mod_graph, not (isBootSummary s)]
+                    | s <- mgModSummaries mod_graph, not (isBootSummary s)]
     -- TODO: Figure out what the correct form of this assert is. It's violated
     -- when you have HsBootMerge nodes in the graph: then you'll have hs-boot
     -- files without corresponding hs files.
@@ -343,7 +345,7 @@ load how_much = do
           let no_hs_main = gopt Opt_NoHsMain dflags
           let
             main_mod = mainModIs dflags
-            a_root_is_Main = any ((==main_mod).ms_mod) mod_graph
+            a_root_is_Main = mgElemModule mod_graph main_mod
             do_linking = a_root_is_Main || no_hs_main || ghcLink dflags == LinkDynLib || ghcLink dflags == LinkStaticLib
 
           -- link everything together
@@ -468,8 +470,7 @@ guessOutputFile = modifySession $ \env ->
         !mod_graph = hsc_mod_graph env
         mainModuleSrcPath :: Maybe String
         mainModuleSrcPath = do
-            let isMain = (== mainModIs dflags) . ms_mod
-            [ms] <- return (filter isMain mod_graph)
+            ms <- mgLookupModule mod_graph (mainModIs dflags)
             ml_hs_file (ms_location ms)
         name = fmap dropExtension mainModuleSrcPath
 
@@ -811,13 +812,19 @@ parUpsweep n_jobs old_hpt stable_mods cleanup sccs = do
     -- The list of all loops in the compilation graph.
     -- NB: For convenience, the last module of each loop (aka the module that
     -- finishes the loop) is prepended to the beginning of the loop.
-    let comp_graph_loops = go (map fstOf3 (reverse comp_graph))
+    let graph = map fstOf3 (reverse comp_graph)
+        boot_modules = mkModuleSet [ms_mod ms | ms <- graph, isBootSummary ms]
+        comp_graph_loops = go graph boot_modules
           where
-            go [] = []
-            go (ms:mss) | Just loop <- getModLoop ms (ms:mss)
-                        = map mkBuildModule (ms:loop) : go mss
-                        | otherwise
-                        = go mss
+            remove ms bm
+              | isBootSummary ms = delModuleSet bm (ms_mod ms)
+              | otherwise = bm
+            go [] _ = []
+            go mg@(ms:mss) boot_modules
+              | Just loop <- getModLoop ms mg (`elemModuleSet` boot_modules)
+              = map mkBuildModule (ms:loop) : go mss (remove ms boot_modules)
+              | otherwise
+              = go mss (remove ms boot_modules)
 
     -- Build a Map out of the compilation graph with which we can efficiently
     -- look up the result MVar associated with a particular home module.
@@ -1139,10 +1146,18 @@ upsweep
        --  3. A list of modules which succeeded loading.
 
 upsweep old_hpt stable_mods cleanup sccs = do
-   (res, done) <- upsweep' old_hpt [] sccs 1 (length sccs)
-   return (res, reverse done)
+   (res, done) <- upsweep' old_hpt emptyMG sccs 1 (length sccs)
+   return (res, reverse $ mgModSummaries done)
  where
 
+  upsweep'
+    :: GhcMonad m
+    => HomePackageTable
+    -> ModuleGraph
+    -> [SCC ModSummary]
+    -> Int
+    -> Int
+    -> m (SuccessFlag, ModuleGraph)
   upsweep' _old_hpt done
      [] _ _
    = return (Succeeded, done)
@@ -1192,7 +1207,7 @@ upsweep old_hpt stable_mods cleanup sccs = do
                     old_hpt1 | isBootSummary mod = old_hpt
                              | otherwise = delFromUFM old_hpt this_mod
 
-                    done' = mod:done
+                    done' = extendMG done mod
 
                         -- fixup our HomePackageTable after we've finished compiling
                         -- a mutually-recursive loop.  See reTypecheckLoop, below.
@@ -1424,16 +1439,23 @@ Following this fix, GHC can compile itself with --make -O2.
 
 reTypecheckLoop :: HscEnv -> ModSummary -> ModuleGraph -> IO HscEnv
 reTypecheckLoop hsc_env ms graph
-  | Just loop <- getModLoop ms graph
+  | Just loop <- getModLoop ms mss appearsAsBoot
   , let non_boot = filter (not.isBootSummary) loop
   = typecheckLoop (hsc_dflags hsc_env) hsc_env (map ms_mod_name non_boot)
   | otherwise
   = return hsc_env
+  where
+  mss = mgModSummaries graph
+  appearsAsBoot = (`elemModuleSet` mgBootModules graph)
 
-getModLoop :: ModSummary -> ModuleGraph -> Maybe [ModSummary]
-getModLoop ms graph
+getModLoop
+  :: ModSummary
+  -> [ModSummary]
+  -> (Module -> Bool) -- check if a module appears as a boot module in 'graph'
+  -> Maybe [ModSummary]
+getModLoop ms graph appearsAsBoot
   | not (isBootSummary ms)
-  , any (\m -> ms_mod m == this_mod && isBootSummary m) graph
+  , appearsAsBoot this_mod
   , let mss = reachableBackwards (ms_mod_name ms) graph
   = Just mss
   | otherwise
@@ -1472,7 +1494,7 @@ reachableBackwards mod summaries
 topSortModuleGraph
           :: Bool
           -- ^ Drop hi-boot nodes? (see below)
-          -> [ModSummary]
+          -> ModuleGraph
           -> Maybe ModuleName
              -- ^ Root module name.  If @Nothing@, use the full graph.
           -> [SCC ModSummary]
@@ -1491,10 +1513,11 @@ topSortModuleGraph
 --              the a source-import of Foo is an import of Foo
 --              The resulting graph has no hi-boot nodes, but can be cyclic
 
-topSortModuleGraph drop_hs_boot_nodes summaries mb_root_mod
+topSortModuleGraph drop_hs_boot_nodes module_graph mb_root_mod
   = map (fmap summaryNodeSummary) $ stronglyConnCompG initial_graph
   where
     (graph, lookup_node) = moduleGraphNodes drop_hs_boot_nodes summaries
+    summaries = mgModSummaries module_graph
 
     initial_graph = case mb_root_mod of
         Nothing -> graph
