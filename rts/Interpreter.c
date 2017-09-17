@@ -407,7 +407,11 @@ eval_obj:
 #ifdef PROFILING
         if (cap->r.rCCCS != obj->header.prof.ccs) {
             tagged_obj =
-                newEmptyPAP(cap, tagged_obj, get_fun_itbl(obj)->f.arity);
+                newEmptyPAP(cap,
+                            arity <= TAG_MASK
+                              ? (StgClosure *) ((intptr_t) obj + arity)
+                              : obj,
+                            arity);
         }
 #endif
         break;
