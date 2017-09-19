@@ -24,7 +24,7 @@ import BlockId
 
 import CLabel
 
-import Unique                ( pprUnique, Uniquable(..) )
+import Unique                ( pprUnique )
 import Platform
 import FastString
 import Outputable
@@ -107,7 +107,7 @@ pprFunctionPrologue lab =  pprGloblDecl lab
 pprBasicBlock :: BlockEnv CmmStatics -> NatBasicBlock Instr -> SDoc
 pprBasicBlock info_env (BasicBlock blockid instrs)
   = maybe_infotable $$
-    pprLabel (mkAsmTempLabel (getUnique blockid)) $$
+    pprLabel (blockLbl blockid) $$
     vcat (map pprInstr instrs)
   where
     maybe_infotable = case mapLookup blockid info_env of
@@ -576,7 +576,7 @@ pprInstr (BCC cond blockid) = hcat [
         char '\t',
         ppr lbl
     ]
-    where lbl = mkAsmTempLabel (getUnique blockid)
+    where lbl = blockLbl blockid
 
 pprInstr (BCCFAR cond blockid) = vcat [
         hcat [
@@ -589,7 +589,7 @@ pprInstr (BCCFAR cond blockid) = vcat [
             ppr lbl
         ]
     ]
-    where lbl = mkAsmTempLabel (getUnique blockid)
+    where lbl = blockLbl blockid
 
 pprInstr (JMP lbl)
   -- We never jump to ForeignLabels; if we ever do, c.f. handling for "BL"

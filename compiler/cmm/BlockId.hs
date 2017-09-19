@@ -47,7 +47,7 @@ retPtLbl :: BlockId -> CLabel
 retPtLbl label = mkReturnPtLabel $ getUnique label
 
 blockLbl :: BlockId -> CLabel
-blockLbl label = mkEntryLabel (mkFCallName (getUnique label) "block") NoCafRefs
+blockLbl label = mkAsmTempLabel (getUnique label)
 
 infoTblLbl :: BlockId -> CLabel
 infoTblLbl label = mkInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs

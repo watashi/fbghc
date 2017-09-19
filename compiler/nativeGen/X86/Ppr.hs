@@ -37,7 +37,7 @@ import BasicTypes       (Alignment)
 import DynFlags
 import Cmm              hiding (topInfoTable)
 import CLabel
-import Unique           ( pprUnique, Uniquable(..) )
+import Unique           ( pprUnique )
 import Platform
 import FastString
 import Outputable
@@ -107,7 +107,7 @@ pprBasicBlock info_env (BasicBlock blockid instrs)
     (if debugLevel dflags > 0
      then ppr (mkAsmTempEndLabel asmLbl) <> char ':' else empty)
   where
-    asmLbl = mkAsmTempLabel (getUnique blockid)
+    asmLbl = blockLbl blockid
     maybe_infotable = case mapLookup blockid info_env of
        Nothing   -> empty
        Just (Statics info_lbl info) ->
@@ -673,7 +673,7 @@ pprInstr (SETCC cond op) = pprCondInstr (sLit "set") cond (pprOperand II8 op)
 
 pprInstr (JXX cond blockid)
   = pprCondInstr (sLit "j") cond (ppr lab)
-  where lab = mkAsmTempLabel (getUnique blockid)
+  where lab = blockLbl blockid
 
 pprInstr        (JXX_GBL cond imm) = pprCondInstr (sLit "j") cond (pprImm imm)
 
