@@ -929,7 +929,8 @@ pprUsage usage@UsageHomeModule{}
         )
 pprUsage usage@UsageFile{}
   = hsep [text "addDependentFile",
-          doubleQuotes (text (usg_file_path usage))]
+          doubleQuotes (text (usg_file_path usage)),
+          ppr (usg_file_hash usage)]
 
 pprUsageImport :: Outputable a => Usage -> (Usage -> a) -> SDoc
 pprUsageImport usage usg_mod'
