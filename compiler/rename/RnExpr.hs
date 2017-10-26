@@ -1609,7 +1609,12 @@ stmtTreeToStmts monad_names ctxt (StmtTreeOne (L _ (BindStmt pat rhs _ _ _),_))
     --          tuples come out as irrefutable; other single-constructor
     --          types, and newtypes, will not.  See the code for
     --          isIrrefuatableHsPat
-  = mkApplicativeStmt ctxt [ApplicativeArgOne pat rhs] False tail'
+  = mkApplicativeStmt ctxt [ApplicativeArgOne pat rhs False] False tail'
+stmtTreeToStmts monad_names ctxt (StmtTreeOne (L _ (BodyStmt rhs _ _ _),_))
+                tail _tail_fvs
+  | (False,tail') <- needJoin monad_names tail
+  = mkApplicativeStmt ctxt
+      [ApplicativeArgOne nlWildPatName rhs True] False tail'
 
 stmtTreeToStmts _monad_names _ctxt (StmtTreeOne (s,_)) tail _tail_fvs =
   return (s : tail, emptyNameSet)
@@ -1628,7 +1633,9 @@ stmtTreeToStmts monad_names ctxt (StmtTreeApplicative trees) tail tail_fvs = do
    return (stmts, unionNameSets (fvs:fvss))
  where
    stmtTreeArg _ctxt _tail_fvs (StmtTreeOne (L _ (BindStmt pat exp _ _ _), _)) =
-     return (ApplicativeArgOne pat exp, emptyFVs)
+     return (ApplicativeArgOne pat exp False, emptyFVs)
+   stmtTreeArg _ctxt _tail_fvs (StmtTreeOne (L _ (BodyStmt exp _ _ _), _)) =
+     return (ApplicativeArgOne nlWildPatName exp True, emptyFVs)
    stmtTreeArg ctxt tail_fvs tree = do
      let stmts = flattenStmtTree tree
          pvarset = mkNameSet (concatMap (collectStmtBinders.unLoc.fst) stmts)

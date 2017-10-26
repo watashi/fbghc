@@ -1061,7 +1061,7 @@ tcApplicativeStmts ctxt pairs rhs_ty thing_inside
       = do { thing <- thing_inside
            ; return ([],thing)
            }
-    goArgs ((ApplicativeArgOne pat rhs, pat_ty, exp_ty) : rest) thing_inside
+    goArgs ((ApplicativeArgOne pat rhs isBody, pat_ty, exp_ty) : rest) thing_inside
       = do { let stmt :: ExprStmt Name
                  stmt = mkBindStmt pat rhs
            ; setSrcSpan (combineSrcSpans (getLoc pat) (getLoc rhs)) $
@@ -1071,7 +1071,7 @@ tcApplicativeStmts ctxt pairs rhs_ty thing_inside
                       tcPat (StmtCtxt ctxt) pat (mkCheckExpType pat_ty) $
                       popErrCtxt $
                       goArgs rest thing_inside
-                  ; return (ApplicativeArgOne pat' rhs' : pairs, thing) } }
+                  ; return (ApplicativeArgOne pat' rhs' isBody : pairs, thing) } }
 
     goArgs ((ApplicativeArgMany stmts ret pat, pat_ty, exp_ty) : rest)
             thing_inside
