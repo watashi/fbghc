@@ -183,7 +183,44 @@ typedef struct _ObjectCode {
 extern ObjectCode *objects;
 extern ObjectCode *unloaded_objects;
 
-#ifdef THREADED_RTS
+typedef struct NativeCodeRange_ {
+
+  void *start;
+
+  void *end;
+
+  /* Allow a chain of these things */
+  struct NativeCodeRange_ *next;
+
+} NativeCodeRange;
+
+typedef struct NativeCode_ {
+
+  pathchar *fileName;
+
+  /* flag used when deciding whether to unload an object file */
+  int referenced;
+
+  /* handle returned from dlopen */
+  void *handle;
+
+  /* base virtual address of the loaded code */
+  void *l_addr;
+
+  /* virtual memory ranges of loaded code */
+  NativeCodeRange *nc_ranges;
+
+  /* Allow a chain of these things */
+  struct NativeCode_ *next;
+
+  ForeignExportStablePtr *stable_ptrs;
+} NativeCode;
+
+
+extern NativeCode *native_objects;
+extern NativeCode *unloaded_native_objects;
+
+#if defined(THREADED_RTS)
 extern Mutex linker_mutex;
 extern Mutex linker_unloaded_mutex;
 #endif
@@ -191,6 +228,7 @@ extern Mutex linker_unloaded_mutex;
 void exitLinker( void );
 
 void freeObjectCode (ObjectCode *oc);
+void freeNativeCode (NativeCode *nc);
 
 #if defined(mingw32_HOST_OS)
 

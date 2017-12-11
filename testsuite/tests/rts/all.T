@@ -233,6 +233,11 @@ test('linker_unload',
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
 
+test('linker_unload_native',
+     [ extra_clean(['Test.o','Test.hi','Test.so','Test2.so','Test.a','linker_unload_native']) ],
+     run_command,
+     ['$MAKE -s --no-print-directory linker_unload_native'])
+
 test('T8209', [ only_ways(threaded_ways), ignore_output ],
               compile_and_run, [''])
 
