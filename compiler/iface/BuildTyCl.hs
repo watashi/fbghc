@@ -10,7 +10,7 @@ module BuildTyCl (
         buildPatSyn,
         TcMethInfo, buildClass,
         distinctAbstractTyConRhs, totallyAbstractTyConRhs,
-        mkNewTyConRhs, mkDataTyConRhs,
+        mkNewTyConRhs,
         newImplicitBinder, newTyConRepName
     ) where
 
@@ -43,20 +43,6 @@ import Outputable
 distinctAbstractTyConRhs, totallyAbstractTyConRhs :: AlgTyConRhs
 distinctAbstractTyConRhs = AbstractTyCon True
 totallyAbstractTyConRhs  = AbstractTyCon False
-
-mkDataTyConRhs :: [DataCon] -> AlgTyConRhs
-mkDataTyConRhs cons
-  = DataTyCon {
-        data_cons = cons,
-        is_enum = not (null cons) && all is_enum_con cons
-                  -- See Note [Enumeration types] in TyCon
-    }
-  where
-    is_enum_con con
-       | (_univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res)
-           <- dataConFullSig con
-       = null ex_tvs && null eq_spec && null theta && null arg_tys
-
 
 mkNewTyConRhs :: Name -> TyCon -> DataCon -> TcRnIf m n AlgTyConRhs
 -- ^ Monadic because it makes a Name for the coercion TyCon

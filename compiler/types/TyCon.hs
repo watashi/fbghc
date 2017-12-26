@@ -28,6 +28,7 @@ module TyCon(
         mkKindTyCon,
         mkLiftedPrimTyCon,
         mkTupleTyCon,
+        mkDataTyConRhs,
         mkSynonymTyCon,
         mkFamilyTyCon,
         mkPromotedDataCon,
@@ -115,7 +116,8 @@ module TyCon(
 import {-# SOURCE #-} TyCoRep ( Kind, Type, PredType, TyBinder, mkForAllTys )
 import {-# SOURCE #-} TysWiredIn  ( runtimeRepTyCon, constraintKind
                                   , vecCountTyCon, vecElemTyCon, liftedTypeKind )
-import {-# SOURCE #-} DataCon ( DataCon, dataConExTyVars, dataConFieldLabels )
+import {-# SOURCE #-} DataCon ( DataCon, dataConExTyVars, dataConFieldLabels
+                              , dataConFullSig )
 
 import Binary
 import Var
@@ -679,7 +681,8 @@ data AlgTyConRhs
                           --
                           -- INVARIANT: Kept in order of increasing 'DataCon'
                           -- tag (see the tag assignment in DataCon.mkDataCon)
-
+        data_cons_size :: Int,
+                          -- ^ Cached value: length data_cons
         is_enum :: Bool   -- ^ Cached value: is this an enumeration type?
                           --   See Note [Enumeration types]
     }
@@ -720,6 +723,20 @@ data AlgTyConRhs
                              -- Watch out!  If any newtypes become transparent
                              -- again check Trac #1072.
     }
+
+mkDataTyConRhs :: [DataCon] -> AlgTyConRhs
+mkDataTyConRhs cons
+  = DataTyCon {
+        data_cons = cons,
+        data_cons_size = length cons,
+        is_enum = not (null cons) && all is_enum_con cons
+                  -- See Note [Enumeration types] in TyCon
+    }
+  where
+    is_enum_con con
+       | (_univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res)
+           <- dataConFullSig con
+       = null ex_tvs && null eq_spec && null theta && null arg_tys
 
 -- | Some promoted datacons signify extra info relevant to GHC. For example,
 -- the @IntRep@ constructor of @RuntimeRep@ corresponds to the 'IntRep'
@@ -1927,7 +1944,7 @@ tyConSingleAlgDataCon_maybe _        = Nothing
 tyConFamilySize  :: TyCon -> Int
 tyConFamilySize tc@(AlgTyCon { algTcRhs = rhs })
   = case rhs of
-      DataTyCon { data_cons = cons } -> length cons
+      DataTyCon { data_cons_size = size } -> size
       NewTyCon {}                    -> 1
       TupleTyCon {}                  -> 1
       _                              -> pprPanic "tyConFamilySize 1" (ppr tc)

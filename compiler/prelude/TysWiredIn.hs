@@ -360,12 +360,12 @@ parrTyCon_RDR   = nameRdrName parrTyConName
 
 pcNonRecDataTyCon :: Name -> Maybe CType -> [TyVar] -> [DataCon] -> TyCon
 -- Not an enumeration
-pcNonRecDataTyCon = pcTyCon False NonRecursive
+pcNonRecDataTyCon = pcTyCon NonRecursive
 
 -- This function assumes that the types it creates have all parameters at
 -- Representational role, and that there is no kind polymorphism.
-pcTyCon :: Bool -> RecFlag -> Name -> Maybe CType -> [TyVar] -> [DataCon] -> TyCon
-pcTyCon is_enum is_rec name cType tyvars cons
+pcTyCon :: RecFlag -> Name -> Maybe CType -> [TyVar] -> [DataCon] -> TyCon
+pcTyCon is_rec name cType tyvars cons
   = mkAlgTyCon name
                 (map (mkAnonBinder . tyVarKind) tyvars)
                 liftedTypeKind
@@ -373,7 +373,7 @@ pcTyCon is_enum is_rec name cType tyvars cons
                 (map (const Representational) tyvars)
                 cType
                 []              -- No stupid theta
-                (DataTyCon cons is_enum)
+                (mkDataTyConRhs cons)
                 (VanillaAlgTyCon (mkPrelTyConRepName name))
                 is_rec
                 False           -- Not in GADT syntax
@@ -448,15 +448,15 @@ pcSpecialDataCon dc_name arg_tys tycon rri
 typeNatKindCon, typeSymbolKindCon :: TyCon
 -- data Nat
 -- data Symbol
-typeNatKindCon    = pcTyCon False NonRecursive typeNatKindConName    Nothing [] []
-typeSymbolKindCon = pcTyCon False NonRecursive typeSymbolKindConName Nothing [] []
+typeNatKindCon    = pcTyCon NonRecursive typeNatKindConName    Nothing [] []
+typeSymbolKindCon = pcTyCon NonRecursive typeSymbolKindConName Nothing [] []
 
 typeNatKind, typeSymbolKind :: Kind
 typeNatKind    = mkTyConTy typeNatKindCon
 typeSymbolKind = mkTyConTy typeSymbolKindCon
 
 constraintKindTyCon :: TyCon
-constraintKindTyCon = pcTyCon False NonRecursive constraintKindTyConName
+constraintKindTyCon = pcTyCon NonRecursive constraintKindTyConName
                               Nothing [] []
 
 liftedTypeKind, constraintKind, unboxedTupleKind :: Kind
@@ -742,7 +742,7 @@ heqSCSelId, coercibleSCSelId :: Id
     [av,bv]   = mkTemplateTyVars [k1, k2]
     tvs       = [kv1, kv2, av, bv]
     roles     = [Nominal, Nominal, Nominal, Nominal]
-    rhs       = DataTyCon { data_cons = [datacon], is_enum = False }
+    rhs       = mkDataTyConRhs [datacon]
 
     sc_pred   = mkTyConApp eqPrimTyCon (mkTyVarTys tvs)
     sc_sel_id = mkDictSelId heqSCSelIdName klass
@@ -763,7 +763,7 @@ heqSCSelId, coercibleSCSelId :: Id
     [av,bv]   = mkTemplateTyVars [k, k]
     tvs       = [kKiVar, av, bv]
     roles     = [Nominal, Representational, Representational]
-    rhs       = DataTyCon { data_cons = [datacon], is_enum = False }
+    rhs       = mkDataTyConRhs [datacon]
 
     sc_pred   = mkTyConApp eqReprPrimTyCon [k, k, mkTyVarTy av, mkTyVarTy bv]
     sc_sel_id = mkDictSelId coercibleSCSelIdName klass
@@ -1015,7 +1015,7 @@ boolTy :: Type
 boolTy = mkTyConTy boolTyCon
 
 boolTyCon :: TyCon
-boolTyCon = pcTyCon True NonRecursive boolTyConName
+boolTyCon = pcTyCon NonRecursive boolTyConName
                     (Just (CType "" Nothing ("HsBool", fsLit "HsBool")))
                     [] [falseDataCon, trueDataCon]
 
@@ -1028,7 +1028,7 @@ falseDataConId = dataConWorkId falseDataCon
 trueDataConId  = dataConWorkId trueDataCon
 
 orderingTyCon :: TyCon
-orderingTyCon = pcTyCon True NonRecursive orderingTyConName Nothing
+orderingTyCon = pcTyCon NonRecursive orderingTyConName Nothing
                         [] [ltDataCon, eqDataCon, gtDataCon]
 
 ltDataCon, eqDataCon, gtDataCon :: DataCon
@@ -1059,7 +1059,7 @@ mkListTy ty = mkTyConApp listTyCon [ty]
 listTyCon :: TyCon
 listTyCon = buildAlgTyCon listTyConName alpha_tyvar [Representational]
                           Nothing []
-                          (DataTyCon [nilDataCon, consDataCon] False )
+                          (mkDataTyConRhs [nilDataCon, consDataCon])
                           Recursive False
                           (VanillaAlgTyCon $ mkPrelTyConRepName listTyConName)
 
@@ -1077,7 +1077,7 @@ consDataCon = pcDataConWithFixity True {- Declared infix -}
 -- Wired-in type Maybe
 
 maybeTyCon :: TyCon
-maybeTyCon = pcTyCon False NonRecursive maybeTyConName Nothing alpha_tyvar
+maybeTyCon = pcTyCon NonRecursive maybeTyConName Nothing alpha_tyvar
                      [nothingDataCon, justDataCon]
 
 nothingDataCon :: DataCon
