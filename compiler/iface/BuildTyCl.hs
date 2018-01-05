@@ -26,6 +26,7 @@ import Var
 import VarSet
 import BasicTypes
 import Name
+import NameEnv
 import MkId
 import Class
 import TyCon
@@ -106,6 +107,8 @@ buildDataCon :: FamInstEnvs
                                        -- or the GADT equalities
            -> [Type] -> Type           -- Argument and result types
            -> TyCon                    -- Rep tycon
+           -> NameEnv ConTag           -- Maps the Name of each DataCon to its
+                                       -- ConTag
            -> TcRnIf m n DataCon
 -- A wrapper for DataCon.mkDataCon that
 --   a) makes the worker Id
@@ -114,6 +117,7 @@ buildDataCon :: FamInstEnvs
 --   c) Sorts out the TyBinders. See Note [TyBinders in DataCons] in DataCon
 buildDataCon fam_envs src_name declared_infix prom_info src_bangs impl_bangs field_lbls
              univ_tvs univ_bndrs ex_tvs ex_bndrs eq_spec ctxt arg_tys res_ty rep_tycon
+             tag_map
   = do  { wrap_name <- newImplicitBinder src_name mkDataConWrapperOcc
         ; work_name <- newImplicitBinder src_name mkDataConWorkerOcc
         -- This last one takes the name of the data constructor in the source
@@ -132,10 +136,12 @@ buildDataCon fam_envs src_name declared_infix prom_info src_bangs impl_bangs fie
                     _         -> Specified
 
               stupid_ctxt = mkDataConStupidTheta rep_tycon arg_tys univ_tvs
+              tag = lookupNameEnv_NF tag_map src_name
+              -- See Note [Constructor tag allocation], fixes #14657
               data_con = mkDataCon src_name declared_infix prom_info
                                    src_bangs field_lbls
                                    univ_tvs dc_bndrs ex_tvs ex_bndrs eq_spec ctxt
-                                   arg_tys res_ty NoRRI rep_tycon
+                                   arg_tys res_ty NoRRI rep_tycon tag
                                    stupid_ctxt dc_wrk dc_rep
               dc_wrk = mkDataConWorkId work_name data_con
               dc_rep = initUs_ us (mkDataConRep dflags fam_envs wrap_name
@@ -299,6 +305,7 @@ buildClass tycon_name tvs roles sc_theta binders
                                    arg_tys
                                    (mkTyConApp rec_tycon (mkTyVarTys tvs))
                                    rec_tycon
+                                   (mkTyConTagMap rec_tycon)
 
         ; rhs <- if use_newtype
                  then mkNewTyConRhs tycon_name rec_tycon dict_con

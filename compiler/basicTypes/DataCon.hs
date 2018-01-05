@@ -72,7 +72,6 @@ import PrelNames
 import NameEnv
 import Var
 import Outputable
-import ListSetOps
 import Util
 import BasicTypes
 import FastString
@@ -778,6 +777,7 @@ mkDataCon :: Name
           -> Type           -- ^ Original result type
           -> RuntimeRepInfo -- ^ See comments on 'TyCon.RuntimeRepInfo'
           -> TyCon          -- ^ Representation type constructor
+          -> ConTag         -- ^ Constructor tag
           -> ThetaType      -- ^ The "stupid theta", context of the data
                             -- declaration e.g. @data Eq a => T a ...@
           -> Id             -- ^ Worker Id
@@ -790,7 +790,7 @@ mkDataCon name declared_infix prom_info
           fields
           univ_tvs univ_bndrs ex_tvs ex_bndrs
           eq_spec theta
-          orig_arg_tys orig_res_ty rep_info rep_tycon
+          orig_arg_tys orig_res_ty rep_info rep_tycon tag
           stupid_theta work_id rep
 -- Warning: mkDataCon is not a good place to check invariants.
 -- If the programmer writes the wrong result type in the decl, thus:
@@ -824,7 +824,6 @@ mkDataCon name declared_infix prom_info
         -- source-language arguments.  We add extra ones for the
         -- dictionary arguments right here.
 
-    tag = assoc "mkDataCon" (tyConDataCons rep_tycon `zip` [fIRST_TAG..]) con
     rep_arg_tys = dataConRepArgTys con
 
     rep_ty = mkForAllTys univ_bndrs $ mkForAllTys ex_bndrs $

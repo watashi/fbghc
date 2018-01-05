@@ -1399,16 +1399,19 @@ tcConDecls :: TyCon -> ([TyVar], [TyBinder], Type)
   -- have all the names and the binders have the visibilities.
 tcConDecls rep_tycon (tmpl_tvs, tmpl_bndrs, res_tmpl)
   = concatMapM $ addLocM $
-    tcConDecl rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
+    tcConDecl rep_tycon (mkTyConTagMap rep_tycon) tmpl_tvs tmpl_bndrs res_tmpl
+    -- It's important that we pay for tag allocation here, once per TyCon,
+    -- See Note [Constructor tag allocation], fixes #14657
 
 tcConDecl :: TyCon             -- Representation tycon. Knot-tied!
+          -> NameEnv ConTag
           -> [TyVar] -> [TyBinder] -> Type
                  -- Return type template (with its template tyvars)
                  --    (tvs, T tys), where T is the family TyCon
           -> ConDecl Name
           -> TcM [DataCon]
 
-tcConDecl rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
+tcConDecl rep_tycon tag_map tmpl_tvs tmpl_bndrs res_tmpl
           (ConDeclH98 { con_name = name
                       , con_qvars = hs_qvars, con_cxt = hs_ctxt
                       , con_details = hs_details })
@@ -1474,7 +1477,7 @@ tcConDecl rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
                             tmpl_tvs tmpl_bndrs
                             ex_tvs ex_binders
                             [{- no eq_preds -}] ctxt arg_tys
-                            res_tmpl rep_tycon
+                            res_tmpl rep_tycon tag_map
                   -- NB:  we put data_tc, the type constructor gotten from the
                   --      constructor type signature into the data constructor;
                   --      that way checkValidDataCon can complain if it's wrong.
@@ -1483,7 +1486,7 @@ tcConDecl rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
        ; mapM buildOneDataCon [name]
        }
 
-tcConDecl rep_tycon tmpl_tvs _tmpl_bndrs res_tmpl
+tcConDecl rep_tycon tag_map tmpl_tvs _tmpl_bndrs res_tmpl
           (ConDeclGADT { con_names = names, con_type = ty })
   = addErrCtxt (dataConCtxtName names) $
     do { traceTc "tcConDecl 1" (ppr names)
@@ -1528,7 +1531,7 @@ tcConDecl rep_tycon tmpl_tvs _tmpl_bndrs res_tmpl
                             (substTys arg_subst ctxt)
                             (substTys arg_subst arg_tys)
                             (substTy  arg_subst res_ty')
-                            rep_tycon
+                            rep_tycon tag_map
                   -- NB:  we put data_tc, the type constructor gotten from the
                   --      constructor type signature into the data constructor;
                   --      that way checkValidDataCon can complain if it's wrong.
