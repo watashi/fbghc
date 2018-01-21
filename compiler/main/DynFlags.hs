@@ -5025,6 +5025,7 @@ isAvx512pfEnabled dflags = avx512pf dflags
 data LinkerInfo
   = GnuLD    [Option]
   | GnuGold  [Option]
+  | LlvmLLD  [Option]
   | DarwinLD [Option]
   | SolarisLD [Option]
   | AixLD    [Option]
