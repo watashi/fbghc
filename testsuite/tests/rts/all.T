@@ -359,3 +359,8 @@ test('alloccounter1', normal, compile_and_run,
     # allocation and messes up the results:
     '-with-rtsopts=-k1m'
   ])
+test('T14702', [ ignore_stdout
+               , only_ways(['threaded1', 'threaded2'])
+               , extra_run_opts('+RTS -A32m -N8 -T -RTS')
+               ]
+               , compile_and_run, [''])
