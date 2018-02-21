@@ -501,8 +501,10 @@ FIND_LD([$target],[GccUseLdOpt])
 CONF_GCC_LINKER_OPTS_STAGE1="$CONF_GCC_LINKER_OPTS_STAGE1 $GccUseLdOpt"
 CONF_GCC_LINKER_OPTS_STAGE2="$CONF_GCC_LINKER_OPTS_STAGE2 $GccUseLdOpt"
 LdCmd="$LD"
+LdNoGoldCmd="$LD_NO_GOLD"
 CFLAGS="$CFLAGS $GccUseLdOpt"
 AC_SUBST([LdCmd])
+AC_SUBST([LdNoGoldCmd])
 
 dnl ** Which nm to use?
 dnl --------------------------------------------------------------
