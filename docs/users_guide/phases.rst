@@ -458,6 +458,15 @@ Options affecting code generation
     Windows, position-independent code is never used so the flag is a
     no-op on that platform.
 
+.. ghc-flag:: -fexternal-dynamic-refs
+    :shortdesc: Generate code for linking against dynamic libraries
+    :type: dynamic
+    :category: codegen
+
+    When generating code, assume that entities imported from a
+    different module might be dynamically linked.  This flag is enabled
+    automatically by :ghc-flag:`-dynamic`.
+
 .. ghc-flag:: -fPIE
     :type: dynamic
     :category: codegen
@@ -470,12 +479,11 @@ Options affecting code generation
 .. ghc-flag:: -dynamic
     :noindex:
 
-    When generating code, assume that entities imported from a different
-    package will be dynamically linked. This can reduce code size
-    tremendously, but may slow-down cross-package calls of non-inlined
-    functions. There can be some complications combining :ghc-flag:`-shared`
-    with this flag relating to linking in the RTS under Linux. See
-    :ghc-ticket:`10352`.
+    Build code for dynamic linking.  This can reduce code size
+    tremendously, but may slow-down cross-module calls of non-inlined
+    functions. There can be some complications combining
+    :ghc-flag:`-shared` with this flag relating to linking in the RTS
+    under Linux. See :ghc-ticket:`10352`.
 
     Note that using this option when linking causes GHC to link against
     shared libraries.
