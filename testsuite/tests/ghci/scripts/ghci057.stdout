@@ -6,6 +6,15 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+<<<<<<< HEAD
+||||||| parent of 10863ac... Add -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+=======
+  -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+>>>>>>> 10863ac... Add -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -22,6 +31,15 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+<<<<<<< HEAD
+||||||| parent of 10863ac... Add -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+=======
+  -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+>>>>>>> 10863ac... Add -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -37,6 +55,15 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+<<<<<<< HEAD
+||||||| parent of 10863ac... Add -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+=======
+  -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+>>>>>>> 10863ac... Add -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -54,6 +81,15 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+<<<<<<< HEAD
+||||||| parent of 10863ac... Add -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+=======
+  -fexternal-dynamic-refs
+  -fignore-optim-changes
+  -fignore-hpc-changes
+>>>>>>> 10863ac... Add -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups

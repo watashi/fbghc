@@ -6,6 +6,7 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+  -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -22,6 +23,7 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+  -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -37,6 +39,7 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+  -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
@@ -54,6 +57,7 @@ with the following modifiers:
 GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
+  -fexternal-dynamic-refs
   -fno-ghci-history
   -fimplicit-import-qualified
   -fshow-warning-groups
