@@ -400,4 +400,3 @@ test('alloccounter1', normal, compile_and_run,
     # allocation and messes up the results:
     '-with-rtsopts=-k1m'
   ])
-
