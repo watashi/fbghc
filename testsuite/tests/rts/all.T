@@ -389,3 +389,10 @@ test('nursery-chunks1',
   ],
   compile_and_run,
   [''])
+
+test('alloccounter1', normal, compile_and_run,
+  [
+    # avoid allocating stack chunks, which counts as
+    # allocation and messes up the results:
+    '-with-rtsopts=-k1m'
+  ])
