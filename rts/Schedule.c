@@ -669,7 +669,11 @@ scheduleYield (Capability **pcap, Task *task)
 
     // otherwise yield (sleep), and keep yielding if necessary.
     do {
-        didGcLast = yieldCapability(&cap,task, !didGcLast);
+        if (doIdleGCWork(cap, rtsFalse)) {
+            didGcLast = rtsFalse;
+        } else {
+            didGcLast = yieldCapability(&cap,task, !didGcLast);
+        }
     }
     while (shouldYieldCapability(cap,task,didGcLast));
 
@@ -1802,6 +1806,9 @@ delete_threads_and_gc:
     }
 #endif
 
+    // Do any remaining idle GC work from the previous GC
+    doIdleGCWork(cap, rtsTrue /* all of it */);
+
 #if defined(THREADED_RTS)
     // reset pending_sync *before* GC, so that when the GC threads
     // emerge they don't immediately re-enter the GC.
@@ -1810,6 +1817,11 @@ delete_threads_and_gc:
 #else
     GarbageCollect(collect_gen, heap_census, 0, cap, NULL);
 #endif
+
+    // If we're shutting down, don't leave any idle GC work to do.
+    if (sched_state == SCHED_SHUTTING_DOWN) {
+        doIdleGCWork(cap, rtsTrue /* all of it */);
+    }
 
     traceSparkCounters(cap);
 

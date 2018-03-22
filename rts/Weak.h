@@ -20,8 +20,8 @@ void runCFinalizers(StgCFinalizerList *list);
 void runAllCFinalizers(StgWeak *w);
 void scheduleFinalizers(Capability *cap, StgWeak *w);
 void markWeakList(void);
+rtsBool runSomeFinalizers(rtsBool all);
 
 #include "EndPrivate.h"
 
 #endif /* WEAK_H */
-

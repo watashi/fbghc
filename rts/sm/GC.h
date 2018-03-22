@@ -27,6 +27,8 @@ typedef void (*evac_fn)(void *user, StgClosure **root);
 StgClosure * isAlive      ( StgClosure *p );
 void         markCAFs     ( evac_fn evac, void *user );
 
+rtsBool doIdleGCWork(Capability *cap, rtsBool all);
+
 extern nat N;
 extern rtsBool major_gc;
 
