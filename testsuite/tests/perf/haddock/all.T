@@ -9,7 +9,7 @@ test('haddock.base',
           [(platform('x86_64-unknown-mingw32'), 24286343184, 5)
             # 2017-02-19                        24286343184 (x64/Windows) - Generalize kind of (->)
 
-          ,(wordsize(64), 18122310128, 5)
+          ,(wordsize(64), 21123660336, 5)
             # 2012-08-14:  5920822352 (amd64/Linux)
             # 2012-09-20:  5829972376 (amd64/Linux)
             # 2012-10-08:  5902601224 (amd64/Linux)
@@ -39,8 +39,17 @@ test('haddock.base',
             # 2017-02-16: 32695562088 Better Lint for join points
             # 2017-02-17: 38425793776 (x86_64/Linux) - Generalize kind of (->)
             # 2017-02-12: 25592972912 (x86_64/Linux) - Type-indexed Typeable
-            # 2017-06-16: 19573969096 (x86_64/Linux) - Don't desugar for haddock
-            # 2017-06-23: 18122310128 (x86_64/Linux) - Use getNameToInstancesIndex
+            # 2017-06-05: 27868466432 (x86_64/Linux) - Desugar modules compiled with -fno-code
+            # 2017-06-06: 25173968808 (x86_64/Linux) - Don't pass on -dcore-lint in Haddock.mk
+            # 2017-07-12: 23677299848 (x86_64/Linux) - Use getNameToInstancesIndex
+            # 2017-08-22: 19694554424 (x86_64/Linux) - Various Haddock optimizations
+	        # 2018-03-31: 20980255200 (x86_64/Linux) - Track type variable scope more carefully
+	        # previous to this last commit, the allocations were right below the top
+            # of the range. This commit adds only ~1.5% allocations.
+            # 2018-04-10: 18511324808 (x86_64/Linux) - TTG HsBinds and Data instances
+            # 2018-04-11: 20727464616 (x86_64/Linux) - Collateral of simplCast improvement (#14737)
+            # 2018-04-20: 18971030224 (x86_64/Linux) - Cache coercion roles
+            # 2018-05-14: 21123660336 (amd64/Linux) D4659: strictness to fix space leaks
 
           ,(platform('i386-unknown-mingw32'), 2885173512, 5)
             # 2013-02-10:                     3358693084 (x86/Windows)
@@ -66,7 +75,7 @@ test('haddock.Cabal',
      [extra_files(['../../../../libraries/Cabal/Cabal/dist-install/haddock.t']),
       unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 15717181064, 5)
+          [(wordsize(64), 24519860272, 5)
             # 2012-08-14:  3255435248 (amd64/Linux)
             # 2012-08-29:  3324606664 (amd64/Linux, new codegen)
             # 2012-10-08:  3373401360 (amd64/Linux)
