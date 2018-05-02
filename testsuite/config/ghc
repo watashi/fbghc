@@ -97,7 +97,7 @@ config.way_flags = lambda name : {
     'prof'         : ['-prof', '-static', '-auto-all', '-fasm'],
     'profasm'      : ['-O', '-prof', '-static', '-auto-all'],
     'profthreaded' : ['-O', '-prof', '-static', '-auto-all', '-threaded'],
-    'ghci'         : ['--interactive', '-v0', '-ignore-dot-ghci', '+RTS', '-I0.1', '-RTS'],
+    'ghci'         : ['--interactive', '-v0', '-ignore-dot-ghci', '-fghci-leak-check', '+RTS', '-I0.1', '-RTS'],
     'sanity'       : ['-debug'],
     'threaded1'    : ['-threaded', '-debug'],
     'threaded1_ls' : ['-threaded', '-debug'],

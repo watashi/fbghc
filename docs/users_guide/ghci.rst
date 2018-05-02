@@ -1879,6 +1879,17 @@ Most of the command-line options accepted by GHC (see :ref:`using-ghc`)
 also make sense in interactive mode. The ones that don't make sense are
 mostly obvious.
 
+.. ghc-flag:: -fghci-leak-check
+    :shortdesc: (Debugging only) check for space leaks when loading
+                new modules in GHCi.
+    :type: dynamic
+    :reverse: -fno-ghci-leak-check
+    :category:
+
+    (Debugging only) When loading new modules with ``:load``, check
+    that any previously loaded modules have been correctly garbage
+    collected. Emits messages if a leak is detected.
+
 Packages
 ~~~~~~~~
 

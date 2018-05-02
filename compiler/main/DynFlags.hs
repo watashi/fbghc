@@ -481,6 +481,7 @@ data GeneralFlag
    | Opt_IgnoreDotGhci
    | Opt_GhciSandbox
    | Opt_GhciHistory
+   | Opt_GhciLeakCheck
    | Opt_NoIt
    | Opt_HelpfulErrors
    | Opt_DeferTypeErrors
@@ -3419,6 +3420,7 @@ fFlagsDeps = [
   flagSpec "fun-to-thunk"                     Opt_FunToThunk,
   flagSpec "gen-manifest"                     Opt_GenManifest,
   flagSpec "ghci-history"                     Opt_GhciHistory,
+  flagSpec "ghci-leak-check"                  Opt_GhciLeakCheck,
   flagGhciSpec "no-it"                        Opt_NoIt,
   flagSpec "ghci-sandbox"                     Opt_GhciSandbox,
   flagSpec "helpful-errors"                   Opt_HelpfulErrors,
