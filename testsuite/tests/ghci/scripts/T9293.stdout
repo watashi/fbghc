@@ -7,6 +7,7 @@ GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
   -fno-ghci-history
+  -fghci-leak-check
   -fimplicit-import-qualified
   -fshow-warning-groups
 warning settings:
@@ -23,6 +24,7 @@ GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
   -fno-ghci-history
+  -fghci-leak-check
   -fimplicit-import-qualified
   -fshow-warning-groups
 warning settings:
@@ -38,6 +40,7 @@ GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
   -fno-ghci-history
+  -fghci-leak-check
   -fimplicit-import-qualified
   -fshow-warning-groups
 warning settings:
@@ -55,6 +58,7 @@ GHCi-specific dynamic flag settings:
 other dynamic, non-language, flag settings:
   -fno-diagnostics-show-caret
   -fno-ghci-history
+  -fghci-leak-check
   -fimplicit-import-qualified
   -fshow-warning-groups
 warning settings:
