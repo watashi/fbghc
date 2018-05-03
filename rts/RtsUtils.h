@@ -47,6 +47,9 @@ void printRtsInfo(void);
 
 void checkFPUStack(void);
 
+#define xstr(s) str(s)
+#define str(s) #s
+
 #include "EndPrivate.h"
 
 #endif /* RTSUTILS_H */
