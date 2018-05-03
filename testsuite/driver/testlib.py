@@ -402,6 +402,12 @@ def compiler_debugged( ):
 def tag( t ):
     return t in config.compiler_tags
 
+def have_gdb( ):
+    return config.have_gdb
+
+def have_readelf( ):
+    return config.have_readelf
+
 # ---
 
 def high_memory_usage(name, opts):

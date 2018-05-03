@@ -34,3 +34,8 @@ test('T10518', [cmm_src], compile, [''])
 test('T10667', normal, compile, ['-g'])
 test('T12115', normal, compile, [''])
 test('T12355', normal, compile, [''])
+test('T14999',
+     [when((arch('powerpc64') or arch('powerpc64le')), expect_broken(11261)),
+      unless(opsys('linux') and arch('x86_64') and have_gdb() and
+        have_readelf(), skip)],
+     run_command, ['$MAKE -s --no-print-directory T14999'])
