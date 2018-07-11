@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, MagicHash, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, MagicHash, ScopedTypeVariables, DeriveGeneric #-}
 
 -- |
 -- Run-time info table support.  This module provides support for
@@ -18,6 +18,7 @@ import Foreign
 import Foreign.C
 import GHC.Ptr
 import GHC.Exts
+import GHC.Generics
 import System.IO.Unsafe
 
 mkConInfoTable
@@ -326,6 +327,7 @@ data StgInfoTable = StgInfoTable {
    srtlen :: HalfWord,
    code   :: Maybe ItblCodes -- Just <=> ghciTablesNextToCode
   }
+  deriving (Generic, Show)
 
 pokeConItbl
   :: Ptr StgConInfoTable -> Ptr StgConInfoTable -> StgConInfoTable
@@ -352,12 +354,17 @@ pokeItbl a0 itbl = do
 #if !defined(TABLES_NEXT_TO_CODE)
   (#poke StgInfoTable, entry) a0 (fromJust (entry itbl))
 #endif
-  (#poke StgInfoTable, layout.payload.ptrs) a0 (ptrs itbl)
-  (#poke StgInfoTable, layout.payload.nptrs) a0 (nptrs itbl)
-  (#poke StgInfoTable, type) a0 (tipe itbl)
-  (#poke StgInfoTable, srt_bitmap) a0 (srtlen itbl)
+##if defined(PROFILING)
+  let pstd =  a0 `plusPtr` profInfoTableSizeB
+##else
+  let pstd =  a0
+##endif
+  (#poke StgInfoTable, layout.payload.ptrs) pstd (ptrs itbl)
+  (#poke StgInfoTable, layout.payload.nptrs) pstd (nptrs itbl)
+  (#poke StgInfoTable, type) pstd (tipe itbl)
+  (#poke StgInfoTable, srt_bitmap) pstd (srtlen itbl)
 #if defined(TABLES_NEXT_TO_CODE)
-  let code_offset = (a0 `plusPtr` (#offset StgInfoTable, code))
+  let code_offset = (pstd `plusPtr` (#offset StgInfoTable, code))
   case code itbl of
     Nothing -> return ()
     Just (Left xs) -> pokeArray code_offset xs
@@ -371,10 +378,15 @@ peekItbl a0 = do
 #else
   entry' <- Just <$> (#peek StgInfoTable, entry) a0
 #endif
-  ptrs' <- (#peek StgInfoTable, layout.payload.ptrs) a0
-  nptrs' <- (#peek StgInfoTable, layout.payload.nptrs) a0
-  tipe' <- (#peek StgInfoTable, type) a0
-  srtlen' <- (#peek StgInfoTable, srt_bitmap) a0
+##if defined(PROFILING)
+  let pstd =  a0 `plusPtr` profInfoTableSizeB
+##else
+  let pstd =  a0
+##endif
+  ptrs' <- (#peek StgInfoTable, layout.payload.ptrs) pstd
+  nptrs' <- (#peek StgInfoTable, layout.payload.nptrs) pstd
+  tipe' <- (#peek StgInfoTable, type) pstd
+  srtlen' <- (#peek StgInfoTable, srt_bitmap) pstd
   return StgInfoTable
     { entry  = entry'
     , ptrs   = ptrs'
@@ -388,7 +400,7 @@ newExecConItbl :: StgInfoTable -> [Word8] -> IO (FunPtr ())
 newExecConItbl obj con_desc
    = alloca $ \pcode -> do
         let lcon_desc = length con_desc + 1{- null terminator -}
-            sz = fromIntegral ((#size StgConInfoTable) + sizeOfEntryCode)
+            sz = fromIntegral (conInfoTableSizeB + sizeOfEntryCode)
                -- Note: we need to allocate the conDesc string next to the info
                -- table, because on a 64-bit platform we reference this string
                -- with a 32-bit offset relative to the info table, so if we
@@ -410,10 +422,13 @@ foreign import ccall unsafe "flushExec"
 
 -- | Convert a pointer to an StgConInfo into an info pointer that can be
 -- used in the header of a closure.
-conInfoPtr :: Ptr () -> Ptr ()
-conInfoPtr ptr
- | ghciTablesNextToCode = ptr `plusPtr` (#size StgConInfoTable)
+conInfoPtr :: Bool -> Ptr () -> Ptr ()
+conInfoPtr isProfiled ptr
+ | ghciTablesNextToCode = ptr `plusPtr` itblSize
  | otherwise            = ptr
+  where itblSize
+          | isProfiled = (#size StgConInfoTable) + (#size StgProfInfo)
+          | otherwise = (#size StgConInfoTable)
 
 -- -----------------------------------------------------------------------------
 -- Constants and config

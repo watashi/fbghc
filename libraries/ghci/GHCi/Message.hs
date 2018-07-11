@@ -18,6 +18,7 @@ import GHCi.InfoTable (StgInfoTable)
 import GHCi.FFI
 import GHCi.TH.Binary ()
 import GHCi.BreakArray
+import GHCi.Closure
 
 import GHC.LanguageExtensions
 import Control.Concurrent
@@ -193,12 +194,6 @@ data Message a where
                    -> [RemoteRef (TH.Q ())]
                    -> Message (THResult ())
 
-  AddDependentFile :: FilePath -> Message (THResult ())
-  AddModFinalizer :: RemoteRef (TH.Q ()) -> Message (THResult ())
-  AddTopDecls :: [TH.Dec] -> Message (THResult ())
-  IsExtEnabled :: Extension -> Message (THResult Bool)
-  ExtsEnabled :: Message (THResult [Extension])
-
   StartRecover :: Message ()
   EndRecover :: Bool -> Message ()
 
@@ -210,6 +205,24 @@ data Message a where
   QException :: String -> Message ()
   -- | RunTH called 'fail'
   QFail :: String -> Message ()
+
+  AddDependentFile :: FilePath -> Message (THResult ())
+  AddModFinalizer :: RemoteRef (TH.Q ()) -> Message (THResult ())
+  AddTopDecls :: [TH.Dec] -> Message (THResult ())
+  IsExtEnabled :: Extension -> Message (THResult Bool)
+  ExtsEnabled :: Message (THResult [Extension])
+
+  -- | Remote interface to GHC.Exts.Heap.getClosureData. This is used by
+  -- the GHCi debugger to inspect values in the heap for :print and
+  -- type reconstruction.
+  GetClosure
+    :: HValueRef
+    -> Message (GenClosure HValueRef)
+
+  -- | Evaluate something. This is used to support :force in GHCi.
+  Seq
+    :: HValueRef
+    -> Message (EvalResult ())
 
 deriving instance Show (Message a)
 
@@ -364,7 +377,9 @@ getMessage = do
       51 -> Msg <$> QException <$> get
       52 -> Msg <$> (RunModFinalizers <$> get <*> get)
       53 -> Msg <$> (AddModFinalizer <$> get)
-      _  -> Msg <$> QFail <$> get
+      54 -> Msg <$> QFail <$> get
+      55 -> Msg <$> (GetClosure <$> get)
+      _  -> Msg <$> (Seq <$> get)
 
 putMessage :: Message a -> Put
 putMessage m = case m of
@@ -422,6 +437,8 @@ putMessage m = case m of
   RunModFinalizers a b        -> putWord8 52 >> put a >> put b
   AddModFinalizer a           -> putWord8 53 >> put a
   QFail a                     -> putWord8 54 >> put a
+  GetClosure a                -> putWord8 55 >> put a
+  Seq a                       -> putWord8 56 >> put a
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages

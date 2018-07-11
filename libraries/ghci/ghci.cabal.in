@@ -43,6 +43,8 @@ library
 
     exposed-modules:
         GHCi.BreakArray
+        GHCi.Closure
+        GHCi.Closure.Utils
         GHCi.Message
         GHCi.ResolvedBCO
         GHCi.RemoteTypes
@@ -65,6 +67,7 @@ library
         deepseq          == 1.4.*,
         filepath         == 1.4.*,
         ghc-boot         == @ProjectVersionMunged@,
+        ghc-prim         == 0.5.*,
         template-haskell == 2.11.*,
         transformers     == 0.5.*
 

@@ -1,4 +1,5 @@
 setTestOpts([extra_run_opts('-ignore-dot-ghci'),
+             extra_ways(['ghci-ext']), # test with -fexternal-interpreter
              normalise_slashes])
 
 test('print001', normal, ghci_script, ['print001.script'])
@@ -19,7 +20,7 @@ test('print016', normal, ghci_script, ['print016.script'])
 test('print017', normal, ghci_script, ['print017.script'])
 test('print018', normal, ghci_script, ['print018.script'])
 test('print019', normal, ghci_script, ['print019.script'])
-test('print020', normal, ghci_script, ['print020.script'])
+test('print020', omit_ways(['ghci-ext']), ghci_script, ['print020.script'])
 test('print021', normal, ghci_script, ['print021.script'])
 test('print022', normal, ghci_script, ['print022.script'])
 test('print023', normal, ghci_script, ['print023.script'])
