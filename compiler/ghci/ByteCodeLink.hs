@@ -107,7 +107,9 @@ lookupStaticPtr hsc_env addr_of_label_string = do
 lookupIE :: HscEnv -> ItblEnv -> Name -> IO (Ptr ())
 lookupIE hsc_env ie con_nm =
   case lookupNameEnv ie con_nm of
-    Just (_, ItblPtr a) -> return (conInfoPtr (fromRemotePtr (castRemotePtr a)))
+    Just (_, ItblPtr a) ->
+       let prof = interpreterProfiled (hsc_dflags hsc_env) in
+       return (conInfoPtr prof (fromRemotePtr (castRemotePtr a)))
     Nothing -> do -- try looking up in the object files.
        let sym_to_find1 = nameToCLabel con_nm "con_info"
        m <- lookupSymbol hsc_env sym_to_find1

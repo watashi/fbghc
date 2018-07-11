@@ -28,7 +28,8 @@ import GHCi.InfoTable (StgInfoTable)
 import GHCi.FFI
 import GHCi.TH.Binary ()
 import GHCi.BreakArray
-
+import GHCi.Closure
+    
 import GHC.LanguageExtensions
 import GHC.ForeignSrcLang
 import GHC.Fingerprint
@@ -209,6 +210,18 @@ data Message a where
   RunModFinalizers :: RemoteRef (IORef QState)
                    -> [RemoteRef (TH.Q ())]
                    -> Message (QResult ())
+                      
+  -- | Remote interface to GHC.Exts.Heap.getClosureData. This is used by
+  -- the GHCi debugger to inspect values in the heap for :print and     
+  -- type reconstruction.                                               
+  GetClosure                                                            
+    :: HValueRef                                                        
+    -> Message (GenClosure HValueRef)                                   
+                                                                      
+  -- | Evaluate something. This is used to support :force in GHCi.      
+  Seq                                                                   
+    :: HValueRef                                                        
+    -> Message (EvalResult ())                                          
 
 deriving instance Show (Message a)
 
@@ -255,7 +268,7 @@ data THMessage a where
   -- | Indicates that this RunTH is finished, and the next message
   -- will be the result of RunTH (a QResult).
   RunTHDone :: THMessage ()
-
+               
 deriving instance Show (THMessage a)
 
 data THMsg = forall a . (Binary a, Show a) => THMsg (THMessage a)
@@ -462,8 +475,10 @@ getMessage = do
       31 -> Msg <$> return StartTH
       32 -> Msg <$> (RunModFinalizers <$> get <*> get)
       33 -> Msg <$> (AddSptEntry <$> get <*> get)
-      _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
-
+      34  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      35 -> Msg <$> (GetClosure <$> get)
+      _  -> Msg <$> (Seq <$> get)
+            
 putMessage :: Message a -> Put
 putMessage m = case m of
   Shutdown                    -> putWord8 0
@@ -501,6 +516,8 @@ putMessage m = case m of
   RunModFinalizers a b        -> putWord8 32 >> put a >> put b
   AddSptEntry a b             -> putWord8 33 >> put a >> put b
   RunTH st q loc ty           -> putWord8 34 >> put st >> put q >> put loc >> put ty
+  GetClosure a                -> putWord8 35 >> put a
+  Seq a                       -> putWord8 36 >> put a
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages
