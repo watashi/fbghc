@@ -423,6 +423,7 @@ getStablePtr(StgPtr p)
   StgWord sp;
 
   stableLock();
+  ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
   if (!stable_ptr_free) enlargeStablePtrTable();
   sp = stable_ptr_free - stable_ptr_table;
   stable_ptr_free  = (spEntry*)(stable_ptr_free->addr);

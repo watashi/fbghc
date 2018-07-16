@@ -12,8 +12,9 @@ module GHCi.Run
   ( run, redirectInterrupts
   ) where
 
+import GHCi.Closure
 import GHCi.CreateBCO
-import GHCi.InfoTable
+import GHCi.InfoTable hiding (ptrs)
 import GHCi.FFI
 import GHCi.Message
 import GHCi.ObjLink
@@ -26,13 +27,15 @@ import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception
 import Control.Monad
+import GHC.Arr (Array(..))
+import Data.Array
 import Data.Binary
 import Data.Binary.Get
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Unsafe as B
 import GHC.Exts
 import GHC.Stack
-import Foreign
+import Foreign hiding (void)
 import Foreign.C
 import GHC.Conc.Sync
 import GHC.IO hiding ( bracket )
@@ -86,7 +89,21 @@ run m = case m of
   MkConInfoTable ptrs nptrs tag ptrtag desc ->
     toRemotePtr <$> mkConInfoTable ptrs nptrs tag ptrtag desc
   StartTH -> startTH
+  GetClosure ref -> do
+    clos <- getClosureData =<< localRef ref
+    remoteRefs <- listArray (bounds (ptrs clos)) <$>
+      amapM mkRemoteRef (ptrs clos)
+    return clos { ptrs = remoteRefs }
+  Seq ref -> tryEval (void $ evaluate =<< localRef ref)
   _other -> error "GHCi.Run.run"
+
+-- Very carefully apply an operation to the elements of an array
+-- without adding any intermediate thunks.
+amapM :: Monad f => (t -> f b) -> Array Int t -> f [b]
+amapM f (Array i0 i _ arr#) = mapM g [0 .. i - i0]
+    where g (I# i#) = case indexArray# arr# i# of
+                          (# e #) -> f e
+
 
 evalStmt :: EvalOpts -> EvalExpr HValueRef -> IO (EvalStatus [HValueRef])
 evalStmt opts expr = do

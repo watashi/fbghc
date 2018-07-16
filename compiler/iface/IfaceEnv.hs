@@ -7,6 +7,7 @@ module IfaceEnv (
         externaliseName,
         lookupIfaceTop,
         lookupOrig, lookupOrigNameCache, extendNameCache,
+        lookupOrigIO,
         newIfaceName, newIfaceNames,
         extendIfaceIdEnv, extendIfaceTyVarEnv,
         tcIfaceLclId, tcIfaceTyVar, lookupIfaceVar,
@@ -158,7 +159,17 @@ lookupOrig mod occ
           mod `seq` occ `seq` return ()
         ; traceIf (text "lookup_orig" <+> ppr mod <+> ppr occ)
 
-        ; updNameCache $ \name_cache ->
+        ; updNameCache $ lookupNameCache mod occ
+        }
+
+lookupNameCache :: Module -> OccName -> NameCache -> (NameCache, Name)
+-- Lookup up the (Module,OccName) in the NameCache
+-- If you find it, return it; if not, allocate a fresh original name and extend
+-- the NameCache.
+-- Reason: this may the first occurrence of (say) Foo.bar we have encountered.
+-- If we need to explore its value we will load Foo.hi; but meanwhile all we
+-- need is a Name for it.
+lookupNameCache mod occ name_cache =
           case lookupOrigNameCache (nsNames name_cache) mod occ of {
               Just name -> (name_cache, name);
               Nothing   ->
@@ -168,7 +179,12 @@ lookupOrig mod occ
                     name      = mkExternalName uniq mod occ noSrcSpan
                     new_cache = extendNameCache (nsNames name_cache) mod occ name
                   in (name_cache{ nsUniqs = us, nsNames = new_cache }, name)
-    }}}
+    }}
+
+lookupOrigIO :: HscEnv -> Module -> OccName -> IO Name
+lookupOrigIO hsc_env mod occ = do
+  mod `seq` occ `seq` return ()
+  updNameCacheIO hsc_env $ lookupNameCache mod occ
 
 externaliseName :: Module -> Name -> TcRnIf m n Name
 -- Take an Internal Name and make it an External one,

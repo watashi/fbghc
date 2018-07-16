@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, MagicHash, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, MagicHash, ScopedTypeVariables, DeriveGeneric #-}
 
 -- Get definitions for the structs, constants & config etc.
 #include "Rts.h"
@@ -23,6 +23,7 @@ import Foreign
 import Foreign.C -- needed for 2nd stage
 import GHC.Ptr -- needed for 2nd stage
 import GHC.Exts -- needed for 2nd stage
+import GHC.Generics
 import System.IO.Unsafe -- needed for 2nd stage
 
 type ItblCodes = Either [Word8] [Word32]
@@ -45,7 +46,7 @@ data StgInfoTable = StgInfoTable {
    tipe   :: HalfWord,
    srtlen :: HalfWord,
    code   :: Maybe ItblCodes -- Just <=> ghciTablesNextToCode
-  }
+  } deriving (Generic, Show)
 
 peekItbl :: Ptr StgInfoTable -> IO StgInfoTable
 peekItbl a0 = do
