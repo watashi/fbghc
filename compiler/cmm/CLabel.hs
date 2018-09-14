@@ -102,7 +102,9 @@ module CLabel (
         -- * Conversions
         toClosureLbl, toSlowEntryLbl, toEntryLbl, toInfoLbl, hasHaskellName,
 
-        pprCLabel
+        pprCLabel,
+        isInfoTableLabel,
+        isConInfoTableLabel
     ) where
 
 #include "HsVersions.h"
@@ -607,6 +609,19 @@ isSomeRODataLabel (SRTLabel _) = True
 -- info table defined in cmm (.cmm)
 isSomeRODataLabel (CmmLabel _ _ CmmInfo) = True
 isSomeRODataLabel _lbl = False
+
+-- | Whether label is points to some kind of info table
+isInfoTableLabel :: CLabel -> Bool
+isInfoTableLabel (IdLabel _ _ InfoTable)      = True
+isInfoTableLabel (IdLabel _ _ LocalInfoTable) = True
+isInfoTableLabel (IdLabel _ _ ConInfoTable)   = True
+isInfoTableLabel (IdLabel _ _ BlockInfoTable) = True
+isInfoTableLabel _                            = False
+
+-- | Whether label is points to constructor info table
+isConInfoTableLabel :: CLabel -> Bool
+isConInfoTableLabel (IdLabel _ _ ConInfoTable)   = True
+isConInfoTableLabel _                            = False
 
 -- | Get the label size field from a ForeignLabel
 foreignLabelStdcallInfo :: CLabel -> Maybe Int
