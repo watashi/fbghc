@@ -986,13 +986,9 @@ instance Outputable CLabel where
 
 pprCLabel :: Platform -> CLabel -> SDoc
 
-pprCLabel platform (AsmTempLabel u)
+pprCLabel _ (AsmTempLabel u)
  | cGhcWithNativeCodeGen == "YES"
-  =  getPprStyle $ \ sty ->
-     if asmStyle sty then
-        ptext (asmTempLabelPrefix platform) <> pprUnique u
-     else
-        char '_' <> pprUnique u
+  =  tempLabelPrefixOrUnderscore <> pprUnique u
 
 pprCLabel platform (AsmTempDerivedLabel l suf)
  | cGhcWithNativeCodeGen == "YES"
@@ -1011,7 +1007,15 @@ pprCLabel _ PicBaseLabel
 
 pprCLabel platform (DeadStripPreventer lbl)
  | cGhcWithNativeCodeGen == "YES"
-   = pprCLabel platform lbl <> text "_dsp"
+   =
+   {-
+      `lbl` can be temp one but we need to ensure that dsp label will stay
+      in the final binary so we prepend non-temp prefix ("dsp_") and
+      optional `_` (underscore) because this is how you mark non-temp symbols
+      on some platforms (Darwin)
+   -}
+   maybe_underscore $ text "dsp_"
+   <> pprCLabel platform lbl <> text "_dsp"
 
 pprCLabel _ (StringLitLabel u)
  | cGhcWithNativeCodeGen == "YES"
@@ -1051,10 +1055,13 @@ pprCLbl (CaseLabel u CaseDefault)
   = hcat [pprUnique u, text "_dflt"]
 
 pprCLbl (SRTLabel u)
-  = pprUnique u <> pp_cSEP <> text "srt"
+  = tempLabelPrefixOrUnderscore <> pprUnique u <> pp_cSEP <> text "srt"
 
-pprCLbl (LargeSRTLabel u)  = pprUnique u <> pp_cSEP <> text "srtd"
-pprCLbl (LargeBitmapLabel u)  = text "b" <> pprUnique u <> pp_cSEP <> text "btm"
+pprCLbl (LargeSRTLabel u)  =
+  tempLabelPrefixOrUnderscore <> pprUnique u <> pp_cSEP <> text "srtd"
+pprCLbl (LargeBitmapLabel u)  =
+  tempLabelPrefixOrUnderscore
+  <> char 'b' <> pprUnique u <> pp_cSEP <> text "btm"
 -- Some bitsmaps for tuple constructors have a numeric tag (e.g. '7')
 -- until that gets resolved we'll just force them to start
 -- with a letter so the label will be legal assmbly code.
@@ -1118,7 +1125,8 @@ pprCLbl (RtsLabel (RtsSlowFastTickyCtr pat))
 pprCLbl (ForeignLabel str _ _ _)
   = ftext str
 
-pprCLbl (IdLabel name _cafs flavor) = ppr name <> ppIdFlavor flavor
+pprCLbl (IdLabel name _cafs flavor) =
+  internalNamePrefix name <> ppr name <> ppIdFlavor flavor
 
 pprCLbl (CC_Label cc)           = ppr cc
 pprCLbl (CCS_Label ccs)         = ppr ccs
@@ -1162,6 +1170,24 @@ instance Outputable ForeignLabelSource where
         ForeignLabelInPackage pkgId     -> parens $ text "package: " <> ppr pkgId
         ForeignLabelInThisPackage       -> parens $ text "this package"
         ForeignLabelInExternalPackage   -> parens $ text "external package"
+
+internalNamePrefix :: Name -> SDoc
+internalNamePrefix name = getPprStyle $ \ sty ->
+  if codeStyle sty && isRandomGenerated then
+    sdocWithPlatform $ \platform ->
+      ptext (asmTempLabelPrefix platform)
+  else
+    empty
+  where
+    isRandomGenerated = not $ isExternalName name
+
+tempLabelPrefixOrUnderscore :: SDoc
+tempLabelPrefixOrUnderscore = sdocWithPlatform $ \platform ->
+  getPprStyle $ \ sty ->
+   if asmStyle sty then
+      ptext (asmTempLabelPrefix platform)
+   else
+      char '_'
 
 -- -----------------------------------------------------------------------------
 -- Machine-dependent knowledge about labels.
