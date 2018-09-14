@@ -110,7 +110,9 @@ module CLabel (
         -- * Conversions
         toClosureLbl, toSlowEntryLbl, toEntryLbl, toInfoLbl, toRednCountsLbl, hasHaskellName,
 
-        pprCLabel
+        pprCLabel,
+        isInfoTableLabel,
+        isConInfoTableLabel
     ) where
 
 #include "HsVersions.h"
@@ -583,6 +585,18 @@ isBytesLabel _lbl = False
 isForeignLabel :: CLabel -> Bool
 isForeignLabel (ForeignLabel _ _ _ _) = True
 isForeignLabel _lbl = False
+
+-- | Whether label is points to some kind of info table
+isInfoTableLabel :: CLabel -> Bool
+isInfoTableLabel (IdLabel _ _ InfoTable)      = True
+isInfoTableLabel (IdLabel _ _ LocalInfoTable) = True
+isInfoTableLabel (IdLabel _ _ ConInfoTable)   = True
+isInfoTableLabel _                            = False
+
+-- | Whether label is points to constructor info table
+isConInfoTableLabel :: CLabel -> Bool
+isConInfoTableLabel (IdLabel _ _ ConInfoTable)   = True
+isConInfoTableLabel _                            = False
 
 -- | Get the label size field from a ForeignLabel
 foreignLabelStdcallInfo :: CLabel -> Maybe Int
@@ -1360,4 +1374,3 @@ pprDynamicLinkerAsmLabel platform dllInfo lbl
              SymbolPtr -> text "__imp_" <> ppr lbl
              _         -> panic "pprDynamicLinkerAsmLabel"
    else panic "pprDynamicLinkerAsmLabel"
-
