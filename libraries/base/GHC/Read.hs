@@ -36,6 +36,9 @@ module GHC.Read
   , choose
   , readListDefault, readListPrecDefault
   , readNumber
+  , readField
+  , readFieldHash
+  , readSymField
 
   -- Temporary
   , readParen
@@ -69,6 +72,7 @@ import GHC.Show
 import GHC.Base
 import GHC.Arr
 import GHC.Word
+import GHC.List (filter)
 
 
 -- | @'readParen' 'True' p@ parses what @p@ parses, but surrounded with
@@ -359,10 +363,71 @@ choose sps = foldr ((+++) . try_one) pfail sps
                                     L.Symbol s' | s==s' -> p
                                     _other              -> pfail }
 
+-- See Note [Why readField]
+
+-- | 'Read' parser for a record field, of the form @fieldName=value@. The
+-- @fieldName@ must be an alphanumeric identifier; for symbols (operator-style)
+-- field names, e.g. @(#)@, use 'readSymField'). The second argument is a
+-- parser for the field value.
+readField :: String -> ReadPrec a -> ReadPrec a
+readField fieldName readVal = do
+        expectP (L.Ident fieldName)
+        expectP (L.Punc "=")
+        readVal
+{-# NOINLINE readField #-}
+
+-- See Note [Why readField]
+
+-- | 'Read' parser for a record field, of the form @fieldName#=value@. That is,
+-- an alphanumeric identifier @fieldName@ followed by the symbol @#@. The
+-- second argument is a parser for the field value.
+--
+-- Note that 'readField' does not suffice for this purpose due to
+-- <https://ghc.haskell.org/trac/ghc/ticket/5041 Trac #5041>.
+readFieldHash :: String -> ReadPrec a -> ReadPrec a
+readFieldHash fieldName readVal = do
+        expectP (L.Ident fieldName)
+        expectP (L.Symbol "#")
+        expectP (L.Punc "=")
+        readVal
+{-# NOINLINE readFieldHash #-}
+
+-- See Note [Why readField]
+
+-- | 'Read' parser for a symbol record field, of the form @(###)=value@ (where
+-- @###@ is the field name). The field name must be a symbol (operator-style),
+-- e.g. @(#)@. For regular (alphanumeric) field names, use 'readField'. The
+-- second argument is a parser for the field value.
+readSymField :: String -> ReadPrec a -> ReadPrec a
+readSymField fieldName readVal = do
+        expectP (L.Punc "(")
+        expectP (L.Symbol fieldName)
+        expectP (L.Punc ")")
+        expectP (L.Punc "=")
+        readVal
+{-# NOINLINE readSymField #-}
+
+
+-- Note [Why readField]
+--
+-- Previously, the code for automatically deriving Read instance (in
+-- typecheck/TcGenDeriv.hs) would generate inline code for parsing fields;
+-- this, however, turned out to produce massive amounts of intermediate code,
+-- and produced a considerable performance hit in the code generator.
+-- Since Read instances are not generally supposed to be perfomance critical,
+-- the readField and readSymField functions have been factored out, and the
+-- code generator now just generates calls rather than manually inlining the
+-- parsers. For large record types (e.g. 500 fields), this produces a
+-- significant performance boost.
+--
+-- See also Trac #14364.
+
+
 --------------------------------------------------------------
 -- Simple instances of Read
 --------------------------------------------------------------
 
+-- | @since 2.01
 deriving instance Read GeneralCategory
 
 -- | @since 2.01
@@ -411,6 +476,9 @@ instance Read Ordering where
 
   readListPrec = readListPrecDefault
   readList     = readListDefault
+
+-- | @since 4.11.0.0
+deriving instance Read a => Read (NonEmpty a)
 
 --------------------------------------------------------------
 -- Structure instances of Read: Maybe, List etc
@@ -548,6 +616,19 @@ instance Read Integer where
   readPrec     = readNumber convertInt
   readListPrec = readListPrecDefault
   readList     = readListDefault
+
+
+#if defined(MIN_VERSION_integer_gmp)
+-- | @since 4.8.0.0
+instance Read Natural where
+  readsPrec d = map (\(n, s) -> (fromInteger n, s))
+                  . filter ((>= 0) . (\(x,_)->x)) . readsPrec d
+#else
+-- | @since 4.8.0.0
+instance Read Natural where
+    readsPrec d = map (\(n, s) -> (Natural n, s))
+                  . filter ((>= 0) . (\(x,_)->x)) . readsPrec d
+#endif
 
 -- | @since 2.01
 instance Read Float where

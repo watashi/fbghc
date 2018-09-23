@@ -1,10 +1,10 @@
-{-# LANGUAGE BinaryLiterals, CPP, ScopedTypeVariables #-}
+{-# LANGUAGE BinaryLiterals, CPP, ScopedTypeVariables, BangPatterns #-}
 
 --
 --  (c) The University of Glasgow 2002-2006
 --
 
-{-# OPTIONS_GHC -O #-}
+{-# OPTIONS_GHC -O2 #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
 
@@ -15,10 +15,15 @@ module BinIface (
         getSymtabName,
         getDictFastString,
         CheckHiWay(..),
-        TraceBinIFaceReading(..)
+        TraceBinIFaceReading(..),
+        getWithUserData,
+        putWithUserData
+
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import TcRnMonad
 import PrelInfo   ( isKnownKeyName, lookupKnownKeyName )
@@ -42,14 +47,18 @@ import FastString
 import Constants
 import Util
 
+import Data.Array
+import Data.Array.ST
+import Data.Array.Unsafe
 import Data.Bits
 import Data.Char
-import Data.List
 import Data.Word
-import Data.Array
 import Data.IORef
+import Data.Foldable
 import Control.Monad
-
+import Control.Monad.ST
+import Control.Monad.Trans.Class
+import qualified Control.Monad.Trans.State.Strict as State
 
 -- ---------------------------------------------------------------------------
 -- Reading and writing binary interface files
@@ -128,7 +137,14 @@ readBinIface_ dflags checkHiWay traceBinIFaceReading hi_path ncu = do
     wantedGot "Way" way_descr check_way
     when (checkHiWay == CheckHiWay) $
         errorOnMismatch "mismatched interface file ways" way_descr check_way
+    getWithUserData ncu bh
 
+
+-- | This performs a get action after reading the dictionary and symbol
+-- table. It is necessary to run this before trying to deserialise any
+-- Names or FastStrings.
+getWithUserData :: Binary a => NameCacheUpdater -> BinHandle -> IO a
+getWithUserData ncu bh = do
     -- Read the dictionary
     -- The next word in the file is a pointer to where the dictionary is
     -- (probably at the end of the file)
@@ -173,6 +189,17 @@ writeBinIface dflags hi_path mod_iface = do
     let way_descr = getWayDescr dflags
     put_  bh way_descr
 
+
+    putWithUserData (debugTraceMsg dflags 3) bh mod_iface
+    -- And send the result to the file
+    writeBinMem bh hi_path
+
+-- | Put a piece of data with an initialised `UserData` field. This
+-- is necessary if you want to serialise Names or FastStrings.
+-- It also writes a symbol table and the dictionary.
+-- This segment should be read using `getWithUserData`.
+putWithUserData :: Binary a => (SDoc -> IO ()) -> BinHandle -> a -> IO ()
+putWithUserData log_action bh payload = do
     -- Remember where the dictionary pointer will go
     dict_p_p <- tellBin bh
     -- Placeholder for ptr to dictionary
@@ -181,8 +208,7 @@ writeBinIface dflags hi_path mod_iface = do
     -- Remember where the symbol table pointer will go
     symtab_p_p <- tellBin bh
     put_ bh symtab_p_p
-
-    -- Make some intial state
+    -- Make some initial state
     symtab_next <- newFastMutInt
     writeFastMutInt symtab_next 0
     symtab_map <- newIORef emptyUFM
@@ -200,7 +226,7 @@ writeBinIface dflags hi_path mod_iface = do
     bh <- return $ setUserData bh $ newWriteState (putName bin_dict bin_symtab)
                                                   (putName bin_dict bin_symtab)
                                                   (putFastString bin_dict)
-    put_ bh mod_iface
+    put_ bh payload
 
     -- Write the symtab pointer at the front of the file
     symtab_p <- tellBin bh        -- This is where the symtab will start
@@ -211,13 +237,13 @@ writeBinIface dflags hi_path mod_iface = do
     symtab_next <- readFastMutInt symtab_next
     symtab_map  <- readIORef symtab_map
     putSymbolTable bh symtab_next symtab_map
-    debugTraceMsg dflags 3 (text "writeBinIface:" <+> int symtab_next
+    log_action (text "writeBinIface:" <+> int symtab_next
                                 <+> text "Names")
 
     -- NB. write the dictionary after the symbol table, because
     -- writing the symbol table may create more dictionary entries.
 
-    -- Write the dictionary pointer at the fornt of the file
+    -- Write the dictionary pointer at the front of the file
     dict_p <- tellBin bh          -- This is where the dictionary will start
     putAt bh dict_p_p dict_p      -- Fill in the placeholder
     seekBin bh dict_p             -- Seek back to the end of the file
@@ -226,11 +252,10 @@ writeBinIface dflags hi_path mod_iface = do
     dict_next <- readFastMutInt dict_next_ref
     dict_map  <- readIORef dict_map_ref
     putDictionary bh dict_next dict_map
-    debugTraceMsg dflags 3 (text "writeBinIface:" <+> int dict_next
+    log_action (text "writeBinIface:" <+> int dict_next
                                 <+> text "dict entries")
 
-    -- And send the result to the file
-    writeBinMem bh hi_path
+
 
 -- | Initial ram buffer to allocate for writing interface files
 initBinMemSize :: Int
@@ -259,15 +284,24 @@ getSymbolTable bh ncu = do
     sz <- get bh
     od_names <- sequence (replicate sz (get bh))
     updateNameCache ncu $ \namecache ->
-        let arr = listArray (0,sz-1) names
-            (namecache', names) =
-                mapAccumR (fromOnDiskName arr) namecache od_names
-        in (namecache', arr)
+        runST $ flip State.evalStateT namecache $ do
+            mut_arr <- lift $ newSTArray_ (0, sz-1)
+            for_ (zip [0..] od_names) $ \(i, odn) -> do
+                (nc, !n) <- State.gets $ \nc -> fromOnDiskName nc odn
+                lift $ writeArray mut_arr i n
+                State.put nc
+            arr <- lift $ unsafeFreeze mut_arr
+            namecache' <- State.get
+            return (namecache', arr)
+  where
+    -- This binding is required because the type of newArray_ cannot be inferred
+    newSTArray_ :: forall s. (Int, Int) -> ST s (STArray s Int Name)
+    newSTArray_ = newArray_
 
 type OnDiskName = (UnitId, ModuleName, OccName)
 
-fromOnDiskName :: Array Int Name -> NameCache -> OnDiskName -> (NameCache, Name)
-fromOnDiskName _ nc (pid, mod_name, occ) =
+fromOnDiskName :: NameCache -> OnDiskName -> (NameCache, Name)
+fromOnDiskName nc (pid, mod_name, occ) =
     let mod   = mkModule pid mod_name
         cache = nsNames nc
     in case lookupOrigNameCache cache  mod occ of

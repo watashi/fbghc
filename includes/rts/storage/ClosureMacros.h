@@ -109,7 +109,7 @@ INLINE_HEADER const StgConInfoTable *get_con_itbl(const StgClosure *c)
 
 INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con)
 {
-    return get_itbl(con)->srt_bitmap;
+    return get_itbl(con)->srt;
 }
 
 /* -----------------------------------------------------------------------------
@@ -172,7 +172,6 @@ INLINE_HEADER StgHalfWord GET_TAG(const StgClosure *con)
    -------------------------------------------------------------------------- */
 
 /* These are hard-coded. */
-#define FUN_STATIC_LINK(p)   (&(p)->payload[0])
 #define THUNK_STATIC_LINK(p) (&(p)->payload[1])
 #define IND_STATIC_LINK(p)   (&(p)->payload[1])
 
@@ -182,8 +181,6 @@ STATIC_LINK(const StgInfoTable *info, StgClosure *p)
     switch (info->type) {
     case THUNK_STATIC:
         return THUNK_STATIC_LINK(p);
-    case FUN_STATIC:
-        return FUN_STATIC_LINK(p);
     case IND_STATIC:
         return IND_STATIC_LINK(p);
     default:
@@ -404,13 +401,13 @@ closure_sizeW_ (const StgClosure *p, const StgInfoTable *info)
         return arr_words_sizeW((StgArrBytes *)p);
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         return mut_arr_ptrs_sizeW((StgMutArrPtrs*)p);
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         return small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs*)p);
     case TSO:
         return sizeofW(StgTSO);
@@ -533,8 +530,7 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 
 #if ZERO_SLOP_FOR_LDV_PROF || ZERO_SLOP_FOR_SANITY_CHECK
 #define OVERWRITING_CLOSURE(c) overwritingClosure(c)
-#define OVERWRITING_CLOSURE_OFS(c,n) \
-    overwritingClosureOfs(c,n)
+#define OVERWRITING_CLOSURE_OFS(c,n) overwritingClosureOfs(c,n)
 #else
 #define OVERWRITING_CLOSURE(c) /* nothing */
 #define OVERWRITING_CLOSURE_OFS(c,n) /* nothing */
@@ -544,26 +540,30 @@ INLINE_HEADER StgWord8 *mutArrPtrsCard (StgMutArrPtrs *a, W_ n)
 void LDV_recordDead (const StgClosure *c, uint32_t size);
 #endif
 
-EXTERN_INLINE void overwritingClosure (StgClosure *p);
-EXTERN_INLINE void overwritingClosure (StgClosure *p)
+EXTERN_INLINE void overwritingClosure_ (StgClosure *p,
+                                        uint32_t offset /* in words */,
+                                        uint32_t size /* closure size, in words */);
+EXTERN_INLINE void overwritingClosure_ (StgClosure *p, uint32_t offset, uint32_t size)
 {
-    uint32_t size, i;
-
 #if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
     // see Note [zeroing slop], also #8402
     if (era <= 0) return;
 #endif
-
-    size = closure_sizeW(p);
 
     // For LDV profiling, we need to record the closure as dead
 #if defined(PROFILING)
     LDV_recordDead(p, size);
 #endif
 
-    for (i = 0; i < size - sizeofW(StgThunkHeader); i++) {
-        ((StgThunk *)(p))->payload[i] = 0;
+    for (uint32_t i = offset; i < size; i++) {
+        ((StgWord *)p)[i] = 0;
     }
+}
+
+EXTERN_INLINE void overwritingClosure (StgClosure *p);
+EXTERN_INLINE void overwritingClosure (StgClosure *p)
+{
+    overwritingClosure_(p, sizeofW(StgThunkHeader), closure_sizeW(p));
 }
 
 // Version of 'overwritingClosure' which overwrites only a suffix of a
@@ -576,22 +576,12 @@ EXTERN_INLINE void overwritingClosure (StgClosure *p)
 EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset);
 EXTERN_INLINE void overwritingClosureOfs (StgClosure *p, uint32_t offset)
 {
-    uint32_t size, i;
+    overwritingClosure_(p, offset, closure_sizeW(p));
+}
 
-#if ZERO_SLOP_FOR_LDV_PROF && !ZERO_SLOP_FOR_SANITY_CHECK
-    // see Note [zeroing slop], also #8402
-    if (era <= 0) return;
-#endif
-
-    size = closure_sizeW(p);
-
-    ASSERT(offset <= size);
-
-    // For LDV profiling, we need to record the closure as dead
-#if defined(PROFILING)
-    LDV_recordDead(p, size);
-#endif
-
-    for (i = offset; i < size; i++)
-        ((StgWord *)p)[i] = 0;
+// Version of 'overwritingClosure' which takes closure size as argument.
+EXTERN_INLINE void overwritingClosureSize (StgClosure *p, uint32_t size /* in words */);
+EXTERN_INLINE void overwritingClosureSize (StgClosure *p, uint32_t size)
+{
+    overwritingClosure_(p, sizeofW(StgThunkHeader), size);
 }

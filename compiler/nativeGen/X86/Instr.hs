@@ -8,7 +8,7 @@
 --
 -----------------------------------------------------------------------------
 
-module X86.Instr (Instr(..), Operand(..), PrefetchVariant(..), JumpDest,
+module X86.Instr (Instr(..), Operand(..), PrefetchVariant(..), JumpDest(..),
                   getJumpDestBlockId, canShortcut, shortcutStatics,
                   shortcutJump, i386_insert_ffrees, allocMoreStack,
                   maxSpillSlots, archWordFormat)
@@ -16,6 +16,8 @@ where
 
 #include "HsVersions.h"
 #include "nativeGen/NCG.h"
+
+import GhcPrelude
 
 import X86.Cond
 import X86.Regs
@@ -320,7 +322,7 @@ data Instr
         | JXX_GBL     Cond Imm      -- non-local version of JXX
         -- Table jump
         | JMP_TBL     Operand   -- Address to jump to
-                      [Maybe BlockId] -- Blocks in the jump table
+                      [Maybe JumpDest] -- Targets of the jump table
                       Section   -- Data section jump table should be put in
                       CLabel    -- Label of jump table
         | CALL        (Either Imm Reg) [Reg]
@@ -342,6 +344,10 @@ data Instr
         | POPCNT      Format Operand Reg -- [SSE4.2] count number of bits set to 1
         | BSF         Format Operand Reg -- bit scan forward
         | BSR         Format Operand Reg -- bit scan reverse
+
+    -- bit manipulation instructions
+        | PDEP        Format Operand Operand Reg -- [BMI2] deposit bits to   the specified mask
+        | PEXT        Format Operand Operand Reg -- [BMI2] extract bits from the specified mask
 
     -- prefetch
         | PREFETCH  PrefetchVariant Format Operand -- prefetch Variant, addr size, address to prefetch
@@ -461,6 +467,9 @@ x86_regUsageOfInstr platform instr
     POPCNT _ src dst -> mkRU (use_R src []) [dst]
     BSF    _ src dst -> mkRU (use_R src []) [dst]
     BSR    _ src dst -> mkRU (use_R src []) [dst]
+
+    PDEP   _ src mask dst -> mkRU (use_R src $ use_R mask []) [dst]
+    PEXT   _ src mask dst -> mkRU (use_R src $ use_R mask []) [dst]
 
     -- note: might be a better way to do this
     PREFETCH _  _ src -> mkRU (use_R src []) []
@@ -638,6 +647,8 @@ x86_patchRegsOfInstr instr env
     CLTD _              -> instr
 
     POPCNT fmt src dst -> POPCNT fmt (patchOp src) (env dst)
+    PDEP   fmt src mask dst -> PDEP   fmt (patchOp src) (patchOp mask) (env dst)
+    PEXT   fmt src mask dst -> PEXT   fmt (patchOp src) (patchOp mask) (env dst)
     BSF    fmt src dst -> BSF    fmt (patchOp src) (env dst)
     BSR    fmt src dst -> BSR    fmt (patchOp src) (env dst)
 
@@ -693,7 +704,7 @@ x86_jumpDestsOfInstr
 x86_jumpDestsOfInstr insn
   = case insn of
         JXX _ id        -> [id]
-        JMP_TBL _ ids _ _ -> [id | Just id <- ids]
+        JMP_TBL _ ids _ _ -> [id | Just (DestBlockId id) <- ids]
         _               -> []
 
 
@@ -704,8 +715,12 @@ x86_patchJumpInstr insn patchF
   = case insn of
         JXX cc id       -> JXX cc (patchF id)
         JMP_TBL op ids section lbl
-          -> JMP_TBL op (map (fmap patchF) ids) section lbl
+          -> JMP_TBL op (map (fmap (patchJumpDest patchF)) ids) section lbl
         _               -> insn
+    where
+        patchJumpDest f (DestBlockId id) = DestBlockId (f id)
+        patchJumpDest _ dest             = dest
+
 
 
 
@@ -843,25 +858,104 @@ x86_mkJumpInstr
 x86_mkJumpInstr id
         = [JXX ALWAYS id]
 
+-- Note [Windows stack layout]
+-- | On most OSes the kernel will place a guard page after the current stack
+--   page.  If you allocate larger than a page worth you may jump over this
+--   guard page.  Not only is this a security issue, but on certain OSes such
+--   as Windows a new page won't be allocated if you don't hit the guard.  This
+--   will cause a segfault or access fault.
+--
+--   This function defines if the current allocation amount requires a probe.
+--   On Windows (for now) we emit a call to _chkstk for this.  For other OSes
+--   this is not yet implemented.
+--   See https://docs.microsoft.com/en-us/windows/desktop/DevNotes/-win32-chkstk
+--   The Windows stack looks like this:
+--
+--                         +-------------------+
+--                         |        SP         |
+--                         +-------------------+
+--                         |                   |
+--                         |    GUARD PAGE     |
+--                         |                   |
+--                         +-------------------+
+--                         |                   |
+--                         |                   |
+--                         |     UNMAPPED      |
+--                         |                   |
+--                         |                   |
+--                         +-------------------+
+--
+--   In essense each allocation larger than a page size needs to be chunked and
+--   a probe emitted after each page allocation.  You have to hit the guard
+--   page so the kernel can map in the next page, otherwise you'll segfault.
+--
+needs_probe_call :: Platform -> Int -> Bool
+needs_probe_call platform amount
+  = case platformOS platform of
+     OSMinGW32 -> case platformArch platform of
+                    ArchX86    -> amount > (4 * 1024)
+                    ArchX86_64 -> amount > (8 * 1024)
+                    _          -> False
+     _         -> False
 
 x86_mkStackAllocInstr
         :: Platform
         -> Int
-        -> Instr
+        -> [Instr]
 x86_mkStackAllocInstr platform amount
-  = case platformArch platform of
-      ArchX86    -> SUB II32 (OpImm (ImmInt amount)) (OpReg esp)
-      ArchX86_64 -> SUB II64 (OpImm (ImmInt amount)) (OpReg rsp)
-      _ -> panic "x86_mkStackAllocInstr"
+  = case platformOS platform of
+      OSMinGW32 ->
+        -- These will clobber AX but this should be ok because
+        --
+        -- 1. It is the first thing we do when entering the closure and AX is
+        --    a caller saved registers on Windows both on x86_64 and x86.
+        --
+        -- 2. The closures are only entered via a call or longjmp in which case
+        --    there are no expectations for volatile registers.
+        --
+        -- 3. When the target is a local branch point it is re-targeted
+        --    after the dealloc, preserving #2.  See note [extra spill slots].
+        --
+        -- We emit a call because the stack probes are quite involved and
+        -- would bloat code size a lot.  GHC doesn't really have an -Os.
+        -- __chkstk is guaranteed to leave all nonvolatile registers and AX
+        -- untouched.  It's part of the standard prologue code for any Windows
+        -- function dropping the stack more than a page.
+        -- See Note [Windows stack layout]
+        case platformArch platform of
+            ArchX86    | needs_probe_call platform amount ->
+                           [ MOV II32 (OpImm (ImmInt amount)) (OpReg eax)
+                           , CALL (Left $ strImmLit "___chkstk_ms") [eax]
+                           , SUB II32 (OpReg eax) (OpReg esp)
+                           ]
+                       | otherwise ->
+                           [ SUB II32 (OpImm (ImmInt amount)) (OpReg esp)
+                           , TEST II32 (OpReg esp) (OpReg esp)
+                           ]
+            ArchX86_64 | needs_probe_call platform amount ->
+                           [ MOV II64 (OpImm (ImmInt amount)) (OpReg rax)
+                           , CALL (Left $ strImmLit "__chkstk_ms") [rax]
+                           , SUB II64 (OpReg rax) (OpReg rsp)
+                           ]
+                       | otherwise ->
+                           [ SUB II64 (OpImm (ImmInt amount)) (OpReg rsp)
+                           , TEST II64 (OpReg rsp) (OpReg rsp)
+                           ]
+            _ -> panic "x86_mkStackAllocInstr"
+      _       ->
+        case platformArch platform of
+          ArchX86    -> [ SUB II32 (OpImm (ImmInt amount)) (OpReg esp) ]
+          ArchX86_64 -> [ SUB II64 (OpImm (ImmInt amount)) (OpReg rsp) ]
+          _ -> panic "x86_mkStackAllocInstr"
 
 x86_mkStackDeallocInstr
         :: Platform
         -> Int
-        -> Instr
+        -> [Instr]
 x86_mkStackDeallocInstr platform amount
   = case platformArch platform of
-      ArchX86    -> ADD II32 (OpImm (ImmInt amount)) (OpReg esp)
-      ArchX86_64 -> ADD II64 (OpImm (ImmInt amount)) (OpReg rsp)
+      ArchX86    -> [ADD II32 (OpImm (ImmInt amount)) (OpReg esp)]
+      ArchX86_64 -> [ADD II64 (OpImm (ImmInt amount)) (OpReg rsp)]
       _ -> panic "x86_mkStackDeallocInstr"
 
 i386_insert_ffrees
@@ -981,7 +1075,7 @@ allocMoreStack platform slots proc@(CmmProc info lbl live (ListGraph code)) = do
 
       insert_stack_insns (BasicBlock id insns)
          | Just new_blockid <- mapLookup id new_blockmap
-         = [ BasicBlock id [alloc, JXX ALWAYS new_blockid]
+         = [ BasicBlock id $ alloc ++ [JXX ALWAYS new_blockid]
            , BasicBlock new_blockid block' ]
          | otherwise
          = [ BasicBlock id block' ]
@@ -989,7 +1083,7 @@ allocMoreStack platform slots proc@(CmmProc info lbl live (ListGraph code)) = do
            block' = foldr insert_dealloc [] insns
 
       insert_dealloc insn r = case insn of
-         JMP _ _     -> dealloc : insn : r
+         JMP _ _     -> dealloc ++ (insn : r)
          JXX_GBL _ _ -> panic "insert_dealloc: cannot handle JXX_GBL"
          _other      -> x86_patchJumpInstr insn retarget : r
            where retarget b = fromMaybe b (mapLookup b new_blockmap)
@@ -997,7 +1091,6 @@ allocMoreStack platform slots proc@(CmmProc info lbl live (ListGraph code)) = do
       new_code = concatMap insert_stack_insns code
     -- in
     return (CmmProc info lbl live (ListGraph new_code))
-
 
 data JumpDest = DestBlockId BlockId | DestImm Imm
 
@@ -1015,14 +1108,24 @@ canShortcut _                    = Nothing
 -- The blockset helps avoid following cycles.
 shortcutJump :: (BlockId -> Maybe JumpDest) -> Instr -> Instr
 shortcutJump fn insn = shortcutJump' fn (setEmpty :: LabelSet) insn
-  where shortcutJump' fn seen insn@(JXX cc id) =
-          if setMember id seen then insn
-          else case fn id of
-                 Nothing                -> insn
-                 Just (DestBlockId id') -> shortcutJump' fn seen' (JXX cc id')
-                 Just (DestImm imm)     -> shortcutJump' fn seen' (JXX_GBL cc imm)
-               where seen' = setInsert id seen
-        shortcutJump' _ _ other = other
+  where
+    shortcutJump' :: (BlockId -> Maybe JumpDest) -> LabelSet -> Instr -> Instr
+    shortcutJump' fn seen insn@(JXX cc id) =
+        if setMember id seen then insn
+        else case fn id of
+            Nothing                -> insn
+            Just (DestBlockId id') -> shortcutJump' fn seen' (JXX cc id')
+            Just (DestImm imm)     -> shortcutJump' fn seen' (JXX_GBL cc imm)
+        where seen' = setInsert id seen
+    shortcutJump' fn _ (JMP_TBL addr blocks section tblId) =
+        let updateBlock (Just (DestBlockId bid))  =
+                case fn bid of
+                    Nothing   -> Just (DestBlockId bid )
+                    Just dest -> Just dest
+            updateBlock dest = dest
+            blocks' = map updateBlock blocks
+        in  JMP_TBL addr blocks' section tblId
+    shortcutJump' _ _ other = other
 
 -- Here because it knows about JumpDest
 shortcutStatics :: (BlockId -> Maybe JumpDest) -> (Alignment, CmmStatics) -> (Alignment, CmmStatics)
@@ -1033,14 +1136,14 @@ shortcutStatics fn (align, Statics lbl statics)
 
 shortcutLabel :: (BlockId -> Maybe JumpDest) -> CLabel -> CLabel
 shortcutLabel fn lab
-  | Just uq <- maybeAsmTemp lab = shortBlockId fn emptyUniqSet (mkBlockId uq)
-  | otherwise                   = lab
+  | Just blkId <- maybeLocalBlockLabel lab = shortBlockId fn emptyUniqSet blkId
+  | otherwise                              = lab
 
 shortcutStatic :: (BlockId -> Maybe JumpDest) -> CmmStatic -> CmmStatic
 shortcutStatic fn (CmmStaticLit (CmmLabel lab))
   = CmmStaticLit (CmmLabel (shortcutLabel fn lab))
-shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off))
-  = CmmStaticLit (CmmLabelDiffOff (shortcutLabel fn lbl1) lbl2 off)
+shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off w))
+  = CmmStaticLit (CmmLabelDiffOff (shortcutLabel fn lbl1) lbl2 off w)
         -- slightly dodgy, we're ignoring the second label, but this
         -- works with the way we use CmmLabelDiffOff for jump tables now.
 shortcutStatic _ other_static
@@ -1054,8 +1157,8 @@ shortBlockId
 
 shortBlockId fn seen blockid =
   case (elementOfUniqSet uq seen, fn blockid) of
-    (True, _)    -> mkAsmTempLabel uq
-    (_, Nothing) -> mkAsmTempLabel uq
+    (True, _)    -> blockLbl blockid
+    (_, Nothing) -> blockLbl blockid
     (_, Just (DestBlockId blockid'))  -> shortBlockId fn (addOneToUniqSet seen uq) blockid'
     (_, Just (DestImm (ImmCLbl lbl))) -> lbl
     (_, _other) -> panic "shortBlockId"

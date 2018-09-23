@@ -25,6 +25,8 @@ module CmdLineParser
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Util
 import Outputable
 import Panic
@@ -77,8 +79,6 @@ data OptKind m                             -- Suppose the flag is -f
     | FloatSuffix (Float -> EwM m ())      -- -f or -f=n; pass n to fn
     | PassFlag  (String -> EwM m ())       -- -f; pass "-f" fn
     | AnySuffix (String -> EwM m ())       -- -f or -farg; pass entire "-farg" to fn
-    | PrefixPred    (String -> Bool) (String -> EwM m ())
-    | AnySuffixPred (String -> Bool) (String -> EwM m ())
 
 
 --------------------------------------------------------
@@ -240,11 +240,9 @@ processOneArg opt_kind rest arg args
                         []               -> missingArgErr dash_arg
                         (L _ arg1:args1) -> Right (f arg1, args1)
 
+        -- See Trac #12625
         Prefix f | notNull rest_no_eq -> Right (f rest_no_eq, args)
-                 | otherwise          -> unknownFlagErr dash_arg
-
-        PrefixPred _ f | notNull rest_no_eq -> Right (f rest_no_eq, args)
-                       | otherwise          -> unknownFlagErr dash_arg
+                 | otherwise          -> missingArgErr  dash_arg
 
         PassFlag f  | notNull rest -> unknownFlagErr dash_arg
                     | otherwise    -> Right (f dash_arg, args)
@@ -261,7 +259,6 @@ processOneArg opt_kind rest arg args
 
         OptPrefix f       -> Right (f rest_no_eq, args)
         AnySuffix f       -> Right (f dash_arg, args)
-        AnySuffixPred _ f -> Right (f dash_arg, args)
 
 findArg :: [Flag m] -> String -> Maybe (String, OptKind m)
 findArg spec arg =
@@ -279,15 +276,14 @@ arg_ok :: OptKind t -> [Char] -> String -> Bool
 arg_ok (NoArg           _)  rest _   = null rest
 arg_ok (HasArg          _)  _    _   = True
 arg_ok (SepArg          _)  rest _   = null rest
-arg_ok (Prefix          _)  rest _   = notNull rest
-arg_ok (PrefixPred p    _)  rest _   = notNull rest && p (dropEq rest)
+arg_ok (Prefix          _)  _    _   = True -- Missing argument checked for in processOneArg t
+                                            -- to improve error message (Trac #12625)
 arg_ok (OptIntSuffix    _)  _    _   = True
 arg_ok (IntSuffix       _)  _    _   = True
 arg_ok (FloatSuffix     _)  _    _   = True
 arg_ok (OptPrefix       _)  _    _   = True
 arg_ok (PassFlag        _)  rest _   = null rest
 arg_ok (AnySuffix       _)  _    _   = True
-arg_ok (AnySuffixPred p _)  _    arg = p arg
 
 -- | Parse an Int
 --

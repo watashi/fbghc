@@ -1,5 +1,12 @@
 # coding=utf8
 
+# Note [Disabling ghci-leak-check]
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# The -fno-ghci-leak-check is because this test prints the current GHC settings
+# and the ghci-leak-check is turned off in DEBUG mode. See #15372. So we need to
+# turn it off in non-DEBUG mode, too, so that one stdout works for both modes.
+# After #15372 is fully fixed, these "extra_hc_opts" should be removed.
+
 test('ghci001', combined_output, ghci_script, ['ghci001.script'])
 test('ghci002', combined_output, ghci_script, ['ghci002.script'])
 test('ghci003', combined_output, ghci_script, ['ghci003.script'])
@@ -91,7 +98,9 @@ test('ghci056',
       extra_run_opts('ghci056_c.o')],
      ghci_script, ['ghci056.script'])
 
-test('ghci057', normal, ghci_script, ['ghci057.script'])
+test('ghci057', extra_hc_opts("-fno-ghci-leak-check"), ghci_script, ['ghci057.script'])
+  # See Note [Disabling ghci-leak-check]
+
 test('ghci060', normal, ghci_script, ['ghci060.script'])
 test('ghci061', normal, ghci_script, ['ghci061.script'])
 test('ghci062', [extra_files(['ghci062/', 'ghci062/Test.hs']),
@@ -115,7 +124,7 @@ test('T4087', normal, ghci_script, ['T4087.script'])
 test('T4015', normal, ghci_script, ['T4015.script'])
 test('T4127', normal, ghci_script, ['T4127.script'])
 test('T4127a', normal, ghci_script, ['T4127a.script'])
-test('T4316', reqlib('mtl'), ghci_script, ['T4316.script'])
+test('T4316', normal, ghci_script, ['T4316.script'])
 test('T4832', normal, ghci_script, ['T4832.script'])
 test('T5045', normal, ghci_script, ['T5045.script'])
 test('T5130', normal, ghci_script, ['T5130.script'])
@@ -190,7 +199,10 @@ test('T9181', normal, ghci_script, ['T9181.script'])
 test('T9086b', normal, ghci_script, ['T9086b.script'])
 test('T9140', combined_output, ghci_script, ['T9140.script'])
 test('T9658', normal, ghci_script, ['T9658.script'])
-test('T9293', extra_files(['ghci057.hs']), ghci_script, ['T9293.script'])
+
+test('T9293', [extra_hc_opts('-fno-ghci-leak-check'), extra_files(['ghci057.hs'])], ghci_script, ['T9293.script'])
+  # See Note [Disabling ghci-leak-check]
+
 test('T9762',
  [ unless(have_dynamic(),skip)
  , pre_cmd('$MAKE -s --no-print-directory T9762_prep')
@@ -201,6 +213,7 @@ test('T9878', [], ghci_script, ['T9878.script'])
 test('T9878b', [extra_run_opts('-fobject-code')], ghci_script,
      ['T9878b.script'])
 test('T10018', normal, ghci_script, ['T10018.script'])
+test('T10059', normal, ghci_script, ['T10059.script'])
 test('T10122', normal, ghci_script, ['T10122.script'])
 
 test('T10321', normal, ghci_script, ['T10321.script'])
@@ -238,14 +251,16 @@ test('T11376', normal, ghci_script, ['T11376.script'])
 test('T12007', normal, ghci_script, ['T12007.script'])
 test('T11975', normal, ghci_script, ['T11975.script'])
 test('T10963', normal, ghci_script, ['T10963.script'])
-test('T11547', normal, ghci_script, ['T11547.script'])
+test('T11721', normal, ghci_script, ['T11721.script'])
+test('T12023', normal, run_command,
+               ['$MAKE -s --no-print-directory T12023'])
 test('T12520', normal, ghci_script, ['T12520.script'])
-test('T12091',
-     [expect_broken(12091), extra_run_opts('-fobject-code')],
-     ghci_script, ['T12091.script'])
+test('T12091', [extra_run_opts('-fobject-code')], ghci_script,
+     ['T12091.script'])
 test('T12523', normal, ghci_script, ['T12523.script'])
 test('T12024', normal, ghci_script, ['T12024.script'])
-test('T12447', expect_broken(12447), ghci_script, ['T12447.script'])
+test('T12158', expect_broken(12158), ghci_script, ['T12158.script'])
+test('T12447', normal, ghci_script, ['T12447.script'])
 test('T10249', normal, ghci_script, ['T10249.script'])
 test('T12550', normal, ghci_script, ['T12550.script'])
 test('StaticPtr', normal, ghci_script, ['StaticPtr.script'])
@@ -257,3 +272,15 @@ test('T13466', normal, ghci_script, ['T13466.script'])
 test('GhciCurDir', normal, ghci_script, ['GhciCurDir.script'])
 test('T13591', expect_broken(13591), ghci_script, ['T13591.script'])
 test('T13699', normal, ghci_script, ['T13699.script'])
+test('T13988', normal, ghci_script, ['T13988.script'])
+test('T13407', normal, ghci_script, ['T13407.script'])
+test('T13963', normal, ghci_script, ['T13963.script'])
+test('T14342', [extra_hc_opts("-XOverloadedStrings -XRebindableSyntax")],
+               ghci_script, ['T14342.script'])
+test('T14676', extra_files(['../prog002']), ghci_script, ['T14676.script'])
+test('T14796', normal, ghci_script, ['T14796.script'])
+test('T14969', normal, ghci_script, ['T14969.script'])
+test('T15259', normal, ghci_script, ['T15259.script'])
+test('T15341', normal, ghci_script, ['T15341.script'])
+test('T15568', normal, ghci_script, ['T15568.script'])
+test('T15325', normal, ghci_script, ['T15325.script'])

@@ -2,9 +2,9 @@
 
 -- | Dynamically lookup up values from modules and loading them.
 module DynamicLoading (
+        initializePlugins,
 #if defined(GHCI)
         -- * Loading plugins
-        loadPlugins,
         loadFrontendPlugin,
 
         -- * Force loading information
@@ -20,9 +20,13 @@ module DynamicLoading (
         getHValueSafely,
         lessUnsafeCoerce
 #else
-        pluginError,
+        pluginError
 #endif
     ) where
+
+import GhcPrelude
+import HscTypes         ( HscEnv )
+import DynFlags
 
 #if defined(GHCI)
 import Linker           ( linkModule, getHValue )
@@ -36,8 +40,7 @@ import RdrName          ( RdrName, ImportSpec(..), ImpDeclSpec(..)
                         , gre_name, mkRdrQual )
 import OccName          ( OccName, mkVarOcc )
 import RnNames          ( gresFromAvails )
-import DynFlags
-import Plugins          ( Plugin, FrontendPlugin, CommandLineOption )
+import Plugins
 import PrelNames        ( pluginTyConName, frontendPluginTyConName )
 
 import HscTypes
@@ -54,6 +57,7 @@ import Outputable
 import Exception
 import Hooks
 
+import Control.Monad     ( when, unless )
 import Data.Maybe        ( mapMaybe )
 import GHC.Exts          ( unsafeCoerce# )
 
@@ -63,31 +67,67 @@ import Module           ( ModuleName, moduleNameString )
 import Panic
 
 import Data.List        ( intercalate )
+import Control.Monad    ( unless )
 
 #endif
 
+-- | Loads the plugins specified in the pluginModNames field of the dynamic
+-- flags. Should be called after command line arguments are parsed, but before
+-- actual compilation starts. Idempotent operation. Should be re-called if
+-- pluginModNames or pluginModNameOpts changes.
+initializePlugins :: HscEnv -> DynFlags -> IO DynFlags
+initializePlugins hsc_env df
+#if !defined(GHCI)
+  = do let pluginMods = pluginModNames df
+       unless (null pluginMods) (pluginError pluginMods)
+       return df
+#else
+  | map lpModuleName (plugins df) == pluginModNames df -- plugins not changed
+     && all (\p -> lpArguments p == argumentsForPlugin p (pluginModNameOpts df))
+            (plugins df) -- arguments not changed
+  = return df -- no need to reload plugins
+  | otherwise
+  = do loadedPlugins <- loadPlugins (hsc_env { hsc_dflags = df })
+       return $ df { plugins = loadedPlugins }
+  where argumentsForPlugin p = map snd . filter ((== lpModuleName p) . fst)
+#endif
+
+
 #if defined(GHCI)
 
-loadPlugins :: HscEnv -> IO [(ModuleName, Plugin, [CommandLineOption])]
+loadPlugins :: HscEnv -> IO [LoadedPlugin]
 loadPlugins hsc_env
-  = do { plugins <- mapM (loadPlugin hsc_env) to_load
+  = do { unless (null to_load) $
+           checkExternalInterpreter hsc_env
+       ; plugins <- mapM loadPlugin to_load
        ; return $ zipWith attachOptions to_load plugins }
   where
     dflags  = hsc_dflags hsc_env
     to_load = pluginModNames dflags
 
-    attachOptions mod_nm plug = (mod_nm, plug, options)
+    attachOptions mod_nm (plug, mod) = LoadedPlugin plug mod (reverse options)
       where
         options = [ option | (opt_mod_nm, option) <- pluginModNameOpts dflags
                             , opt_mod_nm == mod_nm ]
+    loadPlugin = loadPlugin' (mkVarOcc "plugin") pluginTyConName hsc_env
 
-loadPlugin :: HscEnv -> ModuleName -> IO Plugin
-loadPlugin = loadPlugin' (mkVarOcc "plugin") pluginTyConName
 
 loadFrontendPlugin :: HscEnv -> ModuleName -> IO FrontendPlugin
-loadFrontendPlugin = loadPlugin' (mkVarOcc "frontendPlugin") frontendPluginTyConName
+loadFrontendPlugin hsc_env mod_name = do
+    checkExternalInterpreter hsc_env
+    fst <$> loadPlugin' (mkVarOcc "frontendPlugin") frontendPluginTyConName
+                hsc_env mod_name
 
-loadPlugin' :: OccName -> Name -> HscEnv -> ModuleName -> IO a
+-- #14335
+checkExternalInterpreter :: HscEnv -> IO ()
+checkExternalInterpreter hsc_env =
+    when (gopt Opt_ExternalInterpreter dflags) $
+      throwCmdLineError $ showSDoc dflags $
+        text "Plugins require -fno-external-interpreter"
+  where
+    dflags = hsc_dflags hsc_env
+
+loadPlugin' :: OccName -> Name -> HscEnv -> ModuleName -> IO (a, ModIface)
 loadPlugin' occ_name plugin_name hsc_env mod_name
   = do { let plugin_rdr_name = mkRdrQual mod_name occ_name
              dflags = hsc_dflags hsc_env
@@ -99,7 +139,7 @@ loadPlugin' occ_name plugin_name hsc_env mod_name
                           [ text "The module", ppr mod_name
                           , text "did not export the plugin name"
                           , ppr plugin_rdr_name ]) ;
-            Just name ->
+            Just (name, mod_iface) ->
 
      do { plugin_tycon <- forceLoadTyCon hsc_env plugin_name
         ; mb_plugin <- getValueSafely hsc_env name (mkTyConTy plugin_tycon)
@@ -109,7 +149,7 @@ loadPlugin' occ_name plugin_name hsc_env mod_name
                           [ text "The value", ppr name
                           , text "did not have the type"
                           , ppr pluginTyConName, text "as required"])
-            Just plugin -> return plugin } } }
+            Just plugin -> return (plugin, mod_iface) } } }
 
 
 -- | Force the interfaces for the given modules to be loaded. The 'SDoc' parameter is used
@@ -216,7 +256,10 @@ lessUnsafeCoerce dflags context what = do
 -- loaded very partially: just enough that it can be used, without its
 -- rules and instances affecting (and being linked from!) the module
 -- being compiled.  This was introduced by 57d6798.
-lookupRdrNameInModuleForPlugins :: HscEnv -> ModuleName -> RdrName -> IO (Maybe Name)
+--
+-- Need the module as well to record information in the interface file
+lookupRdrNameInModuleForPlugins :: HscEnv -> ModuleName -> RdrName
+                                -> IO (Maybe (Name, ModIface))
 lookupRdrNameInModuleForPlugins hsc_env mod_name rdr_name = do
     -- First find the package the module resides in by searching exposed packages and home modules
     found_module <- findPluginModule hsc_env mod_name
@@ -234,7 +277,7 @@ lookupRdrNameInModuleForPlugins hsc_env mod_name rdr_name = do
                         imp_spec = ImpSpec decl_spec ImpAll
                         env = mkGlobalRdrEnv (gresFromAvails (Just imp_spec) (mi_exports iface))
                     case lookupGRE_RdrName rdr_name env of
-                        [gre] -> return (Just (gre_name gre))
+                        [gre] -> return (Just (gre_name gre, iface))
                         []    -> return Nothing
                         _     -> panic "lookupRdrNameInModule"
 

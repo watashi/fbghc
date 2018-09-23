@@ -29,7 +29,7 @@ module IdInfo (
         -- ** Zapping various forms of Info
         zapLamInfo, zapFragileInfo,
         zapDemandInfo, zapUsageInfo, zapUsageEnvInfo, zapUsedOnceInfo,
-        zapTailCallInfo, zapCallArityInfo,
+        zapTailCallInfo, zapCallArityInfo, zapUnfolding,
 
         -- ** The ArityInfo type
         ArityInfo,
@@ -81,6 +81,8 @@ module IdInfo (
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import CoreSyn
 
@@ -261,7 +263,7 @@ setInlinePragInfo :: IdInfo -> InlinePragma -> IdInfo
 setInlinePragInfo info pr = pr `seq` info { inlinePragInfo = pr }
 setOccInfo :: IdInfo -> OccInfo -> IdInfo
 setOccInfo        info oc = oc `seq` info { occInfo = oc }
-        -- Try to avoid spack leaks by seq'ing
+        -- Try to avoid space leaks by seq'ing
 
 setUnfoldingInfo :: IdInfo -> Unfolding -> IdInfo
 setUnfoldingInfo info uf
@@ -544,6 +546,11 @@ zapFragileUnfolding :: Unfolding -> Unfolding
 zapFragileUnfolding unf
  | isFragileUnfolding unf = noUnfolding
  | otherwise              = unf
+
+zapUnfolding :: Unfolding -> Unfolding
+-- Squash all unfolding info, preserving only evaluated-ness
+zapUnfolding unf | isEvaldUnfolding unf = evaldUnfolding
+                 | otherwise            = noUnfolding
 
 zapTailCallInfo :: IdInfo -> Maybe IdInfo
 zapTailCallInfo info

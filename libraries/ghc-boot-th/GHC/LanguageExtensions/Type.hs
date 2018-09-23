@@ -11,6 +11,7 @@
 {-# LANGUAGE DeriveGeneric #-}
 module GHC.LanguageExtensions.Type ( Extension(..) ) where
 
+import Prelude -- See note [Why do we import Prelude here?]
 import GHC.Generics
 
 -- | The language extensions known to GHC.
@@ -63,6 +64,7 @@ data Extension
    | GADTSyntax
    | NPlusKPatterns
    | DoAndIfThenElse
+   | BlockArguments
    | RebindableSyntax
    | ConstraintKinds
    | PolyKinds                -- Kind polymorphism
@@ -81,6 +83,7 @@ data Extension
    | DeriveAnyClass           -- Allow deriving any class
    | DeriveLift               -- Allow deriving Lift
    | DerivingStrategies
+   | DerivingVia              -- Derive through equal representation
 
    | TypeSynonymInstances
    | FlexibleContexts
@@ -120,6 +123,7 @@ data Extension
    | MultiWayIf
    | BinaryLiterals
    | NegativeLiterals
+   | HexFloatLiterals
    | DuplicateRecordFields
    | OverloadedLabels
    | EmptyCase
@@ -131,4 +135,8 @@ data Extension
    | Strict
    | StrictData
    | MonadFailDesugaring
+   | EmptyDataDeriving
+   | NumericUnderscores
+   | QuantifiedConstraints
+   | StarIsType
    deriving (Eq, Enum, Show, Generic)

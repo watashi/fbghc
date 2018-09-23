@@ -56,7 +56,7 @@ class RawIO a where
   writeNonBlocking    :: a -> Ptr Word8 -> Int -> IO Int
 
 
--- | I/O operations required for implementing a 'Handle'.
+-- | I/O operations required for implementing a 'System.IO.Handle'.
 class IODevice a where
   -- | @ready dev write msecs@ returns 'True' if the device has data
   -- to read (if @write@ is 'False') or space to write new data (if
@@ -154,17 +154,24 @@ data IODeviceType
               -- read and write operations and may be seekable only
               -- to positions of certain granularity (block-
               -- aligned).
-  deriving (Eq)
+  deriving ( Eq -- ^ @since 4.2.0.0
+           )
 
 -- -----------------------------------------------------------------------------
 -- SeekMode type
 
--- | A mode that determines the effect of 'hSeek' @hdl mode i@.
+-- | A mode that determines the effect of 'System.IO.hSeek' @hdl mode i@.
 data SeekMode
   = AbsoluteSeek        -- ^ the position of @hdl@ is set to @i@.
   | RelativeSeek        -- ^ the position of @hdl@ is set to offset @i@
                         -- from the current position.
   | SeekFromEnd         -- ^ the position of @hdl@ is set to offset @i@
                         -- from the end of the file.
-    deriving (Eq, Ord, Ix, Enum, Read, Show)
+    deriving ( Eq   -- ^ @since 4.2.0.0
+             , Ord  -- ^ @since 4.2.0.0
+             , Ix   -- ^ @since 4.2.0.0
+             , Enum -- ^ @since 4.2.0.0
+             , Read -- ^ @since 4.2.0.0
+             , Show -- ^ @since 4.2.0.0
+             )
 

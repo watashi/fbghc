@@ -116,12 +116,12 @@ RTS_ENTRY(stg_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_PTRS_CLEAN);
 RTS_ENTRY(stg_MUT_ARR_PTRS_DIRTY);
-RTS_ENTRY(stg_MUT_ARR_PTRS_FROZEN);
-RTS_ENTRY(stg_MUT_ARR_PTRS_FROZEN0);
+RTS_ENTRY(stg_MUT_ARR_PTRS_FROZEN_CLEAN);
+RTS_ENTRY(stg_MUT_ARR_PTRS_FROZEN_DIRTY);
 RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_CLEAN);
 RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_DIRTY);
-RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_FROZEN);
-RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_FROZEN0);
+RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_FROZEN_CLEAN);
+RTS_ENTRY(stg_SMALL_MUT_ARR_PTRS_FROZEN_DIRTY);
 RTS_ENTRY(stg_MUT_VAR_CLEAN);
 RTS_ENTRY(stg_MUT_VAR_DIRTY);
 RTS_ENTRY(stg_END_TSO_QUEUE);
@@ -143,16 +143,29 @@ RTS_ENTRY(stg_raise);
 RTS_ENTRY(stg_raise_ret);
 RTS_ENTRY(stg_atomically);
 RTS_ENTRY(stg_TVAR_WATCH_QUEUE);
-RTS_ENTRY(stg_INVARIANT_CHECK_QUEUE);
-RTS_ENTRY(stg_ATOMIC_INVARIANT);
 RTS_ENTRY(stg_TREC_CHUNK);
 RTS_ENTRY(stg_TREC_HEADER);
 RTS_ENTRY(stg_END_STM_WATCH_QUEUE);
-RTS_ENTRY(stg_END_INVARIANT_CHECK_QUEUE);
 RTS_ENTRY(stg_END_STM_CHUNK_LIST);
 RTS_ENTRY(stg_NO_TREC);
 RTS_ENTRY(stg_COMPACT_NFDATA_CLEAN);
 RTS_ENTRY(stg_COMPACT_NFDATA_DIRTY);
+RTS_ENTRY(stg_SRT_1);
+RTS_ENTRY(stg_SRT_2);
+RTS_ENTRY(stg_SRT_3);
+RTS_ENTRY(stg_SRT_4);
+RTS_ENTRY(stg_SRT_5);
+RTS_ENTRY(stg_SRT_6);
+RTS_ENTRY(stg_SRT_7);
+RTS_ENTRY(stg_SRT_8);
+RTS_ENTRY(stg_SRT_9);
+RTS_ENTRY(stg_SRT_10);
+RTS_ENTRY(stg_SRT_11);
+RTS_ENTRY(stg_SRT_12);
+RTS_ENTRY(stg_SRT_13);
+RTS_ENTRY(stg_SRT_14);
+RTS_ENTRY(stg_SRT_15);
+RTS_ENTRY(stg_SRT_16);
 
 /* closures */
 
@@ -163,7 +176,6 @@ RTS_CLOSURE(stg_dummy_ret_closure);
 RTS_CLOSURE(stg_forceIO_closure);
 
 RTS_CLOSURE(stg_END_STM_WATCH_QUEUE_closure);
-RTS_CLOSURE(stg_END_INVARIANT_CHECK_QUEUE_closure);
 RTS_CLOSURE(stg_END_STM_CHUNK_LIST_closure);
 RTS_CLOSURE(stg_NO_TREC_closure);
 
@@ -378,7 +390,8 @@ RTS_FUN_DECL(stg_copySmallMutableArrayzh);
 RTS_FUN_DECL(stg_casSmallArrayzh);
 
 RTS_FUN_DECL(stg_newMutVarzh);
-RTS_FUN_DECL(stg_atomicModifyMutVarzh);
+RTS_FUN_DECL(stg_atomicModifyMutVar2zh);
+RTS_FUN_DECL(stg_atomicModifyMutVarzuzh);
 RTS_FUN_DECL(stg_casMutVarzh);
 
 RTS_FUN_DECL(stg_isEmptyMVarzh);
@@ -455,7 +468,6 @@ RTS_FUN_DECL(stg_newTVarzh);
 RTS_FUN_DECL(stg_readTVarzh);
 RTS_FUN_DECL(stg_readTVarIOzh);
 RTS_FUN_DECL(stg_writeTVarzh);
-RTS_FUN_DECL(stg_checkzh);
 
 RTS_FUN_DECL(stg_unpackClosurezh);
 RTS_FUN_DECL(stg_getApStackValzh);
@@ -467,7 +479,11 @@ RTS_FUN_DECL(stg_noDuplicatezh);
 RTS_FUN_DECL(stg_traceCcszh);
 RTS_FUN_DECL(stg_clearCCSzh);
 RTS_FUN_DECL(stg_traceEventzh);
+RTS_FUN_DECL(stg_traceBinaryEventzh);
 RTS_FUN_DECL(stg_traceMarkerzh);
+RTS_FUN_DECL(stg_getThreadAllocationCounterzh);
+RTS_FUN_DECL(stg_setThreadAllocationCounterzh);
+
 
 /* Other misc stuff */
 // See wiki:Commentary/Compiler/Backends/PprC#Prototypes
@@ -498,8 +514,10 @@ extern StgWord RTS_VAR(atomic_modify_mutvar_mutex);
 // RtsFlags
 extern StgWord RTS_VAR(RtsFlags); // bogus type
 
-// Stable.c
+// StablePtr.c
 extern StgWord RTS_VAR(stable_ptr_table);
+
+// StableName.c
 extern StgWord RTS_VAR(stable_name_table);
 
 // Profiling.c

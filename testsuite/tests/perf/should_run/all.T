@@ -31,6 +31,15 @@ test('T10359',
      compile_and_run,
      ['-O'])
 
+test('T14955',
+     [stats_num_field('bytes allocated',
+          [(wordsize(64), 48050760, 5),
+           (wordsize(32), 351508, 5)]),
+      only_ways(['normal'])
+      ],
+     multimod_compile_and_run,
+     ['T14955', '-O'])
+
 # fortunately the values here are mostly independent of the wordsize,
 # because the test allocates an unboxed array of doubles.
 test('T3586',
@@ -108,9 +117,10 @@ test('lazy-bs-alloc',
 
 test('T876',
      [stats_num_field('bytes allocated',
-          [(platform('x86_64-unknown-mingw32'), 66928, 5),
+          [(platform('x86_64-unknown-mingw32'), 53472, 5),
               # 2015-04-03: 71904 (amd64/Windows, unknown cause)
               # 2016-11-27: 66928 (amd64/Windows, unknown cause)
+              # 2017-12-24: 53472 (amd64/Windows, unknown cause)
 
            (wordsize(64), 58128, 5),
               # 2013-02-14: 1263712 (x86_64/Linux)
@@ -307,10 +317,11 @@ test('T7257',
                         # expected value: 1246287228 (i386/Linux)
                         # 2016-04-06: 989850664 (i386/Linux) no idea what happened
                         # 2017-03-25: 869850704 (x86/Linux, 64-bit machine) probably sizeExpr fix
-                       (wordsize(64), 1414893248, 5)]),
+                       (wordsize(64), 1297293264, 5)]),
                         # 2012-09-21: 1774893760 (amd64/Linux)
                         # 2015-11-03: 1654893248 (amd64/Linux)
                         # 2016-06-22: 1414893248 (amd64/Linux, sizeExpr fix)
+                        # 2018-06-22: 1297293264 (amd64/Linux, atomicModifyMutVar# replacement)
       stats_num_field('peak_megabytes_allocated',
                       [(wordsize(32), 217, 5),
                         # 2012-10-08: 217 (x86/Linux)
@@ -374,8 +385,9 @@ test('T7954',
                       [(wordsize(32), 920045264, 10),
               # some date:  1380051408    (64-bit Windows machine)
               # 2014-04-04:  920045264    (64-bit Windows machine)
-                       (wordsize(64), 1680051336, 10)]),
+                       (wordsize(64), 1280051632, 10)]),
               # 2014-02-10: 1680051336 (x86_64/Linux), call arity analysis
+              # 2018-05-03: 1280051632 (x86_64/Linux), refactor numericEnumFrom
       only_ways(['normal'])
       ],
      compile_and_run,
@@ -454,11 +466,12 @@ test('T9203',
                       # 2016-04-06     84345136 (i386/Debian) not sure
                       # 2017-03-24     77969268 (x86/Linux, 64-bit machine) probably join points
 
-                      , (wordsize(64), 84620888, 5) ]),
+                      , (wordsize(64), 98360576, 5) ]),
                       # was            95747304
                       # 2019-09-10     94547280 post-AMP cleanup
                       # 2015-10-28     95451192 emit Typeable at definition site
                       # 2016-12-19     84620888 Join points
+                      # 2018-07-30     98360576 it's unclear
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
@@ -505,6 +518,13 @@ test('T13001',
      compile_and_run,
      ['-O2'])
 
+test('T8763',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(64),    41056, 20) ]),
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
 test('T12990',
     [stats_num_field('bytes allocated',
                      [ (wordsize(64), 20040936, 5) ]),
@@ -542,8 +562,61 @@ test('DeriveNullTermination', normal, compile_and_run, [''])
 
 test('T13623',
     [stats_num_field('bytes allocated',
-                    [ (wordsize(64), 50936, 5) ]),
+                    [(platform('x86_64-unknown-mingw32'),   47232, 10),
+                    # 2017-12-24     47232 unknown
+                    (wordsize(64), 50936, 5)]),
                     # 2017-05-02     50936 initial
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])
+
+test('T14052',
+     [compiler_stats_num_field('bytes allocated',
+                      [ (wordsize(64), 2346183840, 15) ])],
+     ghci_script,
+     ['T14052.script'])
+
+test('T14936',
+     [stats_num_field('bytes allocated',
+                      [(platform('x86_64-unknown-mingw32'),   47536, 10),
+                       # 2018-05-04     47536 unknown
+                       (wordsize(64), 51792, 5) ])],
+     compile_and_run,
+     ['-O2'])
+
+test('T15226',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 41040, 5) ]),
+                    # 2018-06-06   41040  Let the simplifier know the result
+                    #                     of seq# is in WHNF
+                    # initial  400041040
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O'])
+
+test('T15226a',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 41040, 5) ]),
+                    # 2018-06-06   41040  Look through casts for seq#
+                    # initial  400041040
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O'])
+
+test('T15426',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 41272, 20) ]),
+		    # 2018-08-10   41272  Change findIndices from INLINE to INLINABLE
+		    # initial  160041176
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])
+
+test('T15578',
+    [stats_num_field('bytes allocated',
+                    [ (wordsize(64), 800041456, 5) ]),
+                    # 2018-09-07     800041456   Improvements from #15578
+                    # initial      42400041456
      only_ways(['normal'])],
     compile_and_run,
     ['-O2'])

@@ -178,12 +178,15 @@
 #define EVENT_HEAP_PROF_SAMPLE_BEGIN       162
 #define EVENT_HEAP_PROF_SAMPLE_COST_CENTRE 163
 #define EVENT_HEAP_PROF_SAMPLE_STRING      164
+
+#define EVENT_USER_BINARY_MSG              181
+
 /*
  * The highest event code +1 that ghc itself emits. Note that some event
  * ranges higher than this are reserved but not currently emitted by ghc.
  * This must match the size of the EventDesc[] array in EventLog.c
  */
-#define NUM_GHC_EVENT_TAGS        165
+#define NUM_GHC_EVENT_TAGS        182
 
 #if 0  /* DEPRECATED EVENTS: */
 /* we don't actually need to record the thread, it's implicit */
@@ -231,6 +234,19 @@
 #define CAPSET_TYPE_OSPROCESS   2  /* caps belong to the same OS process */
 #define CAPSET_TYPE_CLOCKDOMAIN 3  /* caps share a local clock/time      */
 
+/*
+ * Heap profile breakdown types. See EVENT_HEAP_PROF_BEGIN.
+ */
+typedef enum {
+    HEAP_PROF_BREAKDOWN_COST_CENTRE = 0x1,
+    HEAP_PROF_BREAKDOWN_MODULE,
+    HEAP_PROF_BREAKDOWN_CLOSURE_DESCR,
+    HEAP_PROF_BREAKDOWN_TYPE_DESCR,
+    HEAP_PROF_BREAKDOWN_RETAINER,
+    HEAP_PROF_BREAKDOWN_BIOGRAPHY,
+    HEAP_PROF_BREAKDOWN_CLOSURE_TYPE
+} HeapProfBreakdown;
+
 #if !defined(EVENTLOG_CONSTANTS_ONLY)
 
 typedef StgWord16 EventTypeNum;
@@ -244,4 +260,5 @@ typedef StgWord16 EventCapsetType;   /* types for EVENT_CAPSET_CREATE */
 typedef StgWord64 EventTaskId;         /* for EVENT_TASK_* */
 typedef StgWord64 EventKernelThreadId; /* for EVENT_TASK_CREATE */
 
+#define EVENT_PAYLOAD_SIZE_MAX STG_WORD16_MAX
 #endif

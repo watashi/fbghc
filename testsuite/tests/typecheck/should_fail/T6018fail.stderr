@@ -153,5 +153,6 @@ T6018fail.hs:129:1: error:
 T6018fail.hs:134:1: error:
     Type family equation violates injectivity annotation.
     RHS of injective type family equation is a bare type variable
-    but these LHS type and kind patterns are not bare variables: ‘*’, ‘Char’
+    but these LHS type and kind patterns are not bare variables: ‘*’,
+                                                                 ‘Char’
       FC Char a = a -- Defined at T6018fail.hs:134:1

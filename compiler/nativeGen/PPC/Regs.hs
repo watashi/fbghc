@@ -50,6 +50,8 @@ where
 #include "nativeGen/NCG.h"
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Reg
 import RegClass
 import Format
@@ -70,7 +72,7 @@ import Data.Int         ( Int8, Int16, Int32, Int64 )
 -- squeese functions for the graph allocator -----------------------------------
 
 -- | regSqueeze_class reg
---      Calculuate the maximum number of register colors that could be
+--      Calculate the maximum number of register colors that could be
 --      denied to a node of this class due to having this reg
 --      as a neighbour.
 --
@@ -163,7 +165,7 @@ litToImm (CmmFloat f W32)    = ImmFloat f
 litToImm (CmmFloat f W64)    = ImmDouble f
 litToImm (CmmLabel l)        = ImmCLbl l
 litToImm (CmmLabelOff l off) = ImmIndex l off
-litToImm (CmmLabelDiffOff l1 l2 off)
+litToImm (CmmLabelDiffOff l1 l2 off _)
                              = ImmConstantSum
                                (ImmConstantDiff (ImmCLbl l1) (ImmCLbl l2))
                                (ImmInt off)

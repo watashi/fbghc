@@ -20,12 +20,16 @@
 
 module GHC.Real where
 
+#include "MachDeps.h"
+
 import GHC.Base
 import GHC.Num
 import GHC.List
 import GHC.Enum
 import GHC.Show
-import {-# SOURCE #-} GHC.Exception( divZeroException, overflowException, ratioZeroDenomException )
+import {-# SOURCE #-} GHC.Exception( divZeroException, overflowException
+                                   , underflowException
+                                   , ratioZeroDenomException )
 
 #if defined(OPTIMISE_INTEGER_GCD_LCM)
 # if defined(MIN_VERSION_integer_gmp)
@@ -61,12 +65,21 @@ ratioZeroDenominatorError = raise# ratioZeroDenomException
 overflowError :: a
 overflowError = raise# overflowException
 
+{-# NOINLINE underflowError #-}
+underflowError :: a
+underflowError = raise# underflowException
+
+
 --------------------------------------------------------------
 -- The Ratio and Rational types
 --------------------------------------------------------------
 
 -- | Rational numbers, with numerator and denominator of some 'Integral' type.
-data  Ratio a = !a :% !a  deriving (Eq)
+--
+-- Note that `Ratio`'s instances inherit the deficiencies from the type
+-- parameter's. For example, @Ratio Natural@'s 'Num' instance has similar
+-- problems to `Numeric.Natural.Natural`'s.
+data  Ratio a = !a :% !a  deriving Eq -- ^ @since 2.01
 
 -- | Arbitrary-precision rational numbers, represented as a ratio of
 -- two 'Integer' values.  A rational number may be constructed using
@@ -122,6 +135,19 @@ class  (Num a, Ord a) => Real a  where
     toRational          ::  a -> Rational
 
 -- | Integral numbers, supporting integer division.
+--
+-- The Haskell Report defines no laws for 'Integral'. However, 'Integral'
+-- instances are customarily expected to define a Euclidean domain and have the
+-- following properties for the 'div'/'mod' and 'quot'/'rem' pairs, given
+-- suitable Euclidean functions @f@ and @g@:
+--
+-- * @x@ = @y * quot x y + rem x y@ with @rem x y@ = @fromInteger 0@ or
+-- @g (rem x y)@ < @g y@
+-- * @x@ = @y * div x y + mod x y@ with @mod x y@ = @fromInteger 0@ or
+-- @f (mod x y)@ < @f y@
+--
+-- An example of a suitable Euclidean function, for `Integer`'s instance, is
+-- 'abs'.
 class  (Real a, Enum a) => Integral a  where
     -- | integer division truncated toward zero
     quot                :: a -> a -> a
@@ -155,6 +181,16 @@ class  (Real a, Enum a) => Integral a  where
                            where qr@(q,r) = quotRem n d
 
 -- | Fractional numbers, supporting real division.
+--
+-- The Haskell Report defines no laws for 'Fractional'. However, '(+)' and
+-- '(*)' are customarily expected to define a division ring and have the
+-- following properties:
+--
+-- [__'recip' gives the multiplicative inverse__]:
+-- @x * recip x@ = @recip x * x@ = @fromInteger 1@
+--
+-- Note that it /isn't/ customarily expected that a type instance of
+-- 'Fractional' implement a field. However, all instances in @base@ do.
 class  (Num a) => Fractional a  where
     {-# MINIMAL fromRational, (recip | (/)) #-}
 
@@ -216,10 +252,19 @@ class  (Real a, Fractional a) => RealFrac a  where
 -- These 'numeric' enumerations come straight from the Report
 
 numericEnumFrom         :: (Fractional a) => a -> [a]
-numericEnumFrom n       =  n `seq` (n : numericEnumFrom (n + 1))
+numericEnumFrom n       = go 0
+  where
+    -- See Note [Numeric Stability of Enumerating Floating Numbers]
+    go !k = let !n' = n + k
+             in n' : go (k + 1)
 
 numericEnumFromThen     :: (Fractional a) => a -> a -> [a]
-numericEnumFromThen n m = n `seq` m `seq` (n : numericEnumFromThen m (m+m-n))
+numericEnumFromThen n m = go 0
+  where
+    step = m - n
+    -- See Note [Numeric Stability of Enumerating Floating Numbers]
+    go !k = let !n' = n + k * step
+             in n' : go (k + 1)
 
 numericEnumFromTo       :: (Ord a, Fractional a) => a -> a -> [a]
 numericEnumFromTo n m   = takeWhile (<= m + 1/2) (numericEnumFrom n)
@@ -231,6 +276,49 @@ numericEnumFromThenTo e1 e2 e3
                                  mid = (e2 - e1) / 2
                                  predicate | e2 >= e1  = (<= e3 + mid)
                                            | otherwise = (>= e3 + mid)
+
+{- Note [Numeric Stability of Enumerating Floating Numbers]
+-----------------------------------------------------------
+When enumerate floating numbers, we could add the increment to the last number
+at every run (as what we did previously):
+
+    numericEnumFrom n =  n `seq` (n : numericEnumFrom (n + 1))
+
+This approach is concise and really fast, only needs an addition operation.
+However when a floating number is large enough, for `n`, `n` and `n+1` will
+have the same binary representation. For example (all number has type
+`Double`):
+
+    9007199254740990                 is: 0x433ffffffffffffe
+    9007199254740990 + 1             is: 0x433fffffffffffff
+    (9007199254740990 + 1) + 1       is: 0x4340000000000000
+    ((9007199254740990 + 1) + 1) + 1 is: 0x4340000000000000
+
+When we evaluate ([9007199254740990..9007199254740991] :: Double), we would
+never reach the condition in `numericEnumFromTo`
+
+    9007199254740990 + 1 + 1 + ... > 9007199254740991 + 1/2
+
+We would fall into infinite loop (as reported in Trac #15081).
+
+To remedy the situation, we record the number of `1` that needed to be added
+to the start number, rather than increasing `1` at every time. This approach
+can improvement the numeric stability greatly at the cost of a multiplication.
+
+Furthermore, we use the type of the enumerated number, `Fractional a => a`,
+as the type of multiplier. In rare situations, the multiplier could be very
+large and will lead to the enumeration to infinite loop, too, which should
+be very rare. Consider the following example:
+
+    [1..9007199254740994]
+
+We could fix that by using an Integer as multiplier but we don't do that.
+The benchmark on T7954.hs shows that this approach leads to significant
+degeneration on performance (33% increase allocation and 300% increase on
+elapsed time).
+
+See Trac #15081 and Phab:D4650 for the related discussion about this problem.
+-}
 
 --------------------------------------------------------------
 -- Instances for Int
@@ -324,6 +412,18 @@ instance Integral Word where
 instance  Real Integer  where
     toRational x        =  x :% 1
 
+#if defined(MIN_VERSION_integer_gmp)
+-- | @since 4.8.0.0
+instance Real Natural where
+    toRational (NatS# w)  = toRational (W# w)
+    toRational (NatJ# bn) = toRational (Jp# bn)
+#else
+-- | @since 4.8.0.0
+instance Real Natural where
+  toRational (Natural a) = toRational a
+  {-# INLINE toRational #-}
+#endif
+
 -- Note [Integer division constant folding]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 --
@@ -365,6 +465,39 @@ instance  Integral Integer where
     _ `quotRem` 0 = divZeroError
     n `quotRem` d = case n `quotRemInteger` d of
                       (# q, r #) -> (q, r)
+
+#if defined(MIN_VERSION_integer_gmp)
+-- | @since 4.8.0.0
+instance Integral Natural where
+    toInteger = naturalToInteger
+
+    divMod = quotRemNatural
+    div    = quotNatural
+    mod    = remNatural
+
+    quotRem = quotRemNatural
+    quot    = quotNatural
+    rem     = remNatural
+#else
+-- | @since 4.8.0.0
+instance Integral Natural where
+  quot (Natural a) (Natural b) = Natural (quot a b)
+  {-# INLINE quot #-}
+  rem (Natural a) (Natural b) = Natural (rem a b)
+  {-# INLINE rem #-}
+  div (Natural a) (Natural b) = Natural (div a b)
+  {-# INLINE div #-}
+  mod (Natural a) (Natural b) = Natural (mod a b)
+  {-# INLINE mod #-}
+  divMod (Natural a) (Natural b) = (Natural q, Natural r)
+    where (q,r) = divMod a b
+  {-# INLINE divMod #-}
+  quotRem (Natural a) (Natural b) = (Natural q, Natural r)
+    where (q,r) = quotRem a b
+  {-# INLINE quotRem #-}
+  toInteger (Natural a) = a
+  {-# INLINE toInteger #-}
+#endif
 
 --------------------------------------------------------------
 -- Instances for @Ratio@
@@ -454,6 +587,17 @@ fromIntegral = fromInteger . toInteger
 "fromIntegral/Word->Word" fromIntegral = id :: Word -> Word
     #-}
 
+{-# RULES
+"fromIntegral/Natural->Natural"  fromIntegral = id :: Natural -> Natural
+"fromIntegral/Natural->Integer"  fromIntegral = toInteger :: Natural->Integer
+"fromIntegral/Natural->Word"     fromIntegral = naturalToWord
+  #-}
+
+{-# RULES
+"fromIntegral/Word->Natural"     fromIntegral = wordToNatural
+"fromIntegral/Int->Natural"     fromIntegral = intToNatural
+  #-}
+
 -- | general coercion to fractional types
 realToFrac :: (Real a, Fractional b) => a -> b
 {-# NOINLINE [1] realToFrac #-}
@@ -493,16 +637,22 @@ x0 ^ y0 | y0 < 0    = errorWithoutStackTrace "Negative exponent"
     where -- f : x0 ^ y0 = x ^ y
           f x y | even y    = f (x * x) (y `quot` 2)
                 | y == 1    = x
-                | otherwise = g (x * x) ((y - 1) `quot` 2) x
+                | otherwise = g (x * x) (y `quot` 2) x         -- See Note [Half of y - 1]
           -- g : x0 ^ y0 = (x ^ y) * z
           g x y z | even y = g (x * x) (y `quot` 2) z
                   | y == 1 = x * z
-                  | otherwise = g (x * x) ((y - 1) `quot` 2) (x * z)
+                  | otherwise = g (x * x) (y `quot` 2) (x * z) -- See Note [Half of y - 1]
 
 -- | raise a number to an integral power
 (^^)            :: (Fractional a, Integral b) => a -> b -> a
 {-# INLINABLE [1] (^^) #-}         -- See Note [Inlining (^)
 x ^^ n          =  if n >= 0 then x^n else recip (x^(negate n))
+
+{- Note [Half of y - 1]
+   ~~~~~~~~~~~~~~~~~~~~~
+   Since y is guaranteed to be odd and positive here,
+   half of y - 1 can be computed as y `quot` 2, optimising subtraction away.
+-}
 
 {- Note [Inlining (^)
    ~~~~~~~~~~~~~~~~~~~~~
@@ -527,9 +677,7 @@ x ^^ n          =  if n >= 0 then x^n else recip (x^(negate n))
     be statically resolved to 0 or 1 are rare.
 
     It might be desirable to have corresponding rules also for
-    exponents of other types, in particular Word, but we can't
-    have those rules here (importing GHC.Word or GHC.Int would
-    create a cyclic module dependency), and it's doubtful they
+    exponents of other types (e. g., Word), but it's doubtful they
     would fire, since the exponents of other types tend to get
     floated out before the rule has a chance to fire.
 
@@ -631,6 +779,7 @@ gcd x y         =  gcd' (abs x) (abs y)
 -- | @'lcm' x y@ is the smallest positive integer that both @x@ and @y@ divide.
 lcm             :: (Integral a) => a -> a -> a
 {-# SPECIALISE lcm :: Int -> Int -> Int #-}
+{-# SPECIALISE lcm :: Word -> Word -> Word #-}
 {-# NOINLINE [1] lcm #-}
 lcm _ 0         =  0
 lcm 0 _         =  0
@@ -641,19 +790,19 @@ lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 "gcd/Int->Int->Int"             gcd = gcdInt'
 "gcd/Integer->Integer->Integer" gcd = gcdInteger
 "lcm/Integer->Integer->Integer" lcm = lcmInteger
+"gcd/Natural->Natural->Natural" gcd = gcdNatural
+"lcm/Natural->Natural->Natural" lcm = lcmNatural
  #-}
 
 gcdInt' :: Int -> Int -> Int
 gcdInt' (I# x) (I# y) = I# (gcdInt x y)
 
-#if MIN_VERSION_integer_gmp(1,0,0)
 {-# RULES
 "gcd/Word->Word->Word"          gcd = gcdWord'
  #-}
 
 gcdWord' :: Word -> Word -> Word
 gcdWord' (W# x) (W# y) = W# (gcdWord x y)
-#endif
 #endif
 
 integralEnumFrom :: (Integral a, Bounded a) => a -> [a]

@@ -18,7 +18,7 @@
 
 module GHC.ST (
         ST(..), STret(..), STRep,
-        fixST, runST,
+        runST,
 
         -- * Unsafe functions
         liftST, unsafeInterleaveST, unsafeDupableInterleaveST
@@ -26,16 +26,17 @@ module GHC.ST (
 
 import GHC.Base
 import GHC.Show
+import qualified Control.Monad.Fail as Fail
 
 default ()
 
--- The state-transformer monad proper.  By default the monad is strict;
+-- The 'ST' monad proper.  By default the monad is strict;
 -- too many people got bitten by space leaks when it was lazy.
 
--- | The strict state-transformer monad.
--- A computation of type @'ST' s a@ transforms an internal state indexed
--- by @s@, and returns a value of type @a@.
--- The @s@ parameter is either
+-- | The strict 'ST' monad.
+-- The 'ST' monad allows for destructive updates, but is escapable (unlike IO).
+-- A computation of type @'ST' s a@ returns a value of type @a@, and
+-- execute in "thread" @s@. The @s@ parameter is either
 --
 -- * an uninstantiated type variable (inside invocations of 'runST'), or
 --
@@ -77,10 +78,21 @@ instance Monad (ST s) where
         case (k r) of { ST k2 ->
         (k2 new_s) }})
 
+-- | @since 4.11.0.0
+instance Fail.MonadFail (ST s) where
+    fail s = errorWithoutStackTrace s
+
+-- | @since 4.11.0.0
+instance Semigroup a => Semigroup (ST s a) where
+    (<>) = liftA2 (<>)
+
+-- | @since 4.11.0.0
+instance Monoid a => Monoid (ST s a) where
+    mempty = pure mempty
+
 data STret s a = STret (State# s) a
 
--- liftST is useful when we want a lifted result from an ST computation.  See
--- fixST below.
+-- liftST is useful when we want a lifted result from an ST computation.
 liftST :: ST s a -> State# s -> STret s a
 liftST (ST m) = \s -> case m s of (# s', r #) -> STret s' r
 
@@ -113,23 +125,13 @@ unsafeDupableInterleaveST (ST m) = ST ( \ s ->
     (# s, r #)
   )
 
--- | Allow the result of a state transformer computation to be used (lazily)
--- inside the computation.
--- Note that if @f@ is strict, @'fixST' f = _|_@.
-fixST :: (a -> ST s a) -> ST s a
-fixST k = ST $ \ s ->
-    let ans       = liftST (k r) s
-        STret _ r = ans
-    in
-    case ans of STret s' x -> (# s', x #)
-
 -- | @since 2.01
 instance  Show (ST s a)  where
     showsPrec _ _  = showString "<<ST action>>"
     showList       = showList__ (showsPrec 0)
 
 {-# INLINE runST #-}
--- | Return the value computed by a state transformer computation.
+-- | Return the value computed by a state thread.
 -- The @forall@ ensures that the internal state used by the 'ST'
 -- computation is inaccessible to the rest of the program.
 runST :: (forall s. ST s a) -> a

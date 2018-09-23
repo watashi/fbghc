@@ -130,7 +130,7 @@ possible to do this directly in the source file using the
 ``OPTIONS_GHC`` is a *file-header pragma* (see :ref:`options-pragma`).
 
 Only *dynamic* flags can be used in an ``OPTIONS_GHC`` pragma (see
-:ref:`static-dynamic-flags`).
+:ref:`mode-dynamic-flags`).
 
 Note that your command shell does not get to the source file options,
 they are just included literally in the array of command-line arguments
@@ -153,36 +153,28 @@ Setting options in GHCi
 Options may also be modified from within GHCi, using the :ghci-cmd:`:set`
 command.
 
-.. _static-dynamic-flags:
+.. _mode-dynamic-flags:
 
-Static, Dynamic, and Mode options
----------------------------------
+Dynamic and Mode options
+------------------------
 
 .. index::
-   single: static; options
    single: dynamic; options
    single: mode; options
 
-Each of GHC's command line options is classified as static, dynamic or
-mode:
+Each of GHC's command line options is classified as dynamic or mode:
 
-    For example, :ghc-flag:`--make` or :ghc-flag:`-E`. There may only be a single mode
-    flag on the command line. The available modes are listed in
-    :ref:`modes`.
+    Mode: A mode may be used on the command line only.
+    You can pass only one mode flag.
+    For example, :ghc-flag:`--make` or :ghc-flag:`-E`.
+    The available modes are listed in :ref:`modes`.
 
-    Most non-mode flags fall into this category. A dynamic flag may be
-    used on the command line, in a ``OPTIONS_GHC`` pragma in a source
+    Dynamic: A dynamic flag may be used on the command line,
+    in a ``OPTIONS_GHC`` pragma in a source
     file, or set using :ghci-cmd:`:set` in GHCi.
-
-    A few flags are "static", which means they can only be used on the
-    command-line, and remain in force over the entire GHC/GHCi run.
 
 The flag reference tables (:ref:`flag-reference`) lists the status of
 each flag.
-
-There are a few flags that are static except that they can also be used
-with GHCi's :ghci-cmd:`:set` command; these are listed as “static/\ ``:set``\ ”
-in the table.
 
 .. _file-suffixes:
 
@@ -258,6 +250,10 @@ to produce an executable.
 The available mode flags are:
 
 .. ghc-flag:: --interactive
+    :shortdesc: Interactive mode - normally used by just running ``ghci``;
+        see :ref:`ghci` for details.
+    :type: mode
+    :category: modes
 
     .. index::
        single: interactive mode
@@ -267,6 +263,11 @@ The available mode flags are:
     mode is described in more detail in :ref:`ghci`.
 
 .. ghc-flag:: --make
+    :shortdesc: Build a multi-module Haskell program, automatically figuring out
+        dependencies. Likely to be much easier, and faster, than using
+        ``make``; see :ref:`make-mode` for details.
+    :type: mode
+    :category: modes
 
     .. index::
        single: make mode; of GHC
@@ -282,6 +283,9 @@ The available mode flags are:
     option can be omitted.
 
 .. ghc-flag:: -e ⟨expr⟩
+    :shortdesc: Evaluate ``expr``; see :ref:`eval-mode` for details.
+    :type: mode
+    :category: modes
 
     .. index::
        single: eval mode; of GHC
@@ -292,15 +296,42 @@ The available mode flags are:
     details.
 
 .. ghc-flag:: -E
-              -C
-              -S
-              -c
+    :shortdesc: Stop after preprocessing (``.hspp`` file)
+    :type: mode
+    :category: phases
+
+    Stop after preprocessing (``.hspp`` file)
+
+.. ghc-flag:: -C
+    :shortdesc: Stop after generating C (``.hc`` file)
+    :type: mode
+    :category: phases
+    
+    Stop after generating C (``.hc`` file)
+
+.. ghc-flag:: -S
+    :shortdesc: Stop after generating assembly (``.s`` file)
+    :type: mode
+    :category: phases
+
+    Stop after generating assembly (``.s`` file)
+
+.. ghc-flag:: -c
+    :shortdesc: Stop after generating object (``.o``) file
+    :type: mode
+    :category: phases
+    
+    Stop after generating object (``.o``) file
 
     This is the traditional batch-compiler mode, in which GHC can
     compile source files one at a time, or link objects together into an
     executable. See :ref:`options-order`.
 
 .. ghc-flag:: -M
+    :shortdesc: generate dependency information suitable for use in a
+        ``Makefile``; see :ref:`makefile-dependencies` for details.
+    :type: mode
+    :category: modes
 
     .. index::
         single: dependency-generation mode; of GHC
@@ -310,6 +341,10 @@ The available mode flags are:
     See :ref:`makefile-dependencies`.
 
 .. ghc-flag:: --frontend ⟨module⟩
+    :shortdesc: run GHC with the given frontend plugin; see
+        :ref:`frontend_plugins` for details.
+    :type: mode
+    :category: modes
 
     .. index::
         single: frontend plugins; using
@@ -318,6 +353,9 @@ The available mode flags are:
     details.
 
 .. ghc-flag:: --mk-dll
+    :shortdesc: DLL-creation mode (Windows only)
+    :type: mode
+    :category: modes
 
     .. index::
        single: DLL-creation mode
@@ -326,39 +364,63 @@ The available mode flags are:
 
 .. ghc-flag:: --help
               -?
+    :shortdesc: Display help
+    :type: mode
+    :category: modes
 
     Cause GHC to spew a long usage message to standard output and then
     exit.
 
 .. ghc-flag:: --show-iface ⟨file⟩
+    :shortdesc: display the contents of an interface file.
+    :type: mode
+    :category: modes
 
     Read the interface in ⟨file⟩ and dump it as text to ``stdout``. For
     example ``ghc --show-iface M.hi``.
 
 .. ghc-flag:: --supported-extensions
               --supported-languages
+    :shortdesc: display the supported language extensions
+    :type: mode
+    :category: modes
 
     Print the supported language extensions.
 
 .. ghc-flag:: --show-options
+    :shortdesc: display the supported command line options
+    :type: mode
+    :category: modes
 
     Print the supported command line options. This flag can be used for
     autocompletion in a shell.
 
 .. ghc-flag:: --info
+    :shortdesc: display information about the compiler
+    :type: mode
+    :category: modes
 
     Print information about the compiler.
 
 .. ghc-flag:: --version
               -V
+    :shortdesc: display GHC version
+    :type: mode
+    :category: modes
 
     Print a one-line string including GHC's version number.
 
 .. ghc-flag:: --numeric-version
+    :shortdesc: display GHC version (numeric only)
+    :type: mode
+    :category: modes
 
     Print GHC's numeric version number only.
 
 .. ghc-flag:: --print-libdir
+    :shortdesc: display GHC library directory
+    :type: mode
+    :category: modes
 
     .. index::
        single: libdir
@@ -446,6 +508,10 @@ directory; the :ghc-flag:`-i` option can be used to add directories to the
 search path (see :ref:`search-path`).
 
 .. ghc-flag:: -j[⟨n⟩]
+    :shortdesc: When compiling with :ghc-flag:`--make`, compile ⟨n⟩ modules
+        in parallel.
+    :type: dynamic
+    :category: misc
 
     Perform compilation in parallel when possible. GHC will use up to ⟨N⟩
     threads during compilation. If N is omitted, then it defaults to the
@@ -554,6 +620,9 @@ suffix. This behaviour can be overridden using the :ghc-flag:`-x ⟨suffix⟩`
 option:
 
 .. ghc-flag:: -x ⟨suffix⟩
+    :shortdesc: Override default behaviour for source files
+    :type: dynamic
+    :category: phases
 
     Causes all files following this option on the command line to be
     processed as if they had the suffix ⟨suffix⟩. For example, to
@@ -572,6 +641,9 @@ See also the ``--help``, ``--version``, ``--numeric-version``, and
 ``--print-libdir`` modes in :ref:`modes`.
 
 .. ghc-flag:: -v
+    :shortdesc: verbose mode (equivalent to ``-v3``)
+    :type: dynamic
+    :category: verbosity
 
     The :ghc-flag:`-v` option makes GHC *verbose*: it reports its version number
     and shows (on stderr) exactly how it invokes each phase of the
@@ -583,8 +655,10 @@ See also the ``--help``, ``--version``, ``--numeric-version``, and
     Knowing that you ran the right bits in the right order is always the
     first thing we want to verify.
 
-.. ghc-flag:: -v ⟨n⟩
-    :noindex:
+.. ghc-flag:: -v⟨n⟩
+    :shortdesc: set verbosity level
+    :type: dynamic
+    :category: verbosity
 
     To provide more control over the compiler's verbosity, the ``-v``
     flag takes an optional numeric argument. Specifying ``-v`` on its
@@ -613,12 +687,19 @@ See also the ``--help``, ``--version``, ``--numeric-version``, and
         (excluding preprocessed and C/assembly files).
 
 .. ghc-flag:: -fprint-potential-instances
+    :shortdesc: display all available instances in type error messages
+    :type: dynamic
+    :reverse: -fno-print-potential-instances
+    :category: verbosity
 
     When GHC can't find an instance for a class, it displays a short
     list of some in the instances it knows about. With this flag it
     prints *all* the instances it knows about.
 
 .. ghc-flag:: -fhide-source-paths
+    :shortdesc: hide module source and object paths
+    :type: dynamic
+    :category: verbosity
 
     Starting with minimal verbosity (``-v1``, see :ghc-flag:`-v`), GHC
     displays the name, the source path and the target path of each compiled
@@ -629,6 +710,11 @@ The following flags control the way in which GHC displays types in error
 messages and in GHCi:
 
 .. ghc-flag:: -fprint-unicode-syntax
+    :shortdesc: Use unicode syntax when printing expressions, types and kinds.
+        See also :ghc-flag:`-XUnicodeSyntax`
+    :type: dynamic
+    :reverse: -fno-print-unicode-syntax
+    :category: verbosity
 
     When enabled GHC prints type signatures using the unicode symbols from the
     :ghc-flag:`-XUnicodeSyntax` extension. For instance,
@@ -636,12 +722,17 @@ messages and in GHCi:
     .. code-block:: none
 
         ghci> :set -fprint-unicode-syntax
-        ghci> :t (>>)
-        (>>) :: ∀ (m :: * → *) a b. Monad m ⇒ m a → m b → m b
+        ghci> :t +v (>>)
+        (>>) ∷ Monad m ⇒ ∀ a b. m a → m b → m b
 
 .. _pretty-printing-types:
 
 .. ghc-flag:: -fprint-explicit-foralls
+    :shortdesc: Print explicit ``forall`` quantification in types.
+        See also :ghc-flag:`-XExplicitForAll`
+    :type: dynamic
+    :reverse: -fno-print-explicit-foralls
+    :category: verbosity
 
     Using :ghc-flag:`-fprint-explicit-foralls` makes
     GHC print explicit ``forall`` quantification at the top level of a
@@ -678,6 +769,11 @@ messages and in GHCi:
                    -- Defined in Data.Type.Equality
 
 .. ghc-flag:: -fprint-explicit-kinds
+    :shortdesc: Print explicit kind foralls and kind arguments in types.
+        See also :ghc-flag:`-XKindSignatures`
+    :type: dynamic
+    :reverse: -fno-print-explicit-kinds
+    :category: verbosity
 
     Using :ghc-flag:`-fprint-explicit-kinds` makes GHC print kind arguments in
     types, which are normally suppressed. This can be important when you
@@ -694,10 +790,15 @@ messages and in GHCi:
         MkT :: forall (k :: BOX) (a :: k). T k a
 
 .. ghc-flag:: -fprint-explicit-runtime-reps
+    :shortdesc: Print ``RuntimeRep`` variables in types which are
+        runtime-representation polymorphic.
+    :type: dynamic
+    :reverse: -fno-print-explicit-runtime-reps
+    :category: verbosity
 
     When :ghc-flag:`-fprint-explicit-runtime-reps` is enabled, GHC prints
     ``RuntimeRep`` type variables for levity-polymorphic types.
-    Otherwise GHC will default these to ``PtrRepLifted``. For example,
+    Otherwise GHC will default these to ``LiftedRep``. For example,
 
     .. code-block:: none
 
@@ -710,6 +811,10 @@ messages and in GHCi:
              (a -> b) -> a -> b
 
 .. ghc-flag:: -fprint-explicit-coercions
+    :shortdesc: Print coercions in types
+    :type: dynamic
+    :reverse: -fno-print-explicit-coercions
+    :category: verbosity
 
     Using :ghc-flag:`-fprint-explicit-coercions` makes GHC print coercions in
     types. When trying to prove the equality between types of different
@@ -717,6 +822,10 @@ messages and in GHCi:
     see these, as they are meant to be internal.
 
 .. ghc-flag:: -fprint-equality-relations
+    :shortdesc: Distinguish between equality relations when printing
+    :type: dynamic
+    :reverse: -fno-print-equality-relations
+    :category: verbosity
 
     Using :ghc-flag:`-fprint-equality-relations` tells GHC to distinguish between
     its equality relations when printing. For example, ``~`` is homogeneous
@@ -729,6 +838,10 @@ messages and in GHCi:
     prints all of these as ``~``. See also :ref:`equality-constraints`.
 
 .. ghc-flag:: -fprint-expanded-synonyms
+    :shortdesc: In type errors, also print type-synonym-expanded types.
+    :type: dynamic
+    :reverse: -fno-print-expanded-synonyms
+    :category: verbosity
 
     When enabled, GHC also prints type-synonym-expanded types in type
     errors. For example, with this type synonyms: ::
@@ -757,6 +870,10 @@ messages and in GHCi:
           Actual type: ST s Bool
 
 .. ghc-flag:: -fprint-typechecker-elaboration
+    :shortdesc: Print extra information from typechecker.
+    :type: dynamic
+    :reverse: -fno-print-typechecker-elaboration
+    :category: verbosity
 
     When enabled, GHC also prints extra information from the typechecker in
     warnings. For example: ::
@@ -794,6 +911,9 @@ messages and in GHCi:
         or by using the flag -fno-warn-unused-do-bind
 
 .. ghc-flag:: -fdiagnostics-color=⟨always|auto|never⟩
+    :shortdesc: Use colors in error messages
+    :type: dynamic
+    :category: verbosity
 
     Causes GHC to display error messages with colors.  To do this, the
     terminal must have support for ANSI color codes, or else garbled text will
@@ -833,13 +953,20 @@ messages and in GHCi:
     or ``always``, which is equivalent to setting the corresponding
     ``-fdiagnostics-color`` flag but with lower precedence.
 
-.. ghc-flag:: -f[no-]diagnostics-show-caret
+.. ghc-flag:: -fdiagnostics-show-caret
+    :shortdesc: Whether to show snippets of original source code
+    :type: dynamic
+    :reverse: -fno-diagnostics-show-caret
+    :category: verbosity
 
     Controls whether GHC displays a line of the original source code where the
     error was detected.  This also affects the associated caret symbol that
     points at the region of code at fault.  The flag is on by default.
 
 .. ghc-flag:: -ferror-spans
+    :shortdesc: Output full span in error messages
+    :type: dynamic
+    :category: verbosity
 
     Causes GHC to emit the full source span of the syntactic entity
     relating to an error message. Normally, GHC emits the source
@@ -872,11 +999,17 @@ messages and in GHCi:
     (i.e. this is how Emacs does it).
 
 .. ghc-flag:: -H ⟨size⟩
+    :shortdesc: Set the minimum size of the heap to ⟨size⟩
+    :type: dynamic
+    :category: misc
 
     Set the minimum size of the heap to ⟨size⟩. This option is
     equivalent to ``+RTS -Hsize``, see :ref:`rts-options-gc`.
 
 .. ghc-flag:: -Rghc-timing
+    :shortdesc: Summarise timing stats for GHC (same as ``+RTS -tstderr``).
+    :type: dynamic
+    :category: verbosity
 
     Prints a one-line summary of timing statistics for the GHC run. This
     option is equivalent to ``+RTS -tstderr``, see
@@ -895,6 +1028,9 @@ Platform-specific Flags
 Some flags only make sense for particular target platforms.
 
 .. ghc-flag:: -msse2
+    :shortdesc: (x86 only) Use SSE2 for floating-point operations
+    :type: dynamic
+    :category: platform-options
 
     (x86 only, added in GHC 7.0.1) Use the SSE2 registers and
     instruction set to implement floating point operations when using
@@ -909,6 +1045,9 @@ Some flags only make sense for particular target platforms.
     SSE2 is unconditionally used on x86-64 platforms.
 
 .. ghc-flag:: -msse4.2
+    :shortdesc: (x86 only) Use SSE4.2 for floating-point operations
+    :type: dynamic
+    :category: platform-options
 
     (x86 only, added in GHC 7.4.1) Use the SSE4.2 instruction set to
     implement some floating point and bit operations when using the
@@ -917,3 +1056,26 @@ Some flags only make sense for particular target platforms.
     and later). The :ref:`LLVM backend <llvm-code-gen>` will also use
     SSE4.2 if your processor supports it but detects this automatically
     so no flag is required.
+
+Miscellaneous flags
+-------------------
+
+.. index::
+   single: miscellaneous flags
+
+Some flags only make sense for a particular use case.
+
+.. ghc-flag:: -ghcversion-file ⟨path to ghcversion.h⟩
+    :shortdesc: (GHC as a C compiler only) Use this ``ghcversion.h`` file
+    :type: dynamic
+    :category: misc
+
+    When GHC is used to compile C files, GHC adds package include paths and
+    includes ``ghcversion.h`` directly. The compiler will lookup the path for
+    the ``ghcversion.h`` file from the ``rts`` package in the package database.
+    In some cases, the compiler's package database does not contain the ``rts``
+    package, or one wants to specify a specific ``ghcversions.h`` to be
+    included. This option can be used to specify the path to the
+    ``ghcversions.h`` file to be included. This is primarily intended to be
+    used by GHC's build system.
+

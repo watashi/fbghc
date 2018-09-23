@@ -14,13 +14,15 @@ module CoreTidy (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import CoreSyn
 import CoreSeq ( seqUnfolding )
 import CoreArity
 import Id
 import IdInfo
 import Demand ( zapUsageEnvSig )
-import Type( tidyType, tidyTyCoVarBndr )
+import Type( tidyType, tidyVarBndr )
 import Coercion( tidyCo )
 import Var
 import VarEnv
@@ -128,7 +130,7 @@ tidyVarOcc (_, var_env) v = lookupVarEnv var_env v `orElse` v
 -- tidyBndr is used for lambda and case binders
 tidyBndr :: TidyEnv -> Var -> (TidyEnv, Var)
 tidyBndr env var
-  | isTyCoVar var = tidyTyCoVarBndr env var
+  | isTyCoVar var = tidyVarBndr env var
   | otherwise     = tidyIdBndr env var
 
 tidyBndrs :: TidyEnv -> [Var] -> (TidyEnv, [Var])
@@ -157,9 +159,7 @@ tidyIdBndr env@(tidy_env, var_env) id
                                  `setOneShotInfo` oneShotInfo old_info
         old_info = idInfo id
         old_unf  = unfoldingInfo old_info
-        new_unf | isEvaldUnfolding old_unf = evaldUnfolding
-                | otherwise                = noUnfolding
-          -- See Note [Preserve evaluatedness]
+        new_unf  = zapUnfolding old_unf  -- See Note [Preserve evaluatedness]
     in
     ((tidy_env', var_env'), id')
    }
@@ -205,11 +205,10 @@ tidyLetBndr rec_tidy_env env@(tidy_env, var_env) (id,rhs)
                     `setInlinePragInfo` inlinePragInfo old_info
                     `setUnfoldingInfo`  new_unf
 
-        new_unf | isStableUnfolding old_unf = tidyUnfolding rec_tidy_env old_unf old_unf
-                | isEvaldUnfolding  old_unf = evaldUnfolding
-                                              -- See Note [Preserve evaluatedness]
-                | otherwise                 = noUnfolding
         old_unf = unfoldingInfo old_info
+        new_unf | isStableUnfolding old_unf = tidyUnfolding rec_tidy_env old_unf old_unf
+                | otherwise                 = zapUnfolding old_unf
+                                              -- See Note [Preserve evaluatedness]
     in
     ((tidy_env', var_env'), id') }
 

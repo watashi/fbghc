@@ -28,6 +28,7 @@
 #include "Sparks.h"
 #include "Sweep.h"
 
+#include "Arena.h"
 #include "Storage.h"
 #include "RtsUtils.h"
 #include "Apply.h"
@@ -45,9 +46,15 @@
 #include "RetainerProfile.h"
 #include "LdvProfile.h"
 #include "RaiseAsync.h"
-#include "Stable.h"
+#include "StableName.h"
+#include "StablePtr.h"
 #include "CheckUnload.h"
 #include "CNF.h"
+#include "RtsFlags.h"
+
+#if defined(PROFILING)
+#include "RetainerProfile.h"
+#endif
 
 #include <string.h> // for memset()
 #include <unistd.h>
@@ -89,6 +96,8 @@
  *
  * We build up a static object list while collecting generations 0..N,
  * which is then appended to the static object list of generation N+1.
+ *
+ * See also: Note [STATIC_LINK fields] in Storage.h.
  */
 
 /* N is the oldest generation being collected, where the generations
@@ -112,8 +121,6 @@ uint32_t mutlist_MUTVARS,
     mutlist_TVAR_WATCH_QUEUE,
     mutlist_TREC_CHUNK,
     mutlist_TREC_HEADER,
-    mutlist_ATOMIC_INVARIANT,
-    mutlist_INVARIANT_CHECK_QUEUE,
     mutlist_OTHERS;
 #endif
 
@@ -122,7 +129,9 @@ uint32_t mutlist_MUTVARS,
 gc_thread **gc_threads = NULL;
 
 #if !defined(THREADED_RTS)
-StgWord8 the_gc_thread[sizeof(gc_thread) + 64 * sizeof(gen_workspace)];
+// Must be aligned to 64-bytes to meet stated 64-byte alignment of gen_workspace
+StgWord8 the_gc_thread[sizeof(gc_thread) + 64 * sizeof(gen_workspace)]
+    ATTRIBUTE_ALIGNED(64);
 #endif
 
 // Number of threads running in *this* GC.  Affects how many
@@ -131,6 +140,13 @@ uint32_t n_gc_threads;
 
 // For stats:
 static long copied;        // *words* copied & scavenged during this GC
+
+#if defined(PROF_SPIN) && defined(THREADED_RTS)
+// spin and yield counts for the quasi-SpinLock in waitForGcThreads
+volatile StgWord64 waitForGcThreads_spin = 0;
+volatile StgWord64 waitForGcThreads_yield = 0;
+volatile StgWord64 whitehole_gc_spin = 0;
+#endif
 
 bool work_stealing;
 
@@ -188,7 +204,9 @@ GarbageCollect (uint32_t collect_gen,
 {
   bdescr *bd;
   generation *gen;
-  StgWord live_blocks, live_words, par_max_copied, par_balanced_copied;
+  StgWord live_blocks, live_words, par_max_copied, par_balanced_copied,
+      gc_spin_spin, gc_spin_yield, mut_spin_spin, mut_spin_yield,
+      any_work, no_work, scav_find_work;
 #if defined(THREADED_RTS)
   gc_thread *saved_gct;
 #endif
@@ -221,8 +239,9 @@ GarbageCollect (uint32_t collect_gen,
   // tell the stats department that we've started a GC
   stat_startGC(cap, gct);
 
-  // lock the StablePtr table
-  stableLock();
+  // Lock the StablePtr table. This prevents FFI calls manipulating
+  // the table from occurring during GC.
+  stablePtrLock();
 
 #if defined(DEBUG)
   mutlist_MUTVARS = 0;
@@ -232,8 +251,6 @@ GarbageCollect (uint32_t collect_gen,
   mutlist_TVAR_WATCH_QUEUE = 0;
   mutlist_TREC_CHUNK = 0;
   mutlist_TREC_HEADER = 0;
-  mutlist_ATOMIC_INVARIANT = 0;
-  mutlist_INVARIANT_CHECK_QUEUE = 0;
   mutlist_OTHERS = 0;
 #endif
 
@@ -385,17 +402,15 @@ GarbageCollect (uint32_t collect_gen,
 
   markScheduler(mark_root, gct);
 
-#if defined(RTS_USER_SIGNALS)
-  // mark the signal handlers (signals should be already blocked)
-  markSignalHandlers(mark_root, gct);
-#endif
-
   // Mark the weak pointer list, and prepare to detect dead weak pointers.
   markWeakPtrList();
   initWeakForGC();
 
   // Mark the stable pointer table.
-  markStableTables(mark_root, gct);
+  markStablePtrTable(mark_root, gct);
+
+  // Remember old stable name addresses.
+  rememberOldStableNameAddresses ();
 
   /* -------------------------------------------------------------------------
    * Repeatedly scavenge all the areas we know about until there's no
@@ -421,7 +436,7 @@ GarbageCollect (uint32_t collect_gen,
   shutdown_gc_threads(gct->thread_index, idle_cap);
 
   // Now see which stable names are still alive.
-  gcStableTables();
+  gcStableNameTable();
 
 #if defined(THREADED_RTS)
   if (n_gc_threads == 1) {
@@ -461,32 +476,53 @@ GarbageCollect (uint32_t collect_gen,
   copied = 0;
   par_max_copied = 0;
   par_balanced_copied = 0;
+  gc_spin_spin = 0;
+  gc_spin_yield = 0;
+  mut_spin_spin = 0;
+  mut_spin_yield = 0;
+  any_work = 0;
+  no_work = 0;
+  scav_find_work = 0;
   {
       uint32_t i;
       uint64_t par_balanced_copied_acc = 0;
+      const gc_thread* thread;
 
       for (i=0; i < n_gc_threads; i++) {
           copied += gc_threads[i]->copied;
       }
       for (i=0; i < n_gc_threads; i++) {
+          thread = gc_threads[i];
           if (n_gc_threads > 1) {
               debugTrace(DEBUG_gc,"thread %d:", i);
-              debugTrace(DEBUG_gc,"   copied           %ld", gc_threads[i]->copied * sizeof(W_));
-              debugTrace(DEBUG_gc,"   scanned          %ld", gc_threads[i]->scanned * sizeof(W_));
-              debugTrace(DEBUG_gc,"   any_work         %ld", gc_threads[i]->any_work);
-              debugTrace(DEBUG_gc,"   no_work          %ld", gc_threads[i]->no_work);
-              debugTrace(DEBUG_gc,"   scav_find_work %ld",   gc_threads[i]->scav_find_work);
+              debugTrace(DEBUG_gc,"   copied           %ld",
+                         thread->copied * sizeof(W_));
+              debugTrace(DEBUG_gc,"   scanned          %ld",
+                         thread->scanned * sizeof(W_));
+              debugTrace(DEBUG_gc,"   any_work         %ld",
+                         thread->any_work);
+              debugTrace(DEBUG_gc,"   no_work          %ld",
+                         thread->no_work);
+              debugTrace(DEBUG_gc,"   scav_find_work %ld",
+                         thread->scav_find_work);
+
+#if defined(THREADED_RTS) && defined(PROF_SPIN)
+              gc_spin_spin += thread->gc_spin.spin;
+              gc_spin_yield += thread->gc_spin.yield;
+              mut_spin_spin += thread->mut_spin.spin;
+              mut_spin_yield += thread->mut_spin.yield;
+#endif
+
+              any_work += thread->any_work;
+              no_work += thread->no_work;
+              scav_find_work += thread->scav_find_work;
+
+              par_max_copied = stg_max(gc_threads[i]->copied, par_max_copied);
+              par_balanced_copied_acc +=
+                  stg_min(n_gc_threads * gc_threads[i]->copied, copied);
           }
-          par_max_copied = stg_max(gc_threads[i]->copied, par_max_copied);
-          par_balanced_copied_acc +=
-            stg_min(n_gc_threads * gc_threads[i]->copied, copied);
       }
-      if (n_gc_threads == 1) {
-          par_max_copied = 0;
-          par_balanced_copied = 0;
-      }
-      else
-      {
+      if (n_gc_threads > 1) {
           // See Note [Work Balance] for an explanation of this computation
           par_balanced_copied =
               (par_balanced_copied_acc - copied + (n_gc_threads - 1) / 2) /
@@ -521,13 +557,11 @@ GarbageCollect (uint32_t collect_gen,
         copied +=  mut_list_size;
 
         debugTrace(DEBUG_gc,
-                   "mut_list_size: %lu (%d vars, %d arrays, %d MVARs, %d TVARs, %d TVAR_WATCH_QUEUEs, %d TREC_CHUNKs, %d TREC_HEADERs, %d ATOMIC_INVARIANTs, %d INVARIANT_CHECK_QUEUEs, %d others)",
+                   "mut_list_size: %lu (%d vars, %d arrays, %d MVARs, %d TVARs, %d TVAR_WATCH_QUEUEs, %d TREC_CHUNKs, %d TREC_HEADERs, %d others)",
                    (unsigned long)(mut_list_size * sizeof(W_)),
                    mutlist_MUTVARS, mutlist_MUTARRS, mutlist_MVARS,
                    mutlist_TVAR, mutlist_TVAR_WATCH_QUEUE,
                    mutlist_TREC_CHUNK, mutlist_TREC_HEADER,
-                   mutlist_ATOMIC_INVARIANT,
-                   mutlist_INVARIANT_CHECK_QUEUE,
                    mutlist_OTHERS);
     }
 
@@ -701,15 +735,15 @@ GarbageCollect (uint32_t collect_gen,
   if (major_gc) { gcCAFs(); }
 #endif
 
-  // Update the stable pointer hash table.
-  updateStableTables(major_gc);
+  // Update the stable name hash table
+  updateStableNameTable(major_gc);
 
   // unlock the StablePtr table.  Must be before scheduleFinalizers(),
   // because a finalizer may call hs_free_fun_ptr() or
   // hs_free_stable_ptr(), both of which access the StablePtr table.
-  stableUnlock();
+  stablePtrUnlock();
 
-  // Must be after stableUnlock(), because it might free stable ptrs.
+  // Must be after stablePtrUnlock(), because it might free stable ptrs.
   if (major_gc) {
       checkUnload (gct->scavenged_static_objects);
   }
@@ -751,24 +785,51 @@ GarbageCollect (uint32_t collect_gen,
   ACQUIRE_SM_LOCK;
 
   if (major_gc) {
-      W_ need, got;
-      need = BLOCKS_TO_MBLOCKS(n_alloc_blocks);
-      got = mblocks_allocated;
+      W_ need_prealloc, need_live, need, got;
+      uint32_t i;
+
+      need_live = 0;
+      for (i = 0; i < RtsFlags.GcFlags.generations; i++) {
+          need_live += genLiveBlocks(&generations[i]);
+      }
+      need_live = stg_max(RtsFlags.GcFlags.minOldGenSize, need_live);
+
+      need_prealloc = 0;
+      for (i = 0; i < n_nurseries; i++) {
+          need_prealloc += nurseries[i].n_blocks;
+      }
+      need_prealloc += RtsFlags.GcFlags.largeAllocLim;
+      need_prealloc += countAllocdBlocks(exec_block);
+      need_prealloc += arenaBlocks();
+#if defined(PROFILING)
+      if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_RETAINER) {
+          need_prealloc = retainerStackBlocks();
+      }
+#endif
+
       /* If the amount of data remains constant, next major GC we'll
-         require (F+1)*need. We leave (F+2)*need in order to reduce
-         repeated deallocation and reallocation. */
-      need = (RtsFlags.GcFlags.oldGenFactor + 2) * need;
+       * require (F+1)*live + prealloc. We leave (F+2)*live + prealloc
+       * in order to reduce repeated deallocation and reallocation. #14702
+       */
+      need = need_prealloc + (RtsFlags.GcFlags.oldGenFactor + 2) * need_live;
+
+      /* Also, if user set heap size, do not drop below it.
+       */
+      need = stg_max(RtsFlags.GcFlags.heapSizeSuggestion, need);
+
       /* But with a large nursery, the above estimate might exceed
        * maxHeapSize.  A large resident set size might make the OS
        * kill this process, or swap unnecessarily.  Therefore we
        * ensure that our estimate does not exceed maxHeapSize.
        */
       if (RtsFlags.GcFlags.maxHeapSize != 0) {
-          W_ max = BLOCKS_TO_MBLOCKS(RtsFlags.GcFlags.maxHeapSize);
-          if (need > max) {
-              need = max;
-          }
+          need = stg_min(RtsFlags.GcFlags.maxHeapSize, need);
       }
+
+      need = BLOCKS_TO_MBLOCKS(need);
+
+      got = mblocks_allocated;
+
       if (got > need) {
           returnMemoryToOS(got - need);
       }
@@ -797,7 +858,9 @@ GarbageCollect (uint32_t collect_gen,
   // ok, GC over: tell the stats department what happened.
   stat_endGC(cap, gct, live_words, copied,
              live_blocks * BLOCK_SIZE_W - live_words /* slop */,
-             N, n_gc_threads, par_max_copied, par_balanced_copied);
+             N, n_gc_threads, par_max_copied, par_balanced_copied,
+             gc_spin_spin, gc_spin_yield, mut_spin_spin, mut_spin_yield,
+             any_work, no_work, scav_find_work);
 
 #if defined(RTS_USER_SIGNALS)
   if (RtsFlags.MiscFlags.install_signal_handlers) {
@@ -824,11 +887,6 @@ static void heapOverflow(void)
 /* -----------------------------------------------------------------------------
    Initialise the gc_thread structures.
    -------------------------------------------------------------------------- */
-
-#define GC_THREAD_INACTIVE             0
-#define GC_THREAD_STANDING_BY          1
-#define GC_THREAD_RUNNING              2
-#define GC_THREAD_WAITING_TO_CONTINUE  3
 
 static void
 new_gc_thread (uint32_t n, gc_thread *t)
@@ -1132,6 +1190,9 @@ waitForGcThreads (Capability *cap USED_IF_THREADS, bool idle_cap[])
     const uint32_t me = cap->no;
     uint32_t i, j;
     bool retry = true;
+    Time t0, t1, t2;
+
+    t0 = t1 = t2 = getProcessElapsedTime();
 
     while(retry) {
         for (i=0; i < n_threads; i++) {
@@ -1151,8 +1212,32 @@ waitForGcThreads (Capability *cap USED_IF_THREADS, bool idle_cap[])
                 }
             }
             if (!retry) break;
+#if defined(PROF_SPIN)
+            waitForGcThreads_yield++;
+#endif
             yieldThread();
         }
+
+        t2 = getProcessElapsedTime();
+        if (RtsFlags.GcFlags.longGCSync != 0 &&
+            t2 - t1 > RtsFlags.GcFlags.longGCSync) {
+            /* call this every longGCSync of delay */
+            rtsConfig.longGCSync(cap->no, t2 - t0);
+            t1 = t2;
+        }
+        if (retry) {
+#if defined(PROF_SPIN)
+            // This is a bit strange, we'll get more yields than spins.
+            // I guess that means it's not a spin-lock at all, but these
+            // numbers are still useful (I think).
+            waitForGcThreads_spin++;
+#endif
+        }
+    }
+
+    if (RtsFlags.GcFlags.longGCSync != 0 &&
+        t2 - t0 > RtsFlags.GcFlags.longGCSync) {
+        rtsConfig.longGCSyncEnd(t2 - t0);
     }
 }
 
@@ -1324,7 +1409,7 @@ prepare_collected_gen (generation *gen)
         bdescr *bitmap_bdescr;
         StgWord *bitmap;
 
-        bitmap_size = gen->n_old_blocks * BLOCK_SIZE / (sizeof(W_)*BITS_PER_BYTE);
+        bitmap_size = gen->n_old_blocks * BLOCK_SIZE / BITS_IN(W_);
 
         if (bitmap_size > 0) {
             bitmap_bdescr = allocGroup((StgWord)BLOCK_ROUND_UP(bitmap_size)
@@ -1342,7 +1427,7 @@ prepare_collected_gen (generation *gen)
             // block descriptor.
             for (bd=gen->old_blocks; bd != NULL; bd = bd->link) {
                 bd->u.bitmap = bitmap;
-                bitmap += BLOCK_SIZE_W / (sizeof(W_)*BITS_PER_BYTE);
+                bitmap += BLOCK_SIZE_W / BITS_IN(W_);
 
                 // Also at this point we set the BF_MARKED flag
                 // for this block.  The invariant is that
@@ -1446,9 +1531,6 @@ collect_gct_blocks (void)
    take a global lock.  Here we collect those blocks from the
    cap->pinned_object_blocks lists and put them on the
    main g0->large_object list.
-
-   Returns: the number of words allocated this way, for stats
-   purposes.
    -------------------------------------------------------------------------- */
 
 static void
@@ -1744,8 +1826,8 @@ resize_nursery (void)
    Sanity code for CAF garbage collection.
 
    With DEBUG turned on, we manage a CAF list in addition to the SRT
-   mechanism.  After GC, we run down the CAF list and blackhole any
-   CAFs which have been garbage collected.  This means we get an error
+   mechanism.  After GC, we run down the CAF list and make any
+   CAFs which have been garbage collected GCD_CAF.  This means we get an error
    whenever the program tries to enter a garbage collected CAF.
 
    Any garbage collected CAFs are taken off the CAF list at the same
@@ -1771,7 +1853,10 @@ static void gcCAFs(void)
         info = get_itbl((StgClosure*)p);
         ASSERT(info->type == IND_STATIC);
 
-        if (p->static_link == NULL) {
+        // See Note [STATIC_LINK fields] in Storage.h
+        // This condition identifies CAFs that have just been GC'd and
+        // don't have static_link==3 which means they should be ignored.
+        if ((((StgWord)(p->static_link)&STATIC_BITS) | prev_static_flag) != 3) {
             debugTrace(DEBUG_gccafs, "CAF gc'd at 0x%p", p);
             SET_INFO((StgClosure*)p,&stg_GCD_CAF_info); // stub it
             if (prev == NULL) {
@@ -1788,3 +1873,28 @@ static void gcCAFs(void)
     debugTrace(DEBUG_gccafs, "%d CAFs live", i);
 }
 #endif
+
+
+/* -----------------------------------------------------------------------------
+   The GC can leave some work for the mutator to do before the next
+   GC, provided the work can be safely overlapped with mutation.  This
+   can help reduce the GC pause time.
+
+   The mutator can call doIdleGCWork() any time it likes, but
+   preferably when it is idle.  It's safe for multiple capabilities to
+   call doIdleGCWork().
+
+   When 'all' is
+     * false: doIdleGCWork() should only take a short, bounded, amount
+       of time.
+     * true: doIdleGCWork() will complete all the outstanding GC work.
+
+   The return value is
+     * true if there's more to do (only if 'all' is false).
+     * false otherwise.
+  -------------------------------------------------------------------------- */
+
+bool doIdleGCWork(Capability *cap STG_UNUSED, bool all)
+{
+    return runSomeFinalizers(all);
+}

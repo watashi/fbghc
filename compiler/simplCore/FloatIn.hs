@@ -19,6 +19,8 @@ module FloatIn ( floatInwards ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import CoreSyn
 import MkCore
 import HscTypes         ( ModGuts(..) )
@@ -179,7 +181,7 @@ fiExpr dflags to_drop ann_expr@(_,AnnApp {})
          -- lists without evaluating extra_fvs, and hence without
          -- peering into each argument
 
-    (_, extra_fvs) = foldl add_arg (fun_ty, extra_fvs0) ann_args
+    (_, extra_fvs) = foldl' add_arg (fun_ty, extra_fvs0) ann_args
     extra_fvs0 = case ann_fun of
                    (_, AnnVar _) -> fun_fvs
                    _             -> emptyDVarSet
@@ -413,6 +415,16 @@ But there are wrinkles
   cases like Trac #5658.   This is implemented in sepBindsByJoinPoint;
   if is_case is False we dump all floating cases right here.
 
+* Trac #14511 is another example of why we want to restrict float-in
+  of case-expressions.  Consider
+     case indexArray# a n of (# r #) -> writeArray# ma i (f r)
+  Now, floating that indexing operation into the (f r) thunk will
+  not create any new thunks, but it will keep the array 'a' alive
+  for much longer than the programmer expected.
+
+  So again, not floating a case into a let or argument seems like
+  the Right Thing
+
 For @Case@, the possible drop points for the 'to_drop'
 bindings are:
   (a) inside the scrutinee
@@ -459,7 +471,7 @@ fiExpr dflags to_drop (_, AnnCase scrut case_bndr ty alts)
     alts_fvs     = map alt_fvs alts
     all_alts_fvs = unionDVarSets alts_fvs
     alt_fvs (_con, args, rhs)
-      = foldl delDVarSet (freeVarsOf rhs) (case_bndr:args)
+      = foldl' delDVarSet (freeVarsOf rhs) (case_bndr:args)
            -- Delete case_bndr and args from free vars of rhs
            -- to get free vars of alt
 

@@ -14,15 +14,17 @@ import Data.Char ( toLower, chr)
 import GHC.Show  ( showMultiLineString )
 import GHC.Lexeme( startsVarSym )
 import Data.Ratio ( numerator, denominator )
+import Prelude hiding ((<>))
 
 nestDepth :: Int
 nestDepth = 4
 
 type Precedence = Int
-appPrec, unopPrec, opPrec, noPrec :: Precedence
-appPrec  = 3    -- Argument of a function application
-opPrec   = 2    -- Argument of an infix operator
-unopPrec = 1    -- Argument of an unresolved infix operator
+appPrec, opPrec, unopPrec, sigPrec, noPrec :: Precedence
+appPrec  = 4    -- Argument of a function application
+opPrec   = 3    -- Argument of an infix operator
+unopPrec = 2    -- Argument of an unresolved infix operator
+sigPrec  = 1    -- Argument of an explicit type signature
 noPrec   = 0    -- Others
 
 parensIf :: Bool -> Doc -> Doc
@@ -177,6 +179,11 @@ pprExp i (DoE ss_) = parensIf (i > noPrec) $ text "do" <+> pprStms ss_
     pprStms []  = empty
     pprStms [s] = ppr s
     pprStms ss  = braces (semiSep ss)
+pprExp i (MDoE ss_) = parensIf (i > noPrec) $ text "mdo" <+> pprStms ss_
+  where
+    pprStms []  = empty
+    pprStms [s] = ppr s
+    pprStms ss  = braces (semiSep ss)
 
 pprExp _ (CompE []) = text "<<Empty CompExp>>"
 -- This will probably break with fixity declarations - would need a ';'
@@ -193,13 +200,15 @@ pprExp _ (CompE ss) =
         ss' = init ss
 pprExp _ (ArithSeqE d) = ppr d
 pprExp _ (ListE es) = brackets (commaSep es)
-pprExp i (SigE e t) = parensIf (i > noPrec) $ ppr e <+> dcolon <+> ppr t
+pprExp i (SigE e t) = parensIf (i > noPrec) $ pprExp sigPrec e
+                                          <+> dcolon <+> ppr t
 pprExp _ (RecConE nm fs) = ppr nm <> braces (pprFields fs)
 pprExp _ (RecUpdE e fs) = pprExp appPrec e <> braces (pprFields fs)
 pprExp i (StaticE e) = parensIf (i >= appPrec) $
                          text "static"<+> pprExp appPrec e
 pprExp _ (UnboundVarE v) = pprName' Applied v
 pprExp _ (LabelE s) = text "#" <> text s
+pprExp _ (ImplicitParamVarE n) = text ('?' : n)
 
 pprFields :: [(Name,Exp)] -> Doc
 pprFields = sep . punctuate comma . map (\(s,e) -> ppr s <+> equals <+> ppr e)
@@ -215,11 +224,17 @@ instance Ppr Stmt where
     ppr (NoBindS e) = ppr e
     ppr (ParS sss) = sep $ punctuate bar
                          $ map commaSep sss
+    ppr (RecS ss) = text "rec" <+> (braces (semiSep ss))
 
 ------------------------------
 instance Ppr Match where
-    ppr (Match p rhs ds) = ppr p <+> pprBody False rhs
+    ppr (Match p rhs ds) = pprMatchPat p <+> pprBody False rhs
                         $$ where_clause ds
+
+pprMatchPat :: Pat -> Doc
+-- Everything except pattern signatures bind more tightly than (->)
+pprMatchPat p@(SigP {}) = parens (ppr p)
+pprMatchPat p           = ppr p
 
 ------------------------------
 pprGuarded :: Doc -> (Guard, Exp) -> Doc
@@ -378,13 +393,16 @@ ppr_dec _ (PatSynD name args dir pat)
                 | otherwise            = ppr pat
 ppr_dec _ (PatSynSigD name ty)
   = pprPatSynSig name ty
+ppr_dec _ (ImplicitParamBindD n e)
+  = hsep [text ('?' : n), text "=", ppr e]
 
 ppr_deriv_strategy :: DerivStrategy -> Doc
-ppr_deriv_strategy ds = text $
+ppr_deriv_strategy ds =
   case ds of
-    StockStrategy    -> "stock"
-    AnyclassStrategy -> "anyclass"
-    NewtypeStrategy  -> "newtype"
+    StockStrategy    -> text "stock"
+    AnyclassStrategy -> text "anyclass"
+    NewtypeStrategy  -> text "newtype"
+    ViaStrategy ty   -> text "via" <+> pprParendType ty
 
 ppr_overlap :: Overlap -> Doc
 ppr_overlap o = text $
@@ -444,8 +462,16 @@ ppr_newtype maybeInst ctxt t argsDoc ksig c decs
 
 ppr_deriv_clause :: DerivClause -> Doc
 ppr_deriv_clause (DerivClause ds ctxt)
-  = text "deriving" <+> maybe empty ppr_deriv_strategy ds
+  = text "deriving" <+> pp_strat_before
                     <+> ppr_cxt_preds ctxt
+                    <+> pp_strat_after
+  where
+    -- @via@ is unique in that in comes /after/ the class being derived,
+    -- so we must special-case it.
+    (pp_strat_before, pp_strat_after) =
+      case ds of
+        Just (via@ViaStrategy{}) -> (empty, ppr_deriv_strategy via)
+        _                        -> (maybe empty ppr_deriv_strategy ds, empty)
 
 ppr_tySyn :: Doc -> Name -> Doc -> Type -> Doc
 ppr_tySyn maybeInst t argsDoc rhs
@@ -463,11 +489,6 @@ instance Ppr FunDep where
     ppr (FunDep xs ys) = hsep (map ppr xs) <+> text "->" <+> hsep (map ppr ys)
     ppr_list [] = empty
     ppr_list xs = bar <+> commaSep xs
-
-------------------------------
-instance Ppr FamFlavour where
-    ppr DataFam = text "data"
-    ppr TypeFam = text "type"
 
 ------------------------------
 instance Ppr FamilyResultSig where
@@ -689,11 +710,11 @@ pprParendType (UnboxedSumT arity) = hashParens $ hcat $ replicate (arity-1) bar
 pprParendType ArrowT              = parens (text "->")
 pprParendType ListT               = text "[]"
 pprParendType (LitT l)            = pprTyLit l
-pprParendType (PromotedT c)       = text "'" <> ppr c
+pprParendType (PromotedT c)       = text "'" <> pprName' Applied c
 pprParendType (PromotedTupleT 0)  = text "'()"
 pprParendType (PromotedTupleT n)  = quoteParens (hcat (replicate (n-1) comma))
 pprParendType PromotedNilT        = text "'[]"
-pprParendType PromotedConsT       = text "(':)"
+pprParendType PromotedConsT       = text "'(:)"
 pprParendType StarT               = char '*'
 pprParendType ConstraintT         = text "Constraint"
 pprParendType (SigT ty k)         = parens (ppr ty <+> text "::" <+> ppr k)
@@ -704,6 +725,7 @@ pprParendType (ParensT t)         = ppr t
 pprParendType tuple | (TupleT n, args) <- split tuple
                     , length args == n
                     = parens (commaSep args)
+pprParendType (ImplicitParamT n t)= text ('?':n) <+> text "::" <+> ppr t
 pprParendType other               = parens (ppr other)
 
 pprUInfixT :: Type -> Doc
@@ -772,6 +794,7 @@ pprCxt ts = ppr_cxt_preds ts <+> text "=>"
 
 ppr_cxt_preds :: Cxt -> Doc
 ppr_cxt_preds [] = empty
+ppr_cxt_preds [t@ImplicitParamT{}] = parens (ppr t)
 ppr_cxt_preds [t] = ppr t
 ppr_cxt_preds ts = parens (commaSep ts)
 

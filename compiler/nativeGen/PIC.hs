@@ -47,6 +47,8 @@ module PIC (
 
 where
 
+import GhcPrelude
+
 import qualified PPC.Instr      as PPC
 import qualified PPC.Regs       as PPC
 
@@ -162,7 +164,7 @@ cmmMakePicReference dflags lbl
         | OSAIX <- platformOS $ targetPlatform dflags
         = CmmMachOp (MO_Add W32)
                 [ CmmReg (CmmGlobal PicBaseReg)
-                , CmmLit $ picRelative
+                , CmmLit $ picRelative dflags
                                 (platformArch   $ targetPlatform dflags)
                                 (platformOS     $ targetPlatform dflags)
                                 lbl ]
@@ -171,15 +173,16 @@ cmmMakePicReference dflags lbl
         | ArchPPC_64 _ <- platformArch $ targetPlatform dflags
         = CmmMachOp (MO_Add W32) -- code model medium
                 [ CmmReg (CmmGlobal PicBaseReg)
-                , CmmLit $ picRelative
+                , CmmLit $ picRelative dflags
                                 (platformArch   $ targetPlatform dflags)
                                 (platformOS     $ targetPlatform dflags)
                                 lbl ]
 
-        | (gopt Opt_PIC dflags || WayDyn `elem` ways dflags) && absoluteLabel lbl
+        | (positionIndependent dflags || gopt Opt_ExternalDynamicRefs dflags)
+            && absoluteLabel lbl
         = CmmMachOp (MO_Add (wordWidth dflags))
                 [ CmmReg (CmmGlobal PicBaseReg)
-                , CmmLit $ picRelative
+                , CmmLit $ picRelative dflags
                                 (platformArch   $ targetPlatform dflags)
                                 (platformOS     $ targetPlatform dflags)
                                 lbl ]
@@ -236,7 +239,7 @@ howToAccessLabel
 howToAccessLabel dflags _ OSMinGW32 this_mod _ lbl
 
         -- Assume all symbols will be in the same PE, so just access them directly.
-        | WayDyn `notElem` ways dflags
+        | not (gopt Opt_ExternalDynamicRefs dflags)
         = AccessDirectly
 
         -- If the target symbol is in another PE we need to access it via the
@@ -272,7 +275,7 @@ howToAccessLabel dflags arch OSDarwin this_mod DataReference lbl
         -- we'd need to pass the current Module all the way in to
         -- this function.
         | arch /= ArchX86_64
-        , gopt Opt_PIC dflags && externallyVisibleCLabel lbl
+        , positionIndependent dflags && externallyVisibleCLabel lbl
         = AccessViaSymbolPtr
 
         | otherwise
@@ -313,8 +316,8 @@ howToAccessLabel _dflags _arch OSAIX _this_mod kind _lbl
 --
 -- ELF tries to pretend to the main application code that dynamic linking does
 -- not exist. While this may sound convenient, it tends to mess things up in
--- very bad ways, so we have to be careful when we generate code for the main
--- program (-dynamic but no -fPIC).
+-- very bad ways, so we have to be careful when we generate code for a non-PIE
+-- main program (-dynamic but no -fPIC).
 --
 -- Indirect access is required for references to imported symbols
 -- from position independent code. It is also required from the main program
@@ -337,7 +340,8 @@ howToAccessLabel dflags _ os _ _ _
         --           if we don't dynamically link to Haskell code,
         --           it actually manages to do so without messing things up.
         | osElfTarget os
-        , not (gopt Opt_PIC dflags) && WayDyn `notElem` ways dflags
+        , not (positionIndependent dflags) &&
+          not (gopt Opt_ExternalDynamicRefs dflags)
         = AccessDirectly
 
 howToAccessLabel dflags arch os this_mod DataReference lbl
@@ -351,7 +355,7 @@ howToAccessLabel dflags arch os this_mod DataReference lbl
             -- via a symbol pointer (see below for an explanation why
             -- PowerPC32 Linux is especially broken).
             | arch == ArchPPC
-            , gopt Opt_PIC dflags
+            , positionIndependent dflags
             -> AccessViaSymbolPtr
 
             | otherwise
@@ -372,12 +376,13 @@ howToAccessLabel dflags arch os this_mod DataReference lbl
 
 howToAccessLabel dflags arch os this_mod CallReference lbl
         | osElfTarget os
-        , labelDynamic dflags this_mod lbl && not (gopt Opt_PIC dflags)
+        , labelDynamic dflags this_mod lbl && not (positionIndependent dflags)
         = AccessDirectly
 
         | osElfTarget os
         , arch /= ArchX86
-        , labelDynamic dflags this_mod lbl && gopt Opt_PIC dflags
+        , labelDynamic dflags this_mod lbl
+        , positionIndependent dflags
         = AccessViaStub
 
 howToAccessLabel dflags _ os this_mod _ lbl
@@ -388,7 +393,7 @@ howToAccessLabel dflags _ os this_mod _ lbl
 
 -- all other platforms
 howToAccessLabel dflags _ _ _ _ _
-        | not (gopt Opt_PIC dflags)
+        | not (positionIndependent dflags)
         = AccessDirectly
 
         | otherwise
@@ -397,10 +402,10 @@ howToAccessLabel dflags _ _ _ _ _
 
 
 -- -------------------------------------------------------------------
--- | Says what we we have to add to our 'PIC base register' in order to
+-- | Says what we have to add to our 'PIC base register' in order to
 --      get the address of a label.
 
-picRelative :: Arch -> OS -> CLabel -> CmmLit
+picRelative :: DynFlags -> Arch -> OS -> CLabel -> CmmLit
 
 -- Darwin, but not x86_64:
 -- The PIC base register points to the PIC base label at the beginning
@@ -409,15 +414,15 @@ picRelative :: Arch -> OS -> CLabel -> CmmLit
 -- We have already made sure that all labels that are not from the current
 -- module are accessed indirectly ('as' can't calculate differences between
 -- undefined labels).
-picRelative arch OSDarwin lbl
+picRelative dflags arch OSDarwin lbl
         | arch /= ArchX86_64
-        = CmmLabelDiffOff lbl mkPicBaseLabel 0
+        = CmmLabelDiffOff lbl mkPicBaseLabel 0 (wordWidth dflags)
 
 -- On AIX we use an indirect local TOC anchored by 'gotLabel'.
 -- This way we use up only one global TOC entry per compilation-unit
 -- (this is quite similiar to GCC's @-mminimal-toc@ compilation mode)
-picRelative _ OSAIX lbl
-        = CmmLabelDiffOff lbl gotLabel 0
+picRelative dflags _ OSAIX lbl
+        = CmmLabelDiffOff lbl gotLabel 0 (wordWidth dflags)
 
 -- PowerPC Linux:
 -- The PIC base register points to our fake GOT. Use a label difference
@@ -425,9 +430,9 @@ picRelative _ OSAIX lbl
 -- We have made sure that *everything* is accessed indirectly, so this
 -- is only used for offsets from the GOT to symbol pointers inside the
 -- GOT.
-picRelative ArchPPC os lbl
+picRelative dflags ArchPPC os lbl
         | osElfTarget os
-        = CmmLabelDiffOff lbl gotLabel 0
+        = CmmLabelDiffOff lbl gotLabel 0 (wordWidth dflags)
 
 
 -- Most Linux versions:
@@ -437,7 +442,7 @@ picRelative ArchPPC os lbl
 -- The PIC base register is %rip, we use foo@gotpcrel for symbol pointers,
 -- and a GotSymbolOffset label for other things.
 -- For reasons of tradition, the symbol offset label is written as a plain label.
-picRelative arch os lbl
+picRelative _ arch os lbl
         | osElfTarget os || (os == OSDarwin && arch == ArchX86_64)
         = let   result
                         | Just (SymbolPtr, lbl') <- dynamicLinkerLabelInfo lbl
@@ -448,7 +453,7 @@ picRelative arch os lbl
 
           in    result
 
-picRelative _ _ _
+picRelative _ _ _ _
         = panic "PositionIndependentCode.picRelative undefined for this platform"
 
 
@@ -467,7 +472,7 @@ needImportedSymbols dflags arch os
         -- PowerPC Linux: -fPIC or -dynamic
         | osElfTarget os
         , arch  == ArchPPC
-        = gopt Opt_PIC dflags || WayDyn `elem` ways dflags
+        = positionIndependent dflags || gopt Opt_ExternalDynamicRefs dflags
 
         -- PowerPC 64 Linux: always
         | osElfTarget os
@@ -477,7 +482,8 @@ needImportedSymbols dflags arch os
         -- i386 (and others?): -dynamic but not -fPIC
         | osElfTarget os
         , arch /= ArchPPC_64 ELF_V1 && arch /= ArchPPC_64 ELF_V2
-        = WayDyn `elem` ways dflags && not (gopt Opt_PIC dflags)
+        = gopt Opt_ExternalDynamicRefs dflags &&
+          not (positionIndependent dflags)
 
         | otherwise
         = False
@@ -499,7 +505,7 @@ gotLabel
 -- However, for PIC on x86, we need a small helper function.
 pprGotDeclaration :: DynFlags -> Arch -> OS -> SDoc
 pprGotDeclaration dflags ArchX86 OSDarwin
-        | gopt Opt_PIC dflags
+        | positionIndependent dflags
         = vcat [
                 text ".section __TEXT,__textcoal_nt,coalesced,no_toc",
                 text ".weak_definition ___i686.get_pc_thunk.ax",
@@ -540,7 +546,7 @@ pprGotDeclaration _ (ArchPPC_64 _) _
 pprGotDeclaration dflags arch os
         | osElfTarget os
         , arch /= ArchPPC_64 ELF_V1 && arch /= ArchPPC_64 ELF_V2
-        , not (gopt Opt_PIC dflags)
+        , not (positionIndependent dflags)
         = empty
 
         | osElfTarget os
@@ -565,7 +571,7 @@ pprGotDeclaration _ _ _
 pprImportedSymbol :: DynFlags -> Platform -> CLabel -> SDoc
 pprImportedSymbol dflags platform@(Platform { platformArch = ArchPPC, platformOS = OSDarwin }) importedLbl
         | Just (CodeStub, lbl) <- dynamicLinkerLabelInfo importedLbl
-        = case gopt Opt_PIC dflags of
+        = case positionIndependent dflags of
            False ->
             vcat [
                 text ".symbol_stub",
@@ -619,7 +625,7 @@ pprImportedSymbol dflags platform@(Platform { platformArch = ArchPPC, platformOS
 
 pprImportedSymbol dflags platform@(Platform { platformArch = ArchX86, platformOS = OSDarwin }) importedLbl
         | Just (CodeStub, lbl) <- dynamicLinkerLabelInfo importedLbl
-        = case gopt Opt_PIC dflags of
+        = case positionIndependent dflags of
            False ->
             vcat [
                 text ".symbol_stub",
@@ -652,7 +658,7 @@ pprImportedSymbol dflags platform@(Platform { platformArch = ArchX86, platformOS
                     text "\tjmp dyld_stub_binding_helper"
             ]
           $+$ vcat [        text ".section __DATA, __la_sym_ptr"
-                    <> (if gopt Opt_PIC dflags then int 2 else int 3)
+                    <> (if positionIndependent dflags then int 2 else int 3)
                     <> text ",lazy_symbol_pointers",
                 text "L" <> pprCLabel platform lbl <> ptext (sLit "$lazy_ptr:"),
                     text "\t.indirect_symbol" <+> pprCLabel platform lbl,

@@ -11,8 +11,31 @@
 -- Stability   :  provisional
 -- Portability :  portable
 --
--- Functors: uniform action over a parameterized type, generalizing the
--- 'Data.List.map' function on lists.
+--
+-- A type @f@ is a Functor if it provides a function @fmap@ which, given any types @a@ and @b@,
+-- lets you apply any function of type @(a -> b)@ to turn an @f a@ into an @f b@, preserving the
+-- structure of @f@.
+--
+-- ==== __Examples__
+--
+--  >>> fmap show (Just 1)  --  (a   -> b)      -> f a       -> f b
+--  Just "1"                --  (Int -> String) -> Maybe Int -> Maybe String
+--
+--  >>> fmap show Nothing   --  (a   -> b)      -> f a       -> f b
+--  Nothing                 --  (Int -> String) -> Maybe Int -> Maybe String
+--
+--  >>> fmap show [1,2,3]   --  (a   -> b)      -> f a       -> f b
+--  ["1", "2", "3"]         --  (Int -> String) -> [Int]     -> [String]
+--
+--  >>> fmap show []        --  (a   -> b)      -> f a       -> f b
+--  []                      --  (Int -> String) -> [Int]     -> [String]
+--
+-- The 'fmap' function is also available as the infix operator '<$>':
+--
+--  >>> fmap show (Just 1) --  (Int -> String) -> Maybe Int -> Maybe String
+--  Just "1"
+--  >>> show <$> (Just 1)  --  (Int -> String) -> Maybe Int -> Maybe String
+--  Just "1"
 
 module Data.Functor
     (
@@ -20,6 +43,7 @@ module Data.Functor
       (<$),
       ($>),
       (<$>),
+      (<&>),
       void,
     ) where
 
@@ -33,26 +57,27 @@ infixl 4 <$>
 
 -- | An infix synonym for 'fmap'.
 --
--- The name of this operator is an allusion to '$'.
+-- The name of this operator is an allusion to 'Prelude.$'.
 -- Note the similarities between their types:
 --
 -- >  ($)  ::              (a -> b) ->   a ->   b
 -- > (<$>) :: Functor f => (a -> b) -> f a -> f b
 --
--- Whereas '$' is function application, '<$>' is function
+-- Whereas 'Prelude.$' is function application, '<$>' is function
 -- application lifted over a 'Functor'.
 --
 -- ==== __Examples__
 --
--- Convert from a @'Maybe' 'Int'@ to a @'Maybe' 'String'@ using 'show':
+-- Convert from a @'Data.Maybe.Maybe' 'Data.Int.Int'@ to a @'Data.Maybe.Maybe'
+-- 'Data.String.String'@ using 'Prelude.show':
 --
 -- >>> show <$> Nothing
 -- Nothing
 -- >>> show <$> Just 3
 -- Just "3"
 --
--- Convert from an @'Either' 'Int' 'Int'@ to an @'Either' 'Int'@
--- 'String' using 'show':
+-- Convert from an @'Data.Either.Either' 'Data.Int.Int' 'Data.Int.Int'@ to an
+-- @'Data.Either.Either' 'Data.Int.Int'@ 'Data.String.String' using 'Prelude.show':
 --
 -- >>> show <$> Left 17
 -- Left 17
@@ -64,7 +89,7 @@ infixl 4 <$>
 -- >>> (*2) <$> [1,2,3]
 -- [2,4,6]
 --
--- Apply 'even' to the second element of a pair:
+-- Apply 'Prelude.even' to the second element of a pair:
 --
 -- >>> even <$> (2,2)
 -- (2,True)
@@ -74,33 +99,60 @@ infixl 4 <$>
 
 infixl 4 $>
 
+-- | Flipped version of '<$>'.
+--
+-- @
+-- ('<&>') = 'flip' 'fmap'
+-- @
+--
+-- @since 4.11.0.0
+--
+-- ==== __Examples__
+-- Apply @(+1)@ to a list, a 'Data.Maybe.Just' and a 'Data.Either.Right':
+--
+-- >>> Just 2 <&> (+1)
+-- Just 3
+--
+-- >>> [1,2,3] <&> (+1)
+-- [2,3,4]
+--
+-- >>> Right 3 <&> (+1)
+-- Right 4
+--
+(<&>) :: Functor f => f a -> (a -> b) -> f b
+as <&> f = f <$> as
+
+infixl 1 <&>
+
 -- | Flipped version of '<$'.
 --
 -- @since 4.7.0.0
 --
 -- ==== __Examples__
 --
--- Replace the contents of a @'Maybe' 'Int'@ with a constant 'String':
+-- Replace the contents of a @'Data.Maybe.Maybe' 'Data.Int.Int'@ with a constant
+-- 'Data.String.String':
 --
 -- >>> Nothing $> "foo"
 -- Nothing
 -- >>> Just 90210 $> "foo"
 -- Just "foo"
 --
--- Replace the contents of an @'Either' 'Int' 'Int'@ with a constant
--- 'String', resulting in an @'Either' 'Int' 'String'@:
+-- Replace the contents of an @'Data.Either.Either' 'Data.Int.Int' 'Data.Int.Int'@
+-- with a constant 'Data.String.String', resulting in an @'Data.Either.Either'
+-- 'Data.Int.Int' 'Data.String.String'@:
 --
 -- >>> Left 8675309 $> "foo"
 -- Left 8675309
 -- >>> Right 8675309 $> "foo"
 -- Right "foo"
 --
--- Replace each element of a list with a constant 'String':
+-- Replace each element of a list with a constant 'Data.String.String':
 --
 -- >>> [1,2,3] $> "foo"
 -- ["foo","foo","foo"]
 --
--- Replace the second element of a pair with a constant 'String':
+-- Replace the second element of a pair with a constant 'Data.String.String':
 --
 -- >>> (1,2) $> "foo"
 -- (1,"foo")
@@ -113,15 +165,15 @@ infixl 4 $>
 --
 -- ==== __Examples__
 --
--- Replace the contents of a @'Maybe' 'Int'@ with unit:
+-- Replace the contents of a @'Data.Maybe.Maybe' 'Data.Int.Int'@ with unit:
 --
 -- >>> void Nothing
 -- Nothing
 -- >>> void (Just 3)
 -- Just ()
 --
--- Replace the contents of an @'Either' 'Int' 'Int'@ with unit,
--- resulting in an @'Either' 'Int' '()'@:
+-- Replace the contents of an @'Data.Either.Either' 'Data.Int.Int' 'Data.Int.Int'@
+-- with unit, resulting in an @'Data.Either.Either' 'Data.Int.Int' '()'@:
 --
 -- >>> void (Left 8675309)
 -- Left 8675309

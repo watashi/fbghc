@@ -18,12 +18,14 @@ module Bag (
         concatBag, catBagMaybes, foldBag, foldrBag, foldlBag,
         isEmptyBag, isSingletonBag, consBag, snocBag, anyBag, allBag,
         listToBag, bagToList, mapAccumBagL,
-        concatMapBag, mapMaybeBag,
+        concatMapBag, concatMapBagPair, mapMaybeBag,
         foldrBagM, foldlBagM, mapBagM, mapBagM_,
         flatMapBagM, flatMapBagPairM,
         mapAndUnzipBagM, mapAccumBagLM,
         anyBagM, filterBagM
     ) where
+
+import GhcPrelude
 
 import Outputable
 import Util
@@ -230,6 +232,19 @@ concatMapBag f (UnitBag x)     = f x
 concatMapBag f (TwoBags b1 b2) = unionBags (concatMapBag f b1) (concatMapBag f b2)
 concatMapBag f (ListBag xs)    = foldr (unionBags . f) emptyBag xs
 
+concatMapBagPair :: (a -> (Bag b, Bag c)) -> Bag a -> (Bag b, Bag c)
+concatMapBagPair _ EmptyBag        = (EmptyBag, EmptyBag)
+concatMapBagPair f (UnitBag x)     = f x
+concatMapBagPair f (TwoBags b1 b2) = (unionBags r1 r2, unionBags s1 s2)
+  where
+    (r1, s1) = concatMapBagPair f b1
+    (r2, s2) = concatMapBagPair f b2
+concatMapBagPair f (ListBag xs)    = foldr go (emptyBag, emptyBag) xs
+  where
+    go a (s1, s2) = (unionBags r1 s1, unionBags r2 s2)
+      where
+        (r1, r2) = f a
+
 mapMaybeBag :: (a -> Maybe b) -> Bag a -> Bag b
 mapMaybeBag _ EmptyBag        = EmptyBag
 mapMaybeBag f (UnitBag x)     = case f x of
@@ -313,6 +328,7 @@ mapAccumBagLM f s (ListBag xs)    = do { (s', xs') <- mapAccumLM f s xs
 
 listToBag :: [a] -> Bag a
 listToBag [] = EmptyBag
+listToBag [x] = UnitBag x
 listToBag vs = ListBag vs
 
 bagToList :: Bag a -> [a]
@@ -327,6 +343,9 @@ instance Data a => Data (Bag a) where
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = mkNoRepType "Bag"
   dataCast1 x  = gcast1 x
+
+instance Functor Bag where
+    fmap = mapBag
 
 instance Foldable.Foldable Bag where
     foldr = foldrBag

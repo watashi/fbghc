@@ -108,7 +108,7 @@ suspendComputation (Capability *cap, StgTSO *tso, StgUpdateFrame *stop_here)
      yourself using throwTo, the exception would actually immediately
      be delivered.  This is because throwTo itself is considered an
      interruptible point, so the exception is always deliverable. Thus,
-     ordinarily, we never end up with a message to onesself in the
+     ordinarily, we never end up with a message to oneself in the
      blocked_exceptions queue.
    
    - In the case of a StackOverflow, we don't actually care about the
@@ -416,21 +416,12 @@ check_target:
     }
 
     case BlockedOnSTM:
-        lockTSO(target);
-        // Unblocking BlockedOnSTM threads requires the TSO to be
-        // locked; see STM.c:unpark_tso().
-        if (target->why_blocked != BlockedOnSTM) {
-            unlockTSO(target);
-            goto retry;
-        }
         if ((target->flags & TSO_BLOCKEX) &&
             ((target->flags & TSO_INTERRUPTIBLE) == 0)) {
             blockedThrowTo(cap,target,msg);
-            unlockTSO(target);
             return THROWTO_BLOCKED;
         } else {
             raiseAsync(cap, target, msg->exception, false, NULL);
-            unlockTSO(target);
             return THROWTO_SUCCESS;
         }
 

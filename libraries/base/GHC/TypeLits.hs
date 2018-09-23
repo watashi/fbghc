@@ -9,7 +9,6 @@
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE ExistentialQuantification #-}
 {-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE UndecidableInstances #-}  -- for compiling instances of (==)
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE PolyKinds #-}
@@ -35,6 +34,7 @@ module GHC.TypeLits
 
     -- * Functions on type literals
   , type (N.<=), type (N.<=?), type (N.+), type (N.*), type (N.^), type (N.-)
+  , type N.Div, type N.Mod, type N.Log2
   , AppendSymbol
   , N.CmpNat, CmpSymbol
 
@@ -44,7 +44,7 @@ module GHC.TypeLits
 
   ) where
 
-import GHC.Base(Eq(..), Ord(..), Bool(True,False), Ordering(..), otherwise)
+import GHC.Base(Eq(..), Ord(..), Ordering(..), otherwise)
 import GHC.Types( Nat, Symbol )
 import GHC.Num(Integer, fromInteger)
 import GHC.Base(String)
@@ -54,7 +54,7 @@ import GHC.Real(toInteger)
 import GHC.Prim(magicDict, Proxy#)
 import Data.Maybe(Maybe(..))
 import Data.Proxy (Proxy(..))
-import Data.Type.Equality(type (==), (:~:)(Refl))
+import Data.Type.Equality((:~:)(Refl))
 import Unsafe.Coerce(unsafeCoerce)
 
 import GHC.TypeNats (KnownNat)
@@ -122,11 +122,6 @@ instance Show SomeSymbol where
 instance Read SomeSymbol where
   readsPrec p xs = [ (someSymbolVal a, ys) | (a,ys) <- readsPrec p xs ]
 
-type family EqSymbol (a :: Symbol) (b :: Symbol) where
-  EqSymbol a a = 'True
-  EqSymbol a b = 'False
-type instance a == b = EqSymbol a b
-
 --------------------------------------------------------------------------------
 
 -- | Comparison of type-level symbols, as a function.
@@ -158,7 +153,7 @@ data {-kind-} ErrorMessage = Text Symbol
 infixl 5 :$$:
 infixl 6 :<>:
 
--- | The type-level equivalent of 'error'.
+-- | The type-level equivalent of 'Prelude.error'.
 --
 -- The polymorphic kind of this type allows it to be used in several settings.
 -- For instance, it can be used as a constraint, e.g. to provide a better error

@@ -25,7 +25,8 @@
 #include "Trace.h"
 #include "Weak.h"
 #include "MarkWeak.h"
-#include "Stable.h"
+#include "StablePtr.h"
+#include "StableName.h"
 
 // Turn off inlining when debugging - it obfuscates things
 #if defined(DEBUG)
@@ -212,7 +213,7 @@ thread_static( StgClosure* p )
         p = *THUNK_STATIC_LINK(p);
         continue;
     case FUN_STATIC:
-        p = *FUN_STATIC_LINK(p);
+        p = *STATIC_LINK(info,p);
         continue;
     case CONSTR:
     case CONSTR_NOCAF:
@@ -482,8 +483,8 @@ update_fwd_large( bdescr *bd )
 
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
       // follow everything
       {
           StgMutArrPtrs *a;
@@ -497,8 +498,8 @@ update_fwd_large( bdescr *bd )
 
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
       // follow everything
       {
           StgSmallMutArrPtrs *a;
@@ -682,8 +683,8 @@ thread_obj (const StgInfoTable *info, StgPtr p)
 
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         // follow everything
     {
         StgMutArrPtrs *a;
@@ -698,8 +699,8 @@ thread_obj (const StgInfoTable *info, StgPtr p)
 
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         // follow everything
     {
         StgSmallMutArrPtrs *a;
@@ -1000,7 +1001,10 @@ compact(StgClosure *static_objects)
     thread_static(static_objects /* ToDo: ok? */);
 
     // the stable pointer table
-    threadStableTables((evac_fn)thread_root, NULL);
+    threadStablePtrTable((evac_fn)thread_root, NULL);
+
+    // the stable name table
+    threadStableNameTable((evac_fn)thread_root, NULL);
 
     // the CAF list (used by GHCi)
     markCAFs((evac_fn)thread_root, NULL);

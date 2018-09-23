@@ -1,6 +1,8 @@
 
 module RnHsDoc ( rnHsDoc, rnLHsDoc, rnMbLHsDoc ) where
 
+import GhcPrelude
+
 import TcRnTypes
 import HsSyn
 import SrcLoc
@@ -19,5 +21,5 @@ rnLHsDoc (L pos doc) = do
   return (L pos doc')
 
 rnHsDoc :: HsDocString -> RnM HsDocString
-rnHsDoc (HsDocString s) = return (HsDocString s)
+rnHsDoc = pure
 

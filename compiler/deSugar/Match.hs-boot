@@ -1,4 +1,6 @@
 module Match where
+
+import GhcPrelude
 import Var      ( Id )
 import TcType   ( Type )
 import DsMonad  ( DsM, EquationInfo, MatchResult )
@@ -26,8 +28,8 @@ matchSimply
         -> CoreExpr
         -> DsM CoreExpr
 
-matchSinglePat
-        :: CoreExpr
+matchSinglePatVar
+        :: Id
         -> HsMatchContext Name
         -> LPat GhcTc
         -> Type

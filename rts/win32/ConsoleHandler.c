@@ -183,31 +183,21 @@ void startSignalHandlers(Capability *cap)
     handler = deRefStablePtr((StgStablePtr)console_handler);
     while (stg_pending_events > 0) {
         stg_pending_events--;
-        scheduleThread(cap,
+        StgTSO *t =
             createIOThread(cap,
-                RtsFlags.GcFlags.initialStkSize,
-                rts_apply(cap,
-                    (StgClosure *)handler,
-                    rts_mkInt(cap,
-                        stg_pending_buf[stg_pending_events]))));
+                           RtsFlags.GcFlags.initialStkSize,
+                           rts_apply(cap,
+                                     (StgClosure *)handler,
+                                     rts_mkInt(cap,
+                                               stg_pending_buf[stg_pending_events])));
+        scheduleThread(cap, t);
+        labelThread(cap, t, "signal handler thread");
     }
 
     RELEASE_LOCK(&sched_mutex);
     unblockUserSignals();
 }
 #endif /* !THREADED_RTS */
-
-/*
- * Function: markSignalHandlers()
- *
- * Evacuate the handler stack. _Assumes_ that console event delivery
- * has already been blocked.
- */
-void markSignalHandlers (evac_fn evac STG_UNUSED, void *user STG_UNUSED)
-{
-    // nothing to mark; the console handler is a StablePtr which is
-    // already treated as a root by the GC.
-}
 
 
 /*

@@ -3,7 +3,8 @@
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE MagicHash #-}
 {-# LANGUAGE UnboxedTuples #-}
-{-# LANGUAGE TypeInType #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 -----------------------------------------------------------------------------
@@ -24,6 +25,10 @@
 -----------------------------------------------------------------------------
 
 module GHC.Magic ( inline, noinline, lazy, oneShot, runRW# ) where
+
+--------------------------------------------------
+--        See Note [magicIds] in MkId.hs
+--------------------------------------------------
 
 import GHC.Prim
 import GHC.CString ()
@@ -110,11 +115,10 @@ oneShot f = f
 
 runRW# :: forall (r :: RuntimeRep) (o :: TYPE r).
           (State# RealWorld -> o) -> o
--- See Note [runRW magic] in MkId
+-- See Note [runRW magic] in CorePrep
+{-# NOINLINE runRW# #-}  -- runRW# is inlined manually in CorePrep
 #if !defined(__HADDOCK_VERSION__)
 runRW# m = m realWorld#
 #else
 runRW# = runRW#   -- The realWorld# is too much for haddock
 #endif
-{-# NOINLINE runRW# #-}
--- This is inlined manually in CorePrep

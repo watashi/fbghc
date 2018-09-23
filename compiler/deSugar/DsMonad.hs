@@ -23,12 +23,8 @@ module DsMonad (
         newUnique,
         UniqSupply, newUniqueSupply,
         getGhcModeDs, dsGetFamInstEnvs,
-        dsLookupGlobal, dsLookupGlobalId, dsDPHBuiltin, dsLookupTyCon,
+        dsLookupGlobal, dsLookupGlobalId, dsLookupTyCon,
         dsLookupDataCon, dsLookupConLike,
-
-        PArrBuiltin(..),
-        dsLookupDPHRdrEnv, dsLookupDPHRdrEnv_maybe,
-        dsInitPArrBuiltin,
 
         DsMetaEnv, DsMetaVal(..), dsGetMetaEnv, dsLookupMetaEnv, dsExtendMetaEnv,
 
@@ -49,8 +45,13 @@ module DsMonad (
         CanItFail(..), orFail,
 
         -- Levity polymorphism
-        dsNoLevPoly, dsNoLevPolyExpr, dsWhenNoErrs
+        dsNoLevPoly, dsNoLevPolyExpr, dsWhenNoErrs,
+
+        -- Trace injection
+        pprRuntimeTrace
     ) where
+
+import GhcPrelude
 
 import TcRnMonad
 import FamInstEnv
@@ -60,8 +61,6 @@ import CoreUtils ( exprType, isExprLevPoly )
 import HsSyn
 import TcIface
 import TcMType ( checkForLevPolyX, formatLevPolyErr )
-import LoadIface
-import Finder
 import PrelNames
 import RdrName
 import HscTypes
@@ -81,13 +80,12 @@ import NameEnv
 import DynFlags
 import ErrUtils
 import FastString
-import Maybes
 import Var (EvVar)
-import qualified GHC.LanguageExtensions as LangExt
 import UniqFM ( lookupWithDefaultUFM )
+import Literal ( mkMachString )
+import CostCentreState
 
 import Data.IORef
-import Control.Monad
 
 {-
 ************************************************************************
@@ -106,6 +104,9 @@ instance Outputable DsMatchContext where
 
 data EquationInfo
   = EqnInfo { eqn_pats :: [Pat GhcTc],  -- The patterns for an eqn
+                -- NB: We have /already/ applied decideBangHood to
+                -- these patterns.  See Note [decideBangHood] in DsUtils
+
               eqn_rhs  :: MatchResult } -- What to do after match
 
 instance Outputable EquationInfo where
@@ -159,7 +160,7 @@ initDsTc thing_inside
        ; msg_var  <- getErrsVar
        ; hsc_env  <- getTopEnv
        ; envs     <- mkDsEnvsFromTcGbl hsc_env msg_var tcg_env
-       ; setEnvs envs $ initDPH thing_inside
+       ; setEnvs envs thing_inside
        }
 
 -- | Run a 'DsM' action inside the 'IO' monad.
@@ -176,6 +177,7 @@ mkDsEnvsFromTcGbl :: MonadIO m
                   -> m (DsGblEnv, DsLclEnv)
 mkDsEnvsFromTcGbl hsc_env msg_var tcg_env
   = do { pm_iter_var <- liftIO $ newIORef 0
+       ; cc_st_var   <- liftIO $ newIORef newCostCentreState
        ; let dflags   = hsc_dflags hsc_env
              this_mod = tcg_mod tcg_env
              type_env = tcg_type_env tcg_env
@@ -184,13 +186,13 @@ mkDsEnvsFromTcGbl hsc_env msg_var tcg_env
              complete_matches = hptCompleteSigs hsc_env
                                 ++ tcg_complete_matches tcg_env
        ; return $ mkDsEnvs dflags this_mod rdr_env type_env fam_inst_env
-                           msg_var pm_iter_var complete_matches
+                           msg_var pm_iter_var cc_st_var complete_matches
        }
 
 runDs :: HscEnv -> (DsGblEnv, DsLclEnv) -> DsM a -> IO (Messages, Maybe a)
 runDs hsc_env (ds_gbl, ds_lcl) thing_inside
   = do { res    <- initTcRnIf 'd' hsc_env ds_gbl ds_lcl
-                              (initDPH $ tryM thing_inside)
+                              (tryM thing_inside)
        ; msgs   <- readIORef (ds_msgs ds_gbl)
        ; let final_res
                | errorsFound dflags msgs = Nothing
@@ -204,6 +206,7 @@ runDs hsc_env (ds_gbl, ds_lcl) thing_inside
 initDsWithModGuts :: HscEnv -> ModGuts -> DsM a -> IO (Messages, Maybe a)
 initDsWithModGuts hsc_env guts thing_inside
   = do { pm_iter_var <- newIORef 0
+       ; cc_st_var   <- newIORef newCostCentreState
        ; msg_var <- newIORef emptyMessages
        ; let dflags   = hsc_dflags hsc_env
              type_env = typeEnvFromEntities ids (mg_tcs guts) (mg_fam_insts guts)
@@ -219,7 +222,7 @@ initDsWithModGuts hsc_env guts thing_inside
 
              envs  = mkDsEnvs dflags this_mod rdr_env type_env
                               fam_inst_env msg_var pm_iter_var
-                              complete_matches
+                              cc_st_var complete_matches
        ; runDs hsc_env envs thing_inside
        }
 
@@ -247,9 +250,9 @@ initTcDsForSolver thing_inside
          thing_inside }
 
 mkDsEnvs :: DynFlags -> Module -> GlobalRdrEnv -> TypeEnv -> FamInstEnv
-         -> IORef Messages -> IORef Int -> [CompleteMatch]
-         -> (DsGblEnv, DsLclEnv)
-mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
+         -> IORef Messages -> IORef Int -> IORef CostCentreState
+         -> [CompleteMatch] -> (DsGblEnv, DsLclEnv)
+mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar cc_st_var
          complete_matches
   = let if_genv = IfGblEnv { if_doc       = text "mkDsEnvs",
                              if_rec_types = Just (mod, return type_env) }
@@ -262,9 +265,8 @@ mkDsEnvs dflags mod rdr_env type_env fam_inst_env msg_var pmvar
                            , ds_if_env  = (if_genv, if_lenv)
                            , ds_unqual  = mkPrintUnqualified dflags rdr_env
                            , ds_msgs    = msg_var
-                           , ds_dph_env = emptyGlobalRdrEnv
-                           , ds_parr_bi = panic "DsMonad: uninitialised ds_parr_bi"
                            , ds_complete_matches = completeMatchMap
+                           , ds_cc_st   = cc_st_var
                            }
         lcl_env = DsLclEnv { dsl_meta    = emptyNameEnv
                            , dsl_loc     = real_span
@@ -490,23 +492,6 @@ mkPrintUnqualifiedDs = ds_unqual <$> getGblEnv
 instance MonadThings (IOEnv (Env DsGblEnv DsLclEnv)) where
     lookupThing = dsLookupGlobal
 
--- | Attempt to load the given module and return its exported entities if
--- successful.
-dsLoadModule :: SDoc -> Module -> DsM GlobalRdrEnv
-dsLoadModule doc mod
-  = do { env    <- getGblEnv
-       ; setEnvs (ds_if_env env) $ do
-       { iface <- loadInterface doc mod ImportBySystem
-       ; case iface of
-           Failed err      -> pprPanic "DsMonad.dsLoadModule: failed to load" (err $$ doc)
-           Succeeded iface -> return $ mkGlobalRdrEnv . gresFromAvails prov . mi_exports $ iface
-       } }
-  where
-    prov     = Just (ImpSpec { is_decl = imp_spec, is_item = ImpAll })
-    imp_spec = ImpDeclSpec { is_mod = name, is_qual = True,
-                             is_dloc = wiredInSrcSpan, is_as = name }
-    name = moduleName mod
-
 dsLookupGlobal :: Name -> DsM TyThing
 -- Very like TcEnv.tcLookupGlobal
 dsLookupGlobal name
@@ -599,134 +584,30 @@ dsWhenNoErrs thing_inside mk_expr
                   then mk_expr result
                   else unitExpr }
 
---------------------------------------------------------------------------
---                  Data Parallel Haskell
---------------------------------------------------------------------------
-
--- | Run a 'DsM' with DPH things in scope if necessary.
-initDPH :: DsM a -> DsM a
-initDPH = loadDAP . initDPHBuiltins
-
--- | Extend the global environment with a 'GlobalRdrEnv' containing the exported
--- entities of,
+-- | Inject a trace message into the compiled program. Whereas
+-- pprTrace prints out information *while compiling*, pprRuntimeTrace
+-- captures that information and causes it to be printed *at runtime*
+-- using Debug.Trace.trace.
 --
---   * 'Data.Array.Parallel'      iff '-XParallelArrays' specified (see also 'checkLoadDAP').
---   * 'Data.Array.Parallel.Prim' iff '-fvectorise' specified.
-loadDAP :: DsM a -> DsM a
-loadDAP thing_inside
-  = do { dapEnv  <- loadOneModule dATA_ARRAY_PARALLEL_NAME      checkLoadDAP          paErr
-       ; dappEnv <- loadOneModule dATA_ARRAY_PARALLEL_PRIM_NAME (goptM Opt_Vectorise) veErr
-       ; updGblEnv (\env -> env {ds_dph_env = dapEnv `plusOccEnv` dappEnv }) thing_inside
-       }
-  where
-    loadOneModule :: ModuleName           -- the module to load
-                  -> DsM Bool             -- under which condition
-                  -> MsgDoc               -- error message if module not found
-                  -> DsM GlobalRdrEnv     -- empty if condition 'False'
-    loadOneModule modname check err
-      = do { doLoad <- check
-           ; if not doLoad
-             then return emptyGlobalRdrEnv
-             else do {
-           ; hsc_env <- getTopEnv
-           ; result <- liftIO $ findImportedModule hsc_env modname Nothing
-           ; case result of
-               Found _ mod -> dsLoadModule err mod
-               _           -> pprPgmError "Unable to use Data Parallel Haskell (DPH):" err
-           } }
-
-    paErr       = text "To use ParallelArrays," <+> specBackend $$ hint1 $$ hint2
-    veErr       = text "To use -fvectorise," <+> specBackend $$ hint1 $$ hint2
-    specBackend = text "you must specify a DPH backend package"
-    hint1       = text "Look for packages named 'dph-lifted-*' with 'ghc-pkg'"
-    hint2       = text "You may need to install them with 'cabal install dph-examples'"
-
--- | If '-XParallelArrays' given, we populate the builtin table for desugaring
--- those.
-initDPHBuiltins :: DsM a -> DsM a
-initDPHBuiltins thing_inside
-  = do { doInitBuiltins <- checkLoadDAP
-       ; if doInitBuiltins
-         then dsInitPArrBuiltin thing_inside
-         else thing_inside
-       }
-
-checkLoadDAP :: DsM Bool
-checkLoadDAP
-  = do { paEnabled <- xoptM LangExt.ParallelArrays
-       ; mod <- getModule
-         -- do not load 'Data.Array.Parallel' iff compiling 'base:GHC.PArr' or a
-         -- module called 'dATA_ARRAY_PARALLEL_NAME'; see also the comments at the top
-         -- of 'base:GHC.PArr' and 'Data.Array.Parallel' in the DPH libraries
-       ; return $ paEnabled &&
-                  mod /= gHC_PARR' &&
-                  moduleName mod /= dATA_ARRAY_PARALLEL_NAME
-       }
-
--- | Populate 'ds_parr_bi' from 'ds_dph_env'.
+--   pprRuntimeTrace hdr doc expr
 --
-dsInitPArrBuiltin :: DsM a -> DsM a
-dsInitPArrBuiltin thing_inside
-  = do { lengthPVar         <- externalVar (fsLit "lengthP")
-       ; replicatePVar      <- externalVar (fsLit "replicateP")
-       ; singletonPVar      <- externalVar (fsLit "singletonP")
-       ; mapPVar            <- externalVar (fsLit "mapP")
-       ; filterPVar         <- externalVar (fsLit "filterP")
-       ; zipPVar            <- externalVar (fsLit "zipP")
-       ; crossMapPVar       <- externalVar (fsLit "crossMapP")
-       ; indexPVar          <- externalVar (fsLit "!:")
-       ; emptyPVar          <- externalVar (fsLit "emptyP")
-       ; appPVar            <- externalVar (fsLit "+:+")
-       -- ; enumFromToPVar     <- externalVar (fsLit "enumFromToP")
-       -- ; enumFromThenToPVar <- externalVar (fsLit "enumFromThenToP")
-       ; enumFromToPVar     <- return arithErr
-       ; enumFromThenToPVar <- return arithErr
-
-       ; updGblEnv (\env -> env {ds_parr_bi = PArrBuiltin
-                                              { lengthPVar         = lengthPVar
-                                              , replicatePVar      = replicatePVar
-                                              , singletonPVar      = singletonPVar
-                                              , mapPVar            = mapPVar
-                                              , filterPVar         = filterPVar
-                                              , zipPVar            = zipPVar
-                                              , crossMapPVar       = crossMapPVar
-                                              , indexPVar          = indexPVar
-                                              , emptyPVar          = emptyPVar
-                                              , appPVar            = appPVar
-                                              , enumFromToPVar     = enumFromToPVar
-                                              , enumFromThenToPVar = enumFromThenToPVar
-                                              } })
-                   thing_inside
-       }
-  where
-    externalVar :: FastString -> DsM Var
-    externalVar fs = dsLookupDPHRdrEnv (mkVarOccFS fs) >>= dsLookupGlobalId
-
-    arithErr = panic "Arithmetic sequences have to wait until we support type classes"
-
--- |Get a name from "Data.Array.Parallel" for the desugarer, from the
--- 'ds_parr_bi' component of the global desugerar environment.
+-- will produce an expression that looks like
 --
-dsDPHBuiltin :: (PArrBuiltin -> a) -> DsM a
-dsDPHBuiltin sel = (sel . ds_parr_bi) <$> getGblEnv
-
--- |Lookup a name exported by 'Data.Array.Parallel.Prim' or 'Data.Array.Parallel.Prim'.
---  Panic if there isn't one, or if it is defined multiple times.
-dsLookupDPHRdrEnv :: OccName -> DsM Name
-dsLookupDPHRdrEnv occ
-  = liftM (fromMaybe (pprPanic nameNotFound (ppr occ)))
-  $ dsLookupDPHRdrEnv_maybe occ
-  where nameNotFound  = "Name not found in 'Data.Array.Parallel' or 'Data.Array.Parallel.Prim':"
-
--- |Lookup a name exported by 'Data.Array.Parallel.Prim' or 'Data.Array.Parallel.Prim',
---  returning `Nothing` if it's not defined. Panic if it's defined multiple times.
-dsLookupDPHRdrEnv_maybe :: OccName -> DsM (Maybe Name)
-dsLookupDPHRdrEnv_maybe occ
-  = do { env <- ds_dph_env <$> getGblEnv
-       ; let gres = lookupGlobalRdrEnv env occ
-       ; case gres of
-           []    -> return $ Nothing
-           [gre] -> return $ Just $ gre_name gre
-           _     -> pprPanic multipleNames (ppr occ)
-       }
-  where multipleNames = "Multiple definitions in 'Data.Array.Parallel' and 'Data.Array.Parallel.Prim':"
+--   trace (hdr + doc) expr
+--
+-- When using this to debug a module that Debug.Trace depends on,
+-- it is necessary to import {-# SOURCE #-} Debug.Trace () in that
+-- module. We could avoid this inconvenience by wiring in Debug.Trace.trace,
+-- but that doesn't seem worth the effort and maintenance cost.
+pprRuntimeTrace :: String   -- ^ header
+                -> SDoc     -- ^ information to output
+                -> CoreExpr -- ^ expression
+                -> DsM CoreExpr
+pprRuntimeTrace str doc expr = do
+  traceId <- dsLookupGlobalId traceName
+  unpackCStringId <- dsLookupGlobalId unpackCStringName
+  dflags <- getDynFlags
+  let message :: CoreExpr
+      message = App (Var unpackCStringId) $
+                Lit $ mkMachString $ showSDoc dflags (hang (text str) 4 doc)
+  return $ mkApps (Var traceId) [Type (exprType expr), message, expr]

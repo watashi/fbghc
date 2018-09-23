@@ -13,14 +13,13 @@ module RnEnv (
         lookupLocatedOccRn, lookupOccRn, lookupOccRn_maybe,
         lookupLocalOccRn_maybe, lookupInfoOccRn,
         lookupLocalOccThLvl_maybe, lookupLocalOccRn,
-        lookupTypeOccRn, lookupKindOccRn,
+        lookupTypeOccRn,
         lookupGlobalOccRn, lookupGlobalOccRn_maybe,
         lookupOccRn_overloaded, lookupGlobalOccRn_overloaded, lookupExactOcc,
 
-        lookupSubBndrOcc_helper,
         ChildLookupResult(..),
-
-        combineChildLookupResult,
+        lookupSubBndrOcc_helper,
+        combineChildLookupResult, -- Called by lookupChildrenExport
 
         HsSigCtxt(..), lookupLocalTcNames, lookupSigOccRn,
         lookupSigCtxtOccRn,
@@ -45,6 +44,8 @@ module RnEnv (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import LoadIface        ( loadInterfaceForName, loadSrcInterface_maybe )
 import IfaceEnv
 import HsSyn
@@ -53,7 +54,7 @@ import HscTypes
 import TcEnv
 import TcRnMonad
 import RdrHsSyn         ( setRdrNameSpace )
-import TysWiredIn       ( starKindTyConName, unicodeStarKindTyConName )
+import TysWiredIn
 import Name
 import NameSet
 import NameEnv
@@ -62,8 +63,8 @@ import Module
 import ConLike
 import DataCon
 import TyCon
+import ErrUtils         ( MsgDoc )
 import PrelNames        ( rOOT_MAIN )
-import ErrUtils         ( MsgDoc, ErrMsg )
 import BasicTypes       ( pprWarningTxtForMsg, TopLevelFlag(..))
 import SrcLoc
 import Outputable
@@ -76,8 +77,10 @@ import ListSetOps       ( minusList )
 import qualified GHC.LanguageExtensions as LangExt
 import RnUnbound
 import RnUtils
-import Data.Functor (($>))
 import Data.Maybe (isJust)
+import qualified Data.Semigroup as Semi
+import Data.Either      ( partitionEithers )
+import Data.List        (find)
 
 {-
 *********************************************************
@@ -193,7 +196,7 @@ newTopSrcBinder (L loc rdr_name)
   = do  { when (isQual rdr_name)
                  (addErrAt loc (badQualBndrErr rdr_name))
                 -- Binders should not be qualified; if they are, and with a different
-                -- module name, we we get a confusing "M.T is not in scope" error later
+                -- module name, we get a confusing "M.T is not in scope" error later
 
         ; stage <- getStage
         ; if isBrackStage stage then
@@ -430,33 +433,121 @@ lookupExactOrOrig rdr_name res k
 
 
 -----------------------------------------------
--- Used for record construction and pattern matching
--- When the -XDisambiguateRecordFields flag is on, take account of the
--- constructor name to disambiguate which field to use; it's just the
--- same as for instance decls
+-- | Look up an occurrence of a field in record construction or pattern
+-- matching (but not update).  When the -XDisambiguateRecordFields
+-- flag is on, take account of the data constructor name to
+-- disambiguate which field to use.
 --
--- NB: Consider this:
---      module Foo where { data R = R { fld :: Int } }
---      module Odd where { import Foo; fld x = x { fld = 3 } }
--- Arguably this should work, because the reference to 'fld' is
--- unambiguous because there is only one field id 'fld' in scope.
--- But currently it's rejected.
-
-lookupRecFieldOcc :: Maybe Name -- Nothing    => just look it up as usual
-                                      -- Just tycon => use tycon to disambiguate
-                  -> SDoc -> RdrName
+-- See Note [DisambiguateRecordFields].
+lookupRecFieldOcc :: Maybe Name -- Nothing  => just look it up as usual
+                                -- Just con => use data con to disambiguate
+                  -> RdrName
                   -> RnM Name
-lookupRecFieldOcc parent doc rdr_name
-  | Just tc_name <- parent
-  = do { mb_name <- lookupSubBndrOcc True tc_name doc rdr_name
-       ; case mb_name of
-           Left err -> do { addErr err; return (mkUnboundNameRdr rdr_name) }
-           Right n  -> return n }
-
+lookupRecFieldOcc mb_con rdr_name
+  | Just con <- mb_con
+  , isUnboundName con  -- Avoid error cascade
+  = return (mkUnboundNameRdr rdr_name)
+  | Just con <- mb_con
+  = do { flds <- lookupConstructorFields con
+       ; env <- getGlobalRdrEnv
+       ; let lbl      = occNameFS (rdrNameOcc rdr_name)
+             mb_field = do fl <- find ((== lbl) . flLabel) flds
+                           -- We have the label, now check it is in
+                           -- scope (with the correct qualifier if
+                           -- there is one, hence calling pickGREs).
+                           gre <- lookupGRE_FieldLabel env fl
+                           guard (not (isQual rdr_name
+                                         && null (pickGREs rdr_name [gre])))
+                           return (fl, gre)
+       ; case mb_field of
+           Just (fl, gre) -> do { addUsedGRE True gre
+                                ; return (flSelector fl) }
+           Nothing        -> lookupGlobalOccRn rdr_name }
+             -- See Note [Fall back on lookupGlobalOccRn in lookupRecFieldOcc]
   | otherwise
   -- This use of Global is right as we are looking up a selector which
   -- can only be defined at the top level.
   = lookupGlobalOccRn rdr_name
+
+{- Note [DisambiguateRecordFields]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we are looking up record fields in record construction or pattern
+matching, we can take advantage of the data constructor name to
+resolve fields that would otherwise be ambiguous (provided the
+-XDisambiguateRecordFields flag is on).
+
+For example, consider:
+
+   data S = MkS { x :: Int }
+   data T = MkT { x :: Int }
+
+   e = MkS { x = 3 }
+
+When we are renaming the occurrence of `x` in `e`, instead of looking
+`x` up directly (and finding both fields), lookupRecFieldOcc will
+search the fields of `MkS` to find the only possible `x` the user can
+mean.
+
+Of course, we still have to check the field is in scope, using
+lookupGRE_FieldLabel.  The handling of qualified imports is slightly
+subtle: the occurrence may be unqualified even if the field is
+imported only qualified (but if the occurrence is qualified, the
+qualifier must be correct). For example:
+
+   module A where
+     data S = MkS { x :: Int }
+     data T = MkT { x :: Int }
+
+   module B where
+     import qualified A (S(..))
+     import A (T(MkT))
+
+     e1 = MkT   { x = 3 }   -- x not in scope, so fail
+     e2 = A.MkS { B.x = 3 } -- module qualifier is wrong, so fail
+     e3 = A.MkS { x = 3 }   -- x in scope (lack of module qualifier permitted)
+
+In case `e1`, lookupGRE_FieldLabel will return Nothing.  In case `e2`,
+lookupGRE_FieldLabel will return the GRE for `A.x`, but then the guard
+will fail because the field RdrName `B.x` is qualified and pickGREs
+rejects the GRE.  In case `e3`, lookupGRE_FieldLabel will return the
+GRE for `A.x` and the guard will succeed because the field RdrName `x`
+is unqualified.
+
+
+Note [Fall back on lookupGlobalOccRn in lookupRecFieldOcc]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Whenever we fail to find the field or it is not in scope, mb_field
+will be False, and we fall back on looking it up normally using
+lookupGlobalOccRn.  We don't report an error immediately because the
+actual problem might be located elsewhere.  For example (Trac #9975):
+
+   data Test = Test { x :: Int }
+   pattern Test wat = Test { x = wat }
+
+Here there are multiple declarations of Test (as a data constructor
+and as a pattern synonym), which will be reported as an error.  We
+shouldn't also report an error about the occurrence of `x` in the
+pattern synonym RHS.  However, if the pattern synonym gets added to
+the environment first, we will try and fail to find `x` amongst the
+(nonexistent) fields of the pattern synonym.
+
+Alternatively, the scope check can fail due to Template Haskell.
+Consider (Trac #12130):
+
+   module Foo where
+     import M
+     b = $(funny)
+
+   module M(funny) where
+     data T = MkT { x :: Int }
+     funny :: Q Exp
+     funny = [| MkT { x = 3 } |]
+
+When we splice, `MkT` is not lexically in scope, so
+lookupGRE_FieldLabel will fail.  But there is no need for
+disambiguation anyway, because `x` is an original name, and
+lookupGlobalOccRn will find it.
+-}
 
 
 
@@ -584,32 +675,32 @@ instance Outputable DisambigInfo where
   ppr (DisambiguatedOccurrence gre) = text "DiambiguatedOccurrence:" <+> ppr gre
   ppr (AmbiguousOccurrence gres)    = text "Ambiguous:" <+> ppr gres
 
-instance Monoid DisambigInfo where
-  mempty = NoOccurrence
+instance Semi.Semigroup DisambigInfo where
   -- This is the key line: We prefer disambiguated occurrences to other
   -- names.
-  _ `mappend` DisambiguatedOccurrence g' = DisambiguatedOccurrence g'
-  DisambiguatedOccurrence g' `mappend` _ = DisambiguatedOccurrence g'
+  _ <> DisambiguatedOccurrence g' = DisambiguatedOccurrence g'
+  DisambiguatedOccurrence g' <> _ = DisambiguatedOccurrence g'
 
-
-  NoOccurrence `mappend` m = m
-  m `mappend` NoOccurrence = m
-  UniqueOccurrence g `mappend` UniqueOccurrence g'
+  NoOccurrence <> m = m
+  m <> NoOccurrence = m
+  UniqueOccurrence g <> UniqueOccurrence g'
     = AmbiguousOccurrence [g, g']
-  UniqueOccurrence g `mappend` AmbiguousOccurrence gs
+  UniqueOccurrence g <> AmbiguousOccurrence gs
     = AmbiguousOccurrence (g:gs)
-  AmbiguousOccurrence gs `mappend` UniqueOccurrence g'
+  AmbiguousOccurrence gs <> UniqueOccurrence g'
     = AmbiguousOccurrence (g':gs)
-  AmbiguousOccurrence gs `mappend` AmbiguousOccurrence gs'
+  AmbiguousOccurrence gs <> AmbiguousOccurrence gs'
     = AmbiguousOccurrence (gs ++ gs')
+
+instance Monoid DisambigInfo where
+  mempty = NoOccurrence
+  mappend = (Semi.<>)
+
 -- Lookup SubBndrOcc can never be ambiguous
 --
 -- Records the result of looking up a child.
 data ChildLookupResult
       = NameNotFound                --  We couldn't find a suitable name
-      | NameErr ErrMsg              --  We found an unambiguous name
-                                    --  but there's another error
-                                    --  we should abort from
       | IncorrectParent Name        -- Parent
                         Name        -- Name of thing we were looking for
                         SDoc        -- How to print the name
@@ -628,9 +719,8 @@ combineChildLookupResult (x:xs) = do
 
 instance Outputable ChildLookupResult where
   ppr NameNotFound = text "NameNotFound"
-  ppr (FoundName _p n) = text "Found:" <+> ppr n
+  ppr (FoundName p n) = text "Found:" <+> ppr p <+> ppr n
   ppr (FoundFL fls) = text "FoundFL:" <+> ppr fls
-  ppr (NameErr _) = text "Error"
   ppr (IncorrectParent p n td ns) = text "IncorrectParent"
                                   <+> hsep [ppr p, ppr n, td, ppr ns]
 
@@ -650,9 +740,10 @@ lookupSubBndrOcc warn_if_deprec the_parent doc rdr_name = do
     NameNotFound -> return (Left (unknownSubordinateErr doc rdr_name))
     FoundName _p n -> return (Right n)
     FoundFL fl  ->  return (Right (flSelector fl))
-    NameErr err ->  reportError err $> (Right $ mkUnboundNameRdr rdr_name)
-    IncorrectParent {} -> return $ Left (unknownSubordinateErr doc rdr_name)
-
+    IncorrectParent {}
+         -- See [Mismatched class methods and associated type families]
+         -- in TcInstDecls.
+      -> return $ Left (unknownSubordinateErr doc rdr_name)
 
 {-
 Note [Family instance binders]
@@ -822,20 +913,6 @@ lookupLocalOccRn rdr_name
            Just name -> return name
            Nothing   -> unboundName WL_LocalOnly rdr_name }
 
-lookupKindOccRn :: RdrName -> RnM Name
--- Looking up a name occurring in a kind
-lookupKindOccRn rdr_name
-  | isVarOcc (rdrNameOcc rdr_name)  -- See Note [Promoted variables in types]
-  = badVarInType rdr_name
-  | otherwise
-  = do { typeintype <- xoptM LangExt.TypeInType
-       ; if | typeintype           -> lookupTypeOccRn rdr_name
-      -- With -XNoTypeInType, treat any usage of * in kinds as in scope
-      -- this is a dirty hack, but then again so was the old * kind.
-            | isStar rdr_name     -> return starKindTyConName
-            | isUniStar rdr_name -> return unicodeStarKindTyConName
-            | otherwise            -> lookupOccRn rdr_name }
-
 -- lookupPromotedOccRn looks up an optionally promoted RdrName.
 lookupTypeOccRn :: RdrName -> RnM Name
 -- see Note [Demotion]
@@ -844,16 +921,17 @@ lookupTypeOccRn rdr_name
   = badVarInType rdr_name
   | otherwise
   = do { mb_name <- lookupOccRn_maybe rdr_name
-       ; case mb_name of {
-             Just name -> return name ;
-             Nothing   -> do { dflags <- getDynFlags
-                             ; lookup_demoted rdr_name dflags } } }
+       ; case mb_name of
+             Just name -> return name
+             Nothing   -> lookup_demoted rdr_name }
 
-lookup_demoted :: RdrName -> DynFlags -> RnM Name
-lookup_demoted rdr_name dflags
+lookup_demoted :: RdrName -> RnM Name
+lookup_demoted rdr_name
   | Just demoted_rdr <- demoteRdrName rdr_name
     -- Maybe it's the name of a *data* constructor
   = do { data_kinds <- xoptM LangExt.DataKinds
+       ; star_is_type <- xoptM LangExt.StarIsType
+       ; let star_info = starInfo star_is_type rdr_name
        ; if data_kinds
             then do { mb_demoted_name <- lookupOccRn_maybe demoted_rdr
                     ; case mb_demoted_name of
@@ -871,7 +949,7 @@ lookup_demoted rdr_name dflags
                       mb_demoted_name <- discardErrs $
                                          lookupOccRn_maybe demoted_rdr
                     ; let suggestion | isJust mb_demoted_name = suggest_dk
-                                     | otherwise              = star_info
+                                     | otherwise = star_info
                     ; unboundNameX WL_Any rdr_name suggestion } }
 
   | otherwise
@@ -886,17 +964,6 @@ lookup_demoted rdr_name dflags
            , quotes (char '\'' <> ppr name)
            , text "instead of"
            , quotes (ppr name) <> dot ]
-
-    star_info
-      | isStar rdr_name || isUniStar rdr_name
-      = if xopt LangExt.TypeInType dflags
-        then text "NB: With TypeInType, you must import" <+>
-             ppr rdr_name <+> text "from Data.Kind"
-        else empty
-
-      | otherwise
-      = empty
-
 
 badVarInType :: RdrName -> RnM Name
 badVarInType rdr_name
@@ -1249,7 +1316,7 @@ It is enabled by default and disabled by the flag
 
 Note [Safe Haskell and GHCi]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We DONT do this Safe Haskell as we need to check imports. We can
+We DON'T do this Safe Haskell as we need to check imports. We can
 and should instead check the qualified import but at the moment
 this requires some refactoring so leave as a TODO
 -}
@@ -1437,7 +1504,7 @@ lookupLocalTcNames :: HsSigCtxt -> SDoc -> RdrName -> RnM [(RdrName, Name)]
 -- See Note [Fixity signature lookup]
 lookupLocalTcNames ctxt what rdr_name
   = do { mb_gres <- mapM lookup (dataTcOccs rdr_name)
-       ; let (errs, names) = splitEithers mb_gres
+       ; let (errs, names) = partitionEithers mb_gres
        ; when (null names) $ addErr (head errs) -- Bleat about one only
        ; return names }
   where
@@ -1558,10 +1625,10 @@ lookupSyntaxNames :: [Name]                         -- Standard names
 lookupSyntaxNames std_names
   = do { rebindable_on <- xoptM LangExt.RebindableSyntax
        ; if not rebindable_on then
-             return (map (HsVar . noLoc) std_names, emptyFVs)
+             return (map (HsVar noExt . noLoc) std_names, emptyFVs)
         else
           do { usr_names <- mapM (lookupOccRn . mkRdrUnqual . nameOccName) std_names
-             ; return (map (HsVar . noLoc) usr_names, mkFVs usr_names) } }
+             ; return (map (HsVar noExt . noLoc) usr_names, mkFVs usr_names) } }
 
 -- Error messages
 
@@ -1573,5 +1640,17 @@ opDeclErr n
 
 badOrigBinding :: RdrName -> SDoc
 badOrigBinding name
-  = text "Illegal binding of built-in syntax:" <+> ppr (rdrNameOcc name)
-        -- The rdrNameOcc is because we don't want to print Prelude.(,)
+  | Just _ <- isBuiltInOcc_maybe occ
+  = text "Illegal binding of built-in syntax:" <+> ppr occ
+    -- Use an OccName here because we don't want to print Prelude.(,)
+  | otherwise
+  = text "Cannot redefine a Name retrieved by a Template Haskell quote:"
+    <+> ppr name
+    -- This can happen when one tries to use a Template Haskell splice to
+    -- define a top-level identifier with an already existing name, e.g.,
+    --
+    --   $(pure [ValD (VarP 'succ) (NormalB (ConE 'True)) []])
+    --
+    -- (See Trac #13968.)
+  where
+    occ = rdrNameOcc name

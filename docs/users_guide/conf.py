@@ -13,12 +13,20 @@ sys.path.insert(0, os.path.abspath('.'))
 from ghc_config import extlinks, version
 import ghc_config
 
-extensions = ['sphinx.ext.extlinks', 'sphinx.ext.mathjax']
+extensions = ['sphinx.ext.extlinks',
+              'sphinx.ext.mathjax',
+              # GHC-specific extensions
+              'flags',
+              'ghc_packages']
 
 templates_path = ['.templates']
 source_suffix = '.rst'
 source_encoding = 'utf-8-sig'
 master_doc = 'index'
+
+rst_prolog = """
+.. |llvm-version| replace:: {llvm_version}
+""".format(llvm_version=ghc_config.llvm_version)
 
 # General information about the project.
 project = u'Glasgow Haskell Compiler'
@@ -32,7 +40,7 @@ pygments_style = 'tango'
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
-exclude_patterns = ['.build', "*.gen.rst"]
+exclude_patterns = ['.build']
 
 # -- Options for HTML output ---------------------------------------------
 
@@ -48,6 +56,9 @@ html_static_path = ['images']
 html_use_smartypants = True
 html_use_opensearch = 'https://downloads.haskell.org/~ghc/master/users-guide'
 html_show_copyright = True
+
+# See GHC #15006
+mathjax_path = 'https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js'
 
 # If true, an OpenSearch description file will be output, and all pages will
 # contain a <link> tag referring to it.  The value of this option must be the
@@ -72,6 +83,7 @@ latex_elements = {
 \setsansfont{DejaVu Sans}
 \setromanfont{DejaVu Serif}
 \setmonofont{DejaVu Sans Mono}
+\setlength{\\tymin}{45pt}
 ''',
 }
 
@@ -192,16 +204,6 @@ def setup(app):
                         parse_node=parse_ghci_cmd,
                         objname='GHCi command',
                         indextemplate='pair: %s; GHCi command')
-
-    app.add_object_type('ghc-flag', 'ghc-flag',
-                        objname='GHC command-line option',
-                        parse_node=parse_flag,
-                        indextemplate='pair: %s; GHC option',
-                        doc_field_types=[
-                            Field('since', label='Introduced in GHC version', names=['since']),
-                            Field('default', label='Default value', names=['default']),
-                            Field('static')
-                        ])
 
     # Haddock references
     app.add_role('th-ref', haddock_role('template-haskell'))

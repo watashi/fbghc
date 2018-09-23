@@ -36,10 +36,11 @@ import GHC.Base
 import GHC.Word (Word64)
 import GHC.Num (Num(..))
 import GHC.Show (Show(..))
+import Data.Semigroup.Internal (stimesMonoid)
 
 -- | An I\/O event.
 newtype Event = Event Int
-    deriving (Eq)
+    deriving Eq -- ^ @since 4.4.0.0
 
 evtNothing :: Event
 evtNothing = Event 0
@@ -63,7 +64,7 @@ evtClose = Event 4
 eventIs :: Event -> Event -> Bool
 eventIs (Event a) (Event b) = a .&. b /= 0
 
--- | @since 4.3.1.0
+-- | @since 4.4.0.0
 instance Show Event where
     show e = '[' : (intercalate "," . filter (not . null) $
                     [evtRead `so` "evtRead",
@@ -72,10 +73,14 @@ instance Show Event where
         where ev `so` disp | e `eventIs` ev = disp
                            | otherwise      = ""
 
--- | @since 4.3.1.0
+-- | @since 4.10.0.0
+instance Semigroup Event where
+    (<>)    = evtCombine
+    stimes  = stimesMonoid
+
+-- | @since 4.4.0.0
 instance Monoid Event where
     mempty  = evtNothing
-    mappend = evtCombine
     mconcat = evtConcat
 
 evtCombine :: Event -> Event -> Event
@@ -92,7 +97,9 @@ evtConcat = foldl' evtCombine evtNothing
 data Lifetime = OneShot   -- ^ the registration will be active for only one
                           -- event
               | MultiShot -- ^ the registration will trigger multiple times
-              deriving (Show, Eq)
+              deriving ( Show -- ^ @since 4.8.1.0
+                       , Eq   -- ^ @since 4.8.1.0
+                       )
 
 -- | The longer of two lifetimes.
 elSupremum :: Lifetime -> Lifetime -> Lifetime
@@ -100,24 +107,33 @@ elSupremum OneShot OneShot = OneShot
 elSupremum _       _       = MultiShot
 {-# INLINE elSupremum #-}
 
+-- | @since 4.10.0.0
+instance Semigroup Lifetime where
+    (<>) = elSupremum
+    stimes = stimesMonoid
+
 -- | @mappend@ takes the longer of two lifetimes.
 --
 -- @since 4.8.0.0
 instance Monoid Lifetime where
     mempty = OneShot
-    mappend = elSupremum
 
 -- | A pair of an event and lifetime
 --
 -- Here we encode the event in the bottom three bits and the lifetime
 -- in the fourth bit.
 newtype EventLifetime = EL Int
-                      deriving (Show, Eq)
+                      deriving ( Show -- ^ @since 4.8.0.0
+                               , Eq   -- ^ @since 4.8.0.0
+                               )
+
+-- | @since 4.11.0.0
+instance Semigroup EventLifetime where
+    EL a <> EL b = EL (a .|. b)
 
 -- | @since 4.8.0.0
 instance Monoid EventLifetime where
     mempty = EL 0
-    EL a `mappend` EL b = EL (a .|. b)
 
 eventLifetime :: Event -> Lifetime -> EventLifetime
 eventLifetime (Event e) l = EL (e .|. lifetimeBit l)
@@ -137,7 +153,7 @@ elEvent (EL x) = Event (x .&. 0x7)
 -- | A type alias for timeouts, specified in nanoseconds.
 data Timeout = Timeout {-# UNPACK #-} !Word64
              | Forever
-               deriving (Show)
+               deriving Show -- ^ @since 4.4.0.0
 
 -- | Event notification backend.
 data Backend = forall a. Backend {
@@ -200,7 +216,7 @@ delete :: Backend -> IO ()
 delete (Backend bState _ _ _ bDelete) = bDelete bState
 {-# INLINE delete #-}
 
--- | Throw an 'IOError' corresponding to the current value of
+-- | Throw an 'Prelude.IOError' corresponding to the current value of
 -- 'getErrno' if the result value of the 'IO' action is -1 and
 -- 'getErrno' is not 'eINTR'.  If the result value is -1 and
 -- 'getErrno' returns 'eINTR' 0 is returned.  Otherwise the result

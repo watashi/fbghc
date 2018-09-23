@@ -49,9 +49,9 @@ T4930.$trModule
 
 Rec {
 -- RHS size: {terms: 17, types: 3, coercions: 0, joins: 0/0}
-T4930.$wfoo [InlPrag=[0], Occ=LoopBreaker]
+T4930.$wfoo [InlPrag=NOUSERINLINE[2], Occ=LoopBreaker]
   :: GHC.Prim.Int# -> GHC.Prim.Int#
-[GblId, Arity=1, Caf=NoCafRefs, Str=<S,U>]
+[GblId, Arity=1, Caf=NoCafRefs, Str=<S,U>, Unf=OtherCon []]
 T4930.$wfoo
   = \ (ww :: GHC.Prim.Int#) ->
       case GHC.Prim.<# ww 5# of {
@@ -61,7 +61,7 @@ T4930.$wfoo
 end Rec }
 
 -- RHS size: {terms: 10, types: 4, coercions: 0, joins: 0/0}
-foo [InlPrag=INLINE[0]] :: Int -> Int
+foo [InlPrag=NOUSERINLINE[2]] :: Int -> Int
 [GblId,
  Arity=1,
  Caf=NoCafRefs,
@@ -71,7 +71,9 @@ foo [InlPrag=INLINE[0]] :: Int -> Int
          Guidance=ALWAYS_IF(arity=1,unsat_ok=True,boring_ok=False)
          Tmpl= \ (w [Occ=Once!] :: Int) ->
                  case w of { GHC.Types.I# ww1 [Occ=Once] ->
-                 case T4930.$wfoo ww1 of ww2 { __DEFAULT -> GHC.Types.I# ww2 }
+                 case T4930.$wfoo ww1 of ww2 [Occ=Once] { __DEFAULT ->
+                 GHC.Types.I# ww2
+                 }
                  }}]
 foo
   = \ (w :: Int) ->

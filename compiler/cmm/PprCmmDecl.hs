@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 ----------------------------------------------------------------------------
 --
 -- Pretty-printing of common Cmm types
@@ -15,8 +13,8 @@
 --
 -- As such, this should be a well-defined syntax: we want it to look nice.
 -- Thus, we try wherever possible to use syntax defined in [1],
--- "The C-- Reference Manual", http://www.cminusminus.org/. We differ
--- slightly, in some cases. For one, we use I8 .. I64 for types, rather
+-- "The C-- Reference Manual", http://www.cs.tufts.edu/~nr/c--/index.html. We
+-- differ slightly, in some cases. For one, we use I8 .. I64 for types, rather
 -- than C--'s bits8 .. bits64.
 --
 -- We try to ensure that all information available in the abstract
@@ -40,6 +38,8 @@ module PprCmmDecl
     )
 where
 
+import GhcPrelude
+
 import PprCmmExpr
 import Cmm
 
@@ -52,7 +52,6 @@ import System.IO
 
 -- Temp Jan08
 import SMRep
-#include "../includes/rts/storage/FunTypes.h"
 
 
 pprCmms :: (Outputable info, Outputable g)
@@ -116,18 +115,15 @@ pprTop (CmmData section ds) =
 pprInfoTable :: CmmInfoTable -> SDoc
 pprInfoTable (CmmInfoTable { cit_lbl = lbl, cit_rep = rep
                            , cit_prof = prof_info
-                           , cit_srt = _srt })
-  = vcat [ text "label:" <+> ppr lbl
-         , text "rep:" <> ppr rep
+                           , cit_srt = srt })
+  = vcat [ text "label: " <> ppr lbl
+         , text "rep: " <> ppr rep
          , case prof_info of
              NoProfilingInfo -> empty
-             ProfilingInfo ct cd -> vcat [ text "type:" <+> pprWord8String ct
-                                         , text "desc: " <> pprWord8String cd ] ]
-
-instance Outputable C_SRT where
-  ppr NoC_SRT = text "_no_srt_"
-  ppr (C_SRT label off bitmap)
-      = parens (ppr label <> comma <> ppr off <> comma <> ppr bitmap)
+             ProfilingInfo ct cd ->
+               vcat [ text "type: " <> pprWord8String ct
+                    , text "desc: " <> pprWord8String cd ]
+         , text "srt: " <> ppr srt ]
 
 instance Outputable ForeignHint where
   ppr NoHint     = empty

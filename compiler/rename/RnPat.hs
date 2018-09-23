@@ -11,6 +11,8 @@ free variables.
 -}
 
 {-# LANGUAGE CPP, RankNTypes, ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module RnPat (-- main entry points
               rnPat, rnPats, rnBindPat, rnPatAndThen,
@@ -35,6 +37,8 @@ module RnPat (-- main entry points
 
 -- ENH: thin imports to only what is necessary for patterns
 
+import GhcPrelude
+
 import {-# SOURCE #-} RnExpr ( rnLExpr )
 import {-# SOURCE #-} RnSplice ( rnSplicePat )
 
@@ -47,13 +51,10 @@ import RnEnv
 import RnFixity
 import RnUtils             ( HsDocContext(..), newLocalBndrRn, bindLocalNames
                            , warnUnusedMatches, newLocalBndrRn
-                           , checkDupAndShadowedNames, checkTupSize
-                           , unknownSubordinateErr )
+                           , checkDupNames, checkDupAndShadowedNames
+                           , checkTupSize , unknownSubordinateErr )
 import RnTypes
 import PrelNames
-import TyCon               ( tyConName )
-import ConLike
-import Type                ( TyThing(..) )
 import Name
 import NameSet
 import RdrName
@@ -67,7 +68,8 @@ import TysWiredIn          ( nilDataCon )
 import DataCon
 import qualified GHC.LanguageExtensions as LangExt
 
-import Control.Monad       ( when, liftM, ap, unless )
+import Control.Monad       ( when, liftM, ap, guard )
+import qualified Data.List.NonEmpty as NE
 import Data.Ratio
 
 {-
@@ -320,10 +322,11 @@ rnPats ctxt pats thing_inside
           --    complain *twice* about duplicates e.g. f (x,x) = ...
           --
           -- See note [Don't report shadowing for pattern synonyms]
-        ; unless (isPatSynCtxt ctxt)
-              (addErrCtxt doc_pat $
-                checkDupAndShadowedNames envs_before $
-                collectPatsBinders pats')
+        ; let bndrs = collectPatsBinders pats'
+        ; addErrCtxt doc_pat $
+          if isPatSynCtxt ctxt
+             then checkDupNames bndrs
+             else checkDupAndShadowedNames envs_before bndrs
         ; thing_inside pats' } }
   where
     doc_pat = text "In" <+> pprMatchContext ctxt
@@ -377,17 +380,20 @@ rnLPatAndThen :: NameMaker -> LPat GhcPs -> CpsRn (LPat GhcRn)
 rnLPatAndThen nm lpat = wrapSrcSpanCps (rnPatAndThen nm) lpat
 
 rnPatAndThen :: NameMaker -> Pat GhcPs -> CpsRn (Pat GhcRn)
-rnPatAndThen _  (WildPat _)   = return (WildPat placeHolderType)
-rnPatAndThen mk (ParPat pat)  = do { pat' <- rnLPatAndThen mk pat; return (ParPat pat') }
-rnPatAndThen mk (LazyPat pat) = do { pat' <- rnLPatAndThen mk pat; return (LazyPat pat') }
-rnPatAndThen mk (BangPat pat) = do { pat' <- rnLPatAndThen mk pat; return (BangPat pat') }
-rnPatAndThen mk (VarPat (L l rdr)) = do { loc <- liftCps getSrcSpanM
-                                        ; name <- newPatName mk (L loc rdr)
-                                        ; return (VarPat (L l name)) }
+rnPatAndThen _  (WildPat _)   = return (WildPat noExt)
+rnPatAndThen mk (ParPat x pat)  = do { pat' <- rnLPatAndThen mk pat
+                                     ; return (ParPat x pat') }
+rnPatAndThen mk (LazyPat x pat) = do { pat' <- rnLPatAndThen mk pat
+                                     ; return (LazyPat x pat') }
+rnPatAndThen mk (BangPat x pat) = do { pat' <- rnLPatAndThen mk pat
+                                     ; return (BangPat x pat') }
+rnPatAndThen mk (VarPat x (L l rdr)) = do { loc <- liftCps getSrcSpanM
+                                          ; name <- newPatName mk (L loc rdr)
+                                          ; return (VarPat x (L l name)) }
      -- we need to bind pattern variables for view pattern expressions
      -- (e.g. in the pattern (x, x -> y) x needs to be bound in the rhs of the tuple)
 
-rnPatAndThen mk (SigPatIn pat sig)
+rnPatAndThen mk (SigPat sig pat )
   -- When renaming a pattern type signature (e.g. f (a :: T) = ...), it is
   -- important to rename its type signature _before_ renaming the rest of the
   -- pattern, so that type variables are first bound by the _outermost_ pattern
@@ -399,21 +405,21 @@ rnPatAndThen mk (SigPatIn pat sig)
   -- ~~~~~~~~~~~~~~~^                   the same `a' then used here
   = do { sig' <- rnHsSigCps sig
        ; pat' <- rnLPatAndThen mk pat
-       ; return (SigPatIn pat' sig') }
+       ; return (SigPat sig' pat' ) }
 
-rnPatAndThen mk (LitPat lit)
+rnPatAndThen mk (LitPat x lit)
   | HsString src s <- lit
   = do { ovlStr <- liftCps (xoptM LangExt.OverloadedStrings)
        ; if ovlStr
          then rnPatAndThen mk
-                           (mkNPat (noLoc (mkHsIsString src s placeHolderType))
+                           (mkNPat (noLoc (mkHsIsString src s))
                                       Nothing)
          else normal_lit }
   | otherwise = normal_lit
   where
-    normal_lit = do { liftCps (rnLit lit); return (LitPat (convertLit lit)) }
+    normal_lit = do { liftCps (rnLit lit); return (LitPat x (convertLit lit)) }
 
-rnPatAndThen _ (NPat (L l lit) mb_neg _eq _)
+rnPatAndThen _ (NPat x (L l lit) mb_neg _eq)
   = do { (lit', mb_neg') <- liftCpsFV $ rnOverLit lit
        ; mb_neg' -- See Note [Negative zero]
            <- let negative = do { (neg, fvs) <- lookupSyntaxName negateName
@@ -425,9 +431,9 @@ rnPatAndThen _ (NPat (L l lit) mb_neg _eq _)
                                   (Nothing, Nothing) -> positive
                                   (Just _ , Just _ ) -> positive
        ; eq' <- liftCpsFV $ lookupSyntaxName eqName
-       ; return (NPat (L l lit') mb_neg' eq' placeHolderType) }
+       ; return (NPat x (L l lit') mb_neg' eq') }
 
-rnPatAndThen mk (NPlusKPat rdr (L l lit) _ _ _ _)
+rnPatAndThen mk (NPlusKPat x rdr (L l lit) _ _ _ )
   = do { new_name <- newPatName mk rdr
        ; (lit', _) <- liftCpsFV $ rnOverLit lit -- See Note [Negative zero]
                                                 -- We skip negateName as
@@ -435,16 +441,16 @@ rnPatAndThen mk (NPlusKPat rdr (L l lit) _ _ _ _)
                                                 -- sense in n + k patterns
        ; minus <- liftCpsFV $ lookupSyntaxName minusName
        ; ge    <- liftCpsFV $ lookupSyntaxName geName
-       ; return (NPlusKPat (L (nameSrcSpan new_name) new_name)
-                           (L l lit') lit' ge minus placeHolderType) }
+       ; return (NPlusKPat x (L (nameSrcSpan new_name) new_name)
+                             (L l lit') lit' ge minus) }
                 -- The Report says that n+k patterns must be in Integral
 
-rnPatAndThen mk (AsPat rdr pat)
+rnPatAndThen mk (AsPat x rdr pat)
   = do { new_name <- newPatLName mk rdr
        ; pat' <- rnLPatAndThen mk pat
-       ; return (AsPat new_name pat') }
+       ; return (AsPat x new_name pat') }
 
-rnPatAndThen mk p@(ViewPat expr pat _ty)
+rnPatAndThen mk p@(ViewPat x expr pat)
   = do { liftCps $ do { vp_flag <- xoptM LangExt.ViewPatterns
                       ; checkErr vp_flag (badViewPat p) }
          -- Because of the way we're arranging the recursive calls,
@@ -453,45 +459,40 @@ rnPatAndThen mk p@(ViewPat expr pat _ty)
        ; pat' <- rnLPatAndThen mk pat
        -- Note: at this point the PreTcType in ty can only be a placeHolder
        -- ; return (ViewPat expr' pat' ty) }
-       ; return (ViewPat expr' pat' placeHolderType) }
+       ; return (ViewPat x expr' pat') }
 
 rnPatAndThen mk (ConPatIn con stuff)
    -- rnConPatAndThen takes care of reconstructing the pattern
    -- The pattern for the empty list needs to be replaced by an empty explicit list pattern when overloaded lists is turned on.
   = case unLoc con == nameRdrName (dataConName nilDataCon) of
       True    -> do { ol_flag <- liftCps $ xoptM LangExt.OverloadedLists
-                    ; if ol_flag then rnPatAndThen mk (ListPat [] placeHolderType Nothing)
+                    ; if ol_flag then rnPatAndThen mk (ListPat noExt [])
                                  else rnConPatAndThen mk con stuff}
       False   -> rnConPatAndThen mk con stuff
 
-rnPatAndThen mk (ListPat pats _ _)
+rnPatAndThen mk (ListPat _ pats)
   = do { opt_OverloadedLists <- liftCps $ xoptM LangExt.OverloadedLists
        ; pats' <- rnLPatsAndThen mk pats
        ; case opt_OverloadedLists of
           True -> do { (to_list_name,_) <- liftCps $ lookupSyntaxName toListName
-                     ; return (ListPat pats' placeHolderType
-                                       (Just (placeHolderType, to_list_name)))}
-          False -> return (ListPat pats' placeHolderType Nothing) }
+                     ; return (ListPat (Just to_list_name) pats')}
+          False -> return (ListPat Nothing pats') }
 
-rnPatAndThen mk (PArrPat pats _)
-  = do { pats' <- rnLPatsAndThen mk pats
-       ; return (PArrPat pats' placeHolderType) }
-
-rnPatAndThen mk (TuplePat pats boxed _)
+rnPatAndThen mk (TuplePat x pats boxed)
   = do { liftCps $ checkTupSize (length pats)
        ; pats' <- rnLPatsAndThen mk pats
-       ; return (TuplePat pats' boxed []) }
+       ; return (TuplePat x pats' boxed) }
 
-rnPatAndThen mk (SumPat pat alt arity _)
+rnPatAndThen mk (SumPat x pat alt arity)
   = do { pat <- rnLPatAndThen mk pat
-       ; return (SumPat pat alt arity PlaceHolder)
+       ; return (SumPat x pat alt arity)
        }
 
 -- If a splice has been run already, just rename the result.
-rnPatAndThen mk (SplicePat (HsSpliced mfs (HsSplicedPat pat)))
-  = SplicePat . HsSpliced mfs . HsSplicedPat <$> rnPatAndThen mk pat
+rnPatAndThen mk (SplicePat x (HsSpliced x2 mfs (HsSplicedPat pat)))
+  = SplicePat x . HsSpliced x2 mfs . HsSplicedPat <$> rnPatAndThen mk pat
 
-rnPatAndThen mk (SplicePat splice)
+rnPatAndThen mk (SplicePat _ splice)
   = do { eith <- liftCpsFV $ rnSplicePat splice
        ; case eith of   -- See Note [rnSplicePat] in RnSplice
            Left  not_yet_renamed -> rnPatAndThen mk not_yet_renamed
@@ -534,7 +535,7 @@ rnHsRecPatsAndThen mk (L _ con) hs_rec_fields@(HsRecFields { rec_dotdot = dd })
        ; flds' <- mapM rn_field (flds `zip` [1..])
        ; return (HsRecFields { rec_flds = flds', rec_dotdot = dd }) }
   where
-    mkVarPat l n = VarPat (L l n)
+    mkVarPat l n = VarPat noExt (L l n)
     rn_field (L l fld, n') = do { arg' <- rnLPatAndThen (nested_mk dd mk n')
                                                         (hsRecFieldArg fld)
                                 ; return (L l (fld { hsRecFieldArg = arg' })) }
@@ -568,7 +569,7 @@ rnHsRecFields
 -- This surprisingly complicated pass
 --   a) looks up the field name (possibly using disambiguation)
 --   b) fills in puns and dot-dot stuff
--- When we we've finished, we've renamed the LHS, but not the RHS,
+-- When we've finished, we've renamed the LHS, but not the RHS,
 -- of each x=e binding
 --
 -- This is used for record construction and pattern-matching, but not updates.
@@ -576,7 +577,7 @@ rnHsRecFields
 rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
   = do { pun_ok      <- xoptM LangExt.RecordPuns
        ; disambig_ok <- xoptM LangExt.DisambiguateRecordFields
-       ; parent <- check_disambiguation disambig_ok mb_con
+       ; let parent = guard disambig_ok >> mb_con
        ; flds1  <- mapM (rn_fld pun_ok parent) flds
        ; mapM_ (addErr . dupFieldErr ctxt) dup_flds
        ; dotdot_flds <- rn_dotdot dotdot mb_con flds1
@@ -585,25 +586,17 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
        ; return (all_flds, mkFVs (getFieldIds all_flds)) }
   where
     mb_con = case ctxt of
-                HsRecFieldCon con | not (isUnboundName con) -> Just con
-                HsRecFieldPat con | not (isUnboundName con) -> Just con
-                _ {- update or isUnboundName con -}         -> Nothing
-           -- The unbound name test is because if the constructor
-           -- isn't in scope the constructor lookup will add an error
-           -- add an error, but still return an unbound name.
-           -- We don't want that to screw up the dot-dot fill-in stuff.
-
-    doc = case mb_con of
-            Nothing  -> text "constructor field name"
-            Just con -> text "field of constructor" <+> quotes (ppr con)
+                HsRecFieldCon con  -> Just con
+                HsRecFieldPat con  -> Just con
+                _ {- update -}     -> Nothing
 
     rn_fld :: Bool -> Maybe Name -> LHsRecField GhcPs (Located arg)
            -> RnM (LHsRecField GhcRn (Located arg))
     rn_fld pun_ok parent (L l (HsRecField { hsRecFieldLbl
-                                              = L loc (FieldOcc (L ll lbl) _)
+                                              = L loc (FieldOcc _ (L ll lbl))
                                           , hsRecFieldArg = arg
                                           , hsRecPun      = pun }))
-      = do { sel <- setSrcSpan loc $ lookupRecFieldOcc parent doc lbl
+      = do { sel <- setSrcSpan loc $ lookupRecFieldOcc parent lbl
            ; arg' <- if pun
                      then do { checkErr pun_ok (badPun (L loc lbl))
                                -- Discard any module qualifier (#11662)
@@ -611,20 +604,22 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
                              ; return (L loc (mk_arg loc arg_rdr)) }
                      else return arg
            ; return (L l (HsRecField { hsRecFieldLbl
-                                         = L loc (FieldOcc (L ll lbl) sel)
+                                         = L loc (FieldOcc sel (L ll lbl))
                                      , hsRecFieldArg = arg'
                                      , hsRecPun      = pun })) }
+    rn_fld _ _ (L _ (HsRecField (L _ (XFieldOcc _)) _ _))
+      = panic "rnHsRecFields"
 
     rn_dotdot :: Maybe Int      -- See Note [DotDot fields] in HsPat
               -> Maybe Name -- The constructor (Nothing for an
                                 --    out of scope constructor)
               -> [LHsRecField GhcRn (Located arg)] -- Explicit fields
               -> RnM [LHsRecField GhcRn (Located arg)]   -- Filled in .. fields
-    rn_dotdot Nothing _mb_con _flds     -- No ".." at all
-      = return []
-    rn_dotdot (Just {}) Nothing _flds   -- Constructor out of scope
-      = return []
     rn_dotdot (Just n) (Just con) flds -- ".." on record construction / pat match
+      | not (isUnboundName con) -- This test is because if the constructor
+                                -- isn't in scope the constructor lookup will add
+                                -- an error but still return an unbound name. We
+                                -- don't want that to screw up the dot-dot fill-in stuff.
       = ASSERT( flds `lengthIs` n )
         do { loc <- getSrcSpanM -- Rather approximate
            ; dd_flag <- xoptM LangExt.RecordWildCards
@@ -654,64 +649,32 @@ rnHsRecFields ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot })
 
            ; addUsedGREs dot_dot_gres
            ; return [ L loc (HsRecField
-                        { hsRecFieldLbl = L loc (FieldOcc (L loc arg_rdr) sel)
+                        { hsRecFieldLbl = L loc (FieldOcc sel (L loc arg_rdr))
                         , hsRecFieldArg = L loc (mk_arg loc arg_rdr)
                         , hsRecPun      = False })
                     | fl <- dot_dot_fields
                     , let sel     = flSelector fl
                     , let arg_rdr = mkVarUnqual (flLabel fl) ] }
 
-    check_disambiguation :: Bool -> Maybe Name -> RnM (Maybe Name)
-    -- When disambiguation is on, return name of parent tycon.
-    check_disambiguation disambig_ok mb_con
-      | disambig_ok, Just con <- mb_con
-      = do { env <- getGlobalRdrEnv; return (find_tycon env con) }
-      | otherwise = return Nothing
+    rn_dotdot _dotdot _mb_con _flds
+      = return []
+      -- _dotdot = Nothing => No ".." at all
+      -- _mb_con = Nothing => Record update
+      -- _mb_con = Just unbound => Out of scope data constructor
 
-    find_tycon :: GlobalRdrEnv -> Name {- DataCon -}
-               -> Maybe Name {- TyCon -}
-    -- Return the parent *type constructor* of the data constructor
-    -- (that is, the parent of the data constructor),
-    -- or 'Nothing' if it is a pattern synonym or not in scope.
-    -- That's the parent to use for looking up record fields.
-    find_tycon env con_name
-      | Just (AConLike (RealDataCon dc)) <- wiredInNameTyThing_maybe con_name
-      = Just (tyConName (dataConTyCon dc))
-        -- Special case for [], which is built-in syntax
-        -- and not in the GlobalRdrEnv (Trac #8448)
-
-      | Just gre <- lookupGRE_Name env con_name
-      = case gre_par gre of
-          ParentIs p -> Just p
-          _          -> Nothing   -- Can happen if the con_name
-                                  -- is for a pattern synonym
-
-      | otherwise = Nothing
-        -- Data constructor not lexically in scope at all
-        -- See Note [Disambiguation and Template Haskell]
-
-    dup_flds :: [[RdrName]]
+    dup_flds :: [NE.NonEmpty RdrName]
         -- Each list represents a RdrName that occurred more than once
         -- (the list contains all occurrences)
         -- Each list in dup_fields is non-empty
     (_, dup_flds) = removeDups compare (getFieldLbls flds)
 
 
-{- Note [Disambiguation and Template Haskell]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider (Trac #12130)
-   module Foo where
-     import M
-     b = $(funny)
-
-   module M(funny) where
-     data T = MkT { x :: Int }
-     funny :: Q Exp
-     funny = [| MkT { x = 3 } |]
-
-When we splice, neither T nor MkT are lexically in scope, so find_tycon will
-fail.  But there is no need for disambiguation anyway, so we just return Nothing
--}
+-- NB: Consider this:
+--      module Foo where { data R = R { fld :: Int } }
+--      module Odd where { import Foo; fld x = x { fld = 3 } }
+-- Arguably this should work, because the reference to 'fld' is
+-- unambiguous because there is only one field id 'fld' in scope.
+-- But currently it's rejected.
 
 rnHsRecUpdFields
     :: [LHsRecUpdField GhcPs]
@@ -750,7 +713,7 @@ rnHsRecUpdFields flds
                      then do { checkErr pun_ok (badPun (L loc lbl))
                                -- Discard any module qualifier (#11662)
                              ; let arg_rdr = mkRdrUnqual (rdrNameOcc lbl)
-                             ; return (L loc (HsVar (L loc arg_rdr))) }
+                             ; return (L loc (HsVar noExt (L loc arg_rdr))) }
                      else return arg
            ; (arg'', fvs) <- rnLExpr arg'
 
@@ -760,16 +723,16 @@ rnHsRecUpdFields flds
                           Right _       -> fvs
                  lbl' = case sel of
                           Left sel_name ->
-                                     L loc (Unambiguous (L loc lbl) sel_name)
+                                     L loc (Unambiguous sel_name  (L loc lbl))
                           Right [sel_name] ->
-                                     L loc (Unambiguous (L loc lbl) sel_name)
-                          Right _ -> L loc (Ambiguous   (L loc lbl) PlaceHolder)
+                                     L loc (Unambiguous sel_name  (L loc lbl))
+                          Right _ -> L loc (Ambiguous   noExt     (L loc lbl))
 
            ; return (L l (HsRecField { hsRecFieldLbl = lbl'
                                      , hsRecFieldArg = arg''
                                      , hsRecPun      = pun }), fvs') }
 
-    dup_flds :: [[RdrName]]
+    dup_flds :: [NE.NonEmpty RdrName]
         -- Each list represents a RdrName that occurred more than once
         -- (the list contains all occurrences)
         -- Each list in dup_fields is non-empty
@@ -784,7 +747,7 @@ getFieldLbls :: [LHsRecField id arg] -> [RdrName]
 getFieldLbls flds
   = map (unLoc . rdrNameFieldOcc . unLoc . hsRecFieldLbl . unLoc) flds
 
-getFieldUpdLbls :: [LHsRecUpdField id] -> [RdrName]
+getFieldUpdLbls :: [LHsRecUpdField GhcPs] -> [RdrName]
 getFieldUpdLbls flds = map (rdrNameAmbiguousFieldOcc . unLoc . hsRecFieldLbl . unLoc) flds
 
 needFlagDotDot :: HsRecFieldContext -> SDoc
@@ -803,10 +766,10 @@ badPun :: Located RdrName -> SDoc
 badPun fld = vcat [text "Illegal use of punning for field" <+> quotes (ppr fld),
                    text "Use NamedFieldPuns to permit this"]
 
-dupFieldErr :: HsRecFieldContext -> [RdrName] -> SDoc
+dupFieldErr :: HsRecFieldContext -> NE.NonEmpty RdrName -> SDoc
 dupFieldErr ctxt dups
   = hsep [text "duplicate field name",
-          quotes (ppr (head dups)),
+          quotes (ppr (NE.head dups)),
           text "in record", pprRFC ctxt]
 
 pprRFC :: HsRecFieldContext -> SDoc
@@ -868,11 +831,10 @@ rnOverLit origLit
         ; (SyntaxExpr { syn_expr = from_thing_name }, fvs1)
             <- lookupSyntaxName std_name
         ; let rebindable = case from_thing_name of
-                                HsVar (L _ v) -> v /= std_name
-                                _             -> panic "rnOverLit"
+                                HsVar _ (L _ v) -> v /= std_name
+                                _               -> panic "rnOverLit"
         ; let lit' = lit { ol_witness = from_thing_name
-                         , ol_rebindable = rebindable
-                         , ol_type = placeHolderType }
+                         , ol_ext = rebindable }
         ; if isNegativeZeroOverLit lit'
           then do { (SyntaxExpr { syn_expr = negate_name }, fvs2)
                       <- lookupSyntaxName negateName

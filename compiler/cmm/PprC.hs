@@ -26,6 +26,8 @@ module PprC (
 #include "HsVersions.h"
 
 -- Cmm stuff
+import GhcPrelude
+
 import BlockId
 import CLabel
 import ForeignCall
@@ -377,14 +379,10 @@ pprExpr e = case e of
     CmmReg reg      -> pprCastReg reg
     CmmRegOff reg 0 -> pprCastReg reg
 
-    CmmRegOff reg i
-        | i < 0 && negate_ok -> pprRegOff (char '-') (-i)
-        | otherwise          -> pprRegOff (char '+') i
-      where
-        pprRegOff op i' = pprCastReg reg <> op <> int i'
-        negate_ok = negate (fromIntegral i :: Integer) <
-                    fromIntegral (maxBound::Int)
-                     -- overflow is undefined; see #7620
+    -- CmmRegOff is an alias of MO_Add
+    CmmRegOff reg i -> sdocWithDynFlags $ \dflags ->
+                       pprCastReg reg <> char '+' <>
+                       pprHexVal (fromIntegral i) (wordWidth dflags)
 
     CmmMachOp mop args -> pprMachOpApp mop args
 
@@ -493,7 +491,7 @@ pprLit lit = case lit of
     CmmHighStackMark   -> panic "PprC printing high stack mark"
     CmmLabel clbl      -> mkW_ <> pprCLabelAddr clbl
     CmmLabelOff clbl i -> mkW_ <> pprCLabelAddr clbl <> char '+' <> int i
-    CmmLabelDiffOff clbl1 _ i
+    CmmLabelDiffOff clbl1 _ i _   -- non-word widths not supported via C
         -- WARNING:
         --  * the lit must occur in the info table clbl2
         --  * clbl1 must be an SRT, a slow entry point or a large bitmap
@@ -504,7 +502,7 @@ pprLit lit = case lit of
 
 pprLit1 :: CmmLit -> SDoc
 pprLit1 lit@(CmmLabelOff _ _) = parens (pprLit lit)
-pprLit1 lit@(CmmLabelDiffOff _ _ _) = parens (pprLit lit)
+pprLit1 lit@(CmmLabelDiffOff _ _ _ _) = parens (pprLit lit)
 pprLit1 lit@(CmmFloat _ _)    = parens (pprLit lit)
 pprLit1 other = pprLit other
 
@@ -536,13 +534,29 @@ pprStatics dflags (CmmStaticLit (CmmInt i W64) : rest)
                             CmmStaticLit (CmmInt q W32) : rest)
   where r = i .&. 0xffffffff
         q = i `shiftR` 32
+pprStatics dflags (CmmStaticLit (CmmInt a W32) :
+                   CmmStaticLit (CmmInt b W32) : rest)
+  | wordWidth dflags == W64
+  = if wORDS_BIGENDIAN dflags
+    then pprStatics dflags (CmmStaticLit (CmmInt ((shiftL a 32) .|. b) W64) :
+                            rest)
+    else pprStatics dflags (CmmStaticLit (CmmInt ((shiftL b 32) .|. a) W64) :
+                            rest)
+pprStatics dflags (CmmStaticLit (CmmInt a W16) :
+                   CmmStaticLit (CmmInt b W16) : rest)
+  | wordWidth dflags == W32
+  = if wORDS_BIGENDIAN dflags
+    then pprStatics dflags (CmmStaticLit (CmmInt ((shiftL a 16) .|. b) W32) :
+                            rest)
+    else pprStatics dflags (CmmStaticLit (CmmInt ((shiftL b 16) .|. a) W32) :
+                            rest)
 pprStatics dflags (CmmStaticLit (CmmInt _ w) : _)
   | w /= wordWidth dflags
-  = panic "pprStatics: cannot emit a non-word-sized static literal"
+  = pprPanic "pprStatics: cannot emit a non-word-sized static literal" (ppr w)
 pprStatics dflags (CmmStaticLit lit : rest)
   = pprLit1 lit : pprStatics dflags rest
 pprStatics _ (other : _)
-  = pprPanic "pprWord" (pprStatic other)
+  = pprPanic "pprStatics: other" (pprStatic other)
 
 pprStatic :: CmmStatic -> SDoc
 pprStatic s = case s of
@@ -721,6 +735,8 @@ pprMachOp_for_C mop = case mop of
                                 (panic $ "PprC.pprMachOp_for_C: MO_VF_Quot"
                                       ++ " should have been handled earlier!")
 
+        MO_AlignmentCheck {} -> panic "-falignment-santisation not supported by unregisterised backend"
+
 signedOp :: MachOp -> Bool      -- Argument type(s) are signed ints
 signedOp (MO_S_Quot _)    = True
 signedOp (MO_S_Rem  _)    = True
@@ -759,6 +775,9 @@ pprCallishMachOp_for_C mop
         MO_F64_Tanh     -> text "tanh"
         MO_F64_Asin     -> text "asin"
         MO_F64_Acos     -> text "acos"
+        MO_F64_Atanh    -> text "atanh"
+        MO_F64_Asinh    -> text "asinh"
+        MO_F64_Acosh    -> text "acosh"
         MO_F64_Atan     -> text "atan"
         MO_F64_Log      -> text "log"
         MO_F64_Exp      -> text "exp"
@@ -774,6 +793,9 @@ pprCallishMachOp_for_C mop
         MO_F32_Asin     -> text "asinf"
         MO_F32_Acos     -> text "acosf"
         MO_F32_Atan     -> text "atanf"
+        MO_F32_Asinh    -> text "asinhf"
+        MO_F32_Acosh    -> text "acoshf"
+        MO_F32_Atanh    -> text "atanhf"
         MO_F32_Log      -> text "logf"
         MO_F32_Exp      -> text "expf"
         MO_F32_Sqrt     -> text "sqrtf"
@@ -782,8 +804,11 @@ pprCallishMachOp_for_C mop
         MO_Memcpy _     -> text "memcpy"
         MO_Memset _     -> text "memset"
         MO_Memmove _    -> text "memmove"
+        MO_Memcmp _     -> text "memcmp"
         (MO_BSwap w)    -> ptext (sLit $ bSwapLabel w)
         (MO_PopCnt w)   -> ptext (sLit $ popCntLabel w)
+        (MO_Pext w)     -> ptext (sLit $ pextLabel w)
+        (MO_Pdep w)     -> ptext (sLit $ pdepLabel w)
         (MO_Clz w)      -> ptext (sLit $ clzLabel w)
         (MO_Ctz w)      -> ptext (sLit $ ctzLabel w)
         (MO_AtomicRMW w amop) -> ptext (sLit $ atomicRMWLabel w amop)
@@ -796,6 +821,7 @@ pprCallishMachOp_for_C mop
         MO_U_QuotRem  {} -> unsupported
         MO_U_QuotRem2 {} -> unsupported
         MO_Add2       {} -> unsupported
+        MO_AddWordC   {} -> unsupported
         MO_SubWordC   {} -> unsupported
         MO_AddIntC    {} -> unsupported
         MO_SubIntC    {} -> unsupported
@@ -1075,7 +1101,7 @@ te_BB block = mapM_ te_Stmt (blockToList mid) >> te_Stmt last
 te_Lit :: CmmLit -> TE ()
 te_Lit (CmmLabel l) = te_lbl l
 te_Lit (CmmLabelOff l _) = te_lbl l
-te_Lit (CmmLabelDiffOff l1 _ _) = te_lbl l1
+te_Lit (CmmLabelDiffOff l1 _ _ _) = te_lbl l1
 te_Lit _ = return ()
 
 te_Stmt :: CmmNode e x -> TE ()

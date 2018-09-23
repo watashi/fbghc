@@ -15,6 +15,8 @@ therefore, is almost nothing but re-exporting.
 {-# LANGUAGE UndecidableInstances #-} -- Note [Pass sensitive types]
                                       -- in module PlaceHolder
 {-# LANGUAGE ConstraintKinds #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleInstances #-} -- For deriving instance Data
 
 module HsSyn (
         module HsBinds,
@@ -30,10 +32,12 @@ module HsSyn (
         module HsExtension,
         Fixity,
 
-        HsModule(..)
+        HsModule(..),
 ) where
 
 -- friends:
+import GhcPrelude
+
 import HsDecls
 import HsBinds
 import HsExpr
@@ -46,6 +50,7 @@ import HsTypes
 import BasicTypes       ( Fixity, WarningTxt )
 import HsUtils
 import HsDoc
+import HsInstances ()
 
 -- others:
 import Outputable
@@ -58,12 +63,12 @@ import Data.Data hiding ( Fixity )
 -- | Haskell Module
 --
 -- All we actually declare here is the top-level structure for a module.
-data HsModule name
+data HsModule pass
   = HsModule {
       hsmodName :: Maybe (Located ModuleName),
         -- ^ @Nothing@: \"module X where\" is omitted (in which case the next
         --     field is Nothing too)
-      hsmodExports :: Maybe (Located [LIE name]),
+      hsmodExports :: Maybe (Located [LIE pass]),
         -- ^ Export list
         --
         --  - @Nothing@: export list omitted, so export everything
@@ -77,11 +82,11 @@ data HsModule name
         --                                   ,'ApiAnnotation.AnnClose'
 
         -- For details on above see note [Api annotations] in ApiAnnotation
-      hsmodImports :: [LImportDecl name],
+      hsmodImports :: [LImportDecl pass],
         -- ^ We snaffle interesting stuff out of the imported interfaces early
         -- on, adding that info to TyDecls/etc; so this list is often empty,
         -- downstream.
-      hsmodDecls :: [LHsDecl name],
+      hsmodDecls :: [LHsDecl pass],
         -- ^ Type, class, value, and interface signature decls
       hsmodDeprecMessage :: Maybe (Located WarningTxt),
         -- ^ reason\/explanation for warning/deprecation of this module
@@ -108,10 +113,12 @@ data HsModule name
      --    hsmodImports,hsmodDecls if this style is used.
 
      -- For details on above see note [Api annotations] in ApiAnnotation
-deriving instance (DataId name) => Data (HsModule name)
+-- deriving instance (DataIdLR name name) => Data (HsModule name)
+deriving instance Data (HsModule GhcPs)
+deriving instance Data (HsModule GhcRn)
+deriving instance Data (HsModule GhcTc)
 
-instance (SourceTextX pass, OutputableBndrId pass)
-  => Outputable (HsModule pass) where
+instance (p ~ GhcPass pass, OutputableBndrId p) => Outputable (HsModule p) where
 
     ppr (HsModule Nothing _ imports decls _ mbDoc)
       = pp_mb mbDoc $$ pp_nonnull imports

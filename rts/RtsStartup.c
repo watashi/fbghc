@@ -26,7 +26,8 @@
 #include "ThreadLabels.h"
 #include "sm/BlockAlloc.h"
 #include "Trace.h"
-#include "Stable.h"
+#include "StableName.h"
+#include "StablePtr.h"
 #include "StaticPtrTable.h"
 #include "Hash.h"
 #include "Profiling.h"
@@ -179,7 +180,33 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     if (argc == NULL || argv == NULL) {
         // Use a default for argc & argv if either is not supplied
         int my_argc = 1;
+        #if defined(mingw32_HOST_OS)
+        //Retry larger buffer sizes on error up to about the NTFS length limit.
+        wchar_t* pathBuf;
+        char *my_argv[2] = { NULL, NULL };
+        for(DWORD maxLength = MAX_PATH; maxLength <= 33280; maxLength *= 2)
+        {
+            pathBuf = (wchar_t*) stgMallocBytes(sizeof(wchar_t) * maxLength,
+                "hs_init_ghc: GetModuleFileName");
+            DWORD pathLength = GetModuleFileNameW(NULL, pathBuf, maxLength);
+            if(GetLastError() == ERROR_INSUFFICIENT_BUFFER || pathLength == 0) {
+                stgFree(pathBuf);
+                pathBuf = NULL;
+            } else {
+                break;
+            }
+        }
+        if(pathBuf == NULL) {
+            my_argv[0] = "<unknown>";
+        } else {
+            my_argv[0] = lpcwstrToUTF8(pathBuf);
+            stgFree(pathBuf);
+        }
+
+
+        #else
         char *my_argv[] = { "<unknown>", NULL };
+        #endif
         setFullProgArgv(my_argc,my_argv);
         setupRtsFlags(&my_argc, my_argv, rts_config);
     } else {
@@ -211,16 +238,24 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     /* Trace some basic information about the process */
     traceWallClockTime();
     traceOSProcessInfo();
+    flushTrace();
 
     /* initialize the storage manager */
     initStorage();
 
     /* initialise the stable pointer table */
-    initStableTables();
+    initStablePtrTable();
+
+    /* initialise the stable name table */
+    initStableNameTable();
 
     /* Add some GC roots for things in the base package that the RTS
      * knows about.  We don't know whether these turn out to be CAFs
      * or refer to CAFs, but we have to assume that they might.
+     *
+     * Because these stable pointers will retain any CAF references in
+     * these closures `Id`s of these can be safely marked as non-CAFFY
+     * in the compiler.
      */
     getStablePtr((StgPtr)runIO_closure);
     getStablePtr((StgPtr)runNonIO_closure);
@@ -239,6 +274,9 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     getStablePtr((StgPtr)cannotCompactPinned_closure);
     getStablePtr((StgPtr)cannotCompactMutable_closure);
     getStablePtr((StgPtr)nestedAtomically_closure);
+    getStablePtr((StgPtr)absentSumFieldError_closure);
+        // `Id` for this closure is marked as non-CAFFY,
+        // see Note [aBSENT_SUM_FIELD_ERROR_ID] in MkCore.
 
     getStablePtr((StgPtr)runSparks_closure);
     getStablePtr((StgPtr)ensureIOManagerIsRunning_closure);
@@ -417,7 +455,10 @@ hs_exit_(bool wait_foreign)
     exitTopHandler();
 
     /* free the stable pointer table */
-    exitStableTables();
+    exitStablePtrTable();
+
+    /* free the stable name table */
+    exitStableNameTable();
 
 #if defined(DEBUG)
     /* free the thread label table */

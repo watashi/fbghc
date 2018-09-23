@@ -14,28 +14,30 @@ module IfaceType (
         IfExtName, IfLclName,
 
         IfaceType(..), IfacePredType, IfaceKind, IfaceCoercion(..),
+        IfaceMCoercion(..),
         IfaceUnivCoProv(..),
         IfaceTyCon(..), IfaceTyConInfo(..), IfaceTyConSort(..), IsPromoted(..),
-        IfaceTyLit(..), IfaceTcArgs(..),
+        IfaceTyLit(..), IfaceAppArgs(..),
         IfaceContext, IfaceBndr(..), IfaceOneShot(..), IfaceLamBndr,
         IfaceTvBndr, IfaceIdBndr, IfaceTyConBinder,
         IfaceForAllBndr, ArgFlag(..), ShowForAllFlag(..),
 
-        ifTyConBinderTyVar, ifTyConBinderName,
+        ifForAllBndrVar, ifForAllBndrName,
+        ifTyConBinderVar, ifTyConBinderName,
 
         -- Equality testing
         isIfaceLiftedTypeKind,
 
-        -- Conversion from IfaceTcArgs -> [IfaceType]
-        tcArgsIfaceTypes,
+        -- Conversion from IfaceAppArgs -> [IfaceType]
+        appArgsIfaceTypes,
 
         -- Printing
         pprIfaceType, pprParendIfaceType, pprPrecIfaceType,
         pprIfaceContext, pprIfaceContextArr,
         pprIfaceIdBndr, pprIfaceLamBndr, pprIfaceTvBndr, pprIfaceTyConBinders,
-        pprIfaceBndrs, pprIfaceTcArgs, pprParendIfaceTcArgs,
-        pprIfaceForAllPart, pprIfaceForAll, pprIfaceSigmaType,
-        pprIfaceTyLit,
+        pprIfaceBndrs, pprIfaceAppArgs, pprParendIfaceAppArgs,
+        pprIfaceForAllPart, pprIfaceForAllPartMust, pprIfaceForAll,
+        pprIfaceSigmaType, pprIfaceTyLit,
         pprIfaceCoercion, pprParendIfaceCoercion,
         splitIfaceSigmaTy, pprIfaceTypeApp, pprUserIfaceForAll,
         pprIfaceCoTcApp, pprTyTcApp, pprIfacePrefixApp,
@@ -44,12 +46,16 @@ module IfaceType (
         stripIfaceInvisVars,
         stripInvisArgs,
 
-        mkIfaceTySubst, substIfaceTyVar, substIfaceTcArgs, inDomIfaceTySubst
+        mkIfaceTySubst, substIfaceTyVar, substIfaceAppArgs, inDomIfaceTySubst
     ) where
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} TysWiredIn ( liftedRepDataConTyCon )
+import GhcPrelude
+
+import {-# SOURCE #-} TysWiredIn ( coercibleTyCon, heqTyCon
+                                 , liftedRepDataConTyCon )
+import {-# SOURCE #-} TyCoRep    ( isRuntimeRepTy )
 
 import DynFlags
 import TyCon hiding ( pprPromotionQuote )
@@ -65,7 +71,7 @@ import FastStringEnv
 import Util
 
 import Data.Maybe( isJust )
-import Data.List (foldl')
+import qualified Data.Semigroup as Semi
 
 {-
 ************************************************************************
@@ -90,6 +96,13 @@ type IfaceTvBndr  = (IfLclName, IfaceKind)
 ifaceTvBndrName :: IfaceTvBndr -> IfLclName
 ifaceTvBndrName (n,_) = n
 
+ifaceIdBndrName :: IfaceIdBndr -> IfLclName
+ifaceIdBndrName (n,_) = n
+
+ifaceBndrName :: IfaceBndr -> IfLclName
+ifaceBndrName (IfaceTvBndr bndr) = ifaceTvBndrName bndr
+ifaceBndrName (IfaceIdBndr bndr) = ifaceIdBndrName bndr
+
 type IfaceLamBndr = (IfaceBndr, IfaceOneShot)
 
 data IfaceOneShot    -- See Note [Preserve OneShotInfo] in CoreTicy
@@ -108,23 +121,30 @@ data IfaceOneShot    -- See Note [Preserve OneShotInfo] in CoreTicy
 -------------------------------
 type IfaceKind     = IfaceType
 
-data IfaceType     -- A kind of universal type, used for types and kinds
-  = IfaceFreeTyVar TyVar                 -- See Note [Free tyvars in IfaceType]
+-- | A kind of universal type, used for types and kinds.
+--
+-- Any time a 'Type' is pretty-printed, it is first converted to an 'IfaceType'
+-- before being printed. See Note [Pretty printing via IfaceSyn] in PprTyThing
+data IfaceType
+  = IfaceFreeTyVar TyVar                -- See Note [Free tyvars in IfaceType]
   | IfaceTyVar     IfLclName            -- Type/coercion variable only, not tycon
   | IfaceLitTy     IfaceTyLit
-  | IfaceAppTy     IfaceType IfaceType
+  | IfaceAppTy     IfaceType IfaceAppArgs
+                             -- See Note [Suppressing invisible arguments] for
+                             -- an explanation of why the second field isn't
+                             -- IfaceType, analogous to AppTy.
   | IfaceFunTy     IfaceType IfaceType
   | IfaceDFunTy    IfaceType IfaceType
   | IfaceForAllTy  IfaceForAllBndr IfaceType
-  | IfaceTyConApp  IfaceTyCon IfaceTcArgs  -- Not necessarily saturated
-                                           -- Includes newtypes, synonyms, tuples
+  | IfaceTyConApp  IfaceTyCon IfaceAppArgs  -- Not necessarily saturated
+                                            -- Includes newtypes, synonyms, tuples
   | IfaceCastTy     IfaceType IfaceCoercion
   | IfaceCoercionTy IfaceCoercion
 
   | IfaceTupleTy                  -- Saturated tuples (unsaturated ones use IfaceTyConApp)
        TupleSort                  -- What sort of tuple?
        IsPromoted                 -- A bit like IfaceTyCon
-       IfaceTcArgs                -- arity = length args
+       IfaceAppArgs               -- arity = length args
           -- For promoted data cons, the kind args are omitted
 
 type IfacePredType = IfaceType
@@ -135,25 +155,28 @@ data IfaceTyLit
   | IfaceStrTyLit FastString
   deriving (Eq)
 
-type IfaceTyConBinder = TyVarBndr IfaceTvBndr TyConBndrVis
-type IfaceForAllBndr  = TyVarBndr IfaceTvBndr ArgFlag
+type IfaceTyConBinder = VarBndr IfaceBndr TyConBndrVis
+type IfaceForAllBndr  = VarBndr IfaceBndr ArgFlag
 
 -- See Note [Suppressing invisible arguments]
 -- We use a new list type (rather than [(IfaceType,Bool)], because
 -- it'll be more compact and faster to parse in interface
 -- files. Rather than two bytes and two decisions (nil/cons, and
 -- type/kind) there'll just be one.
-data IfaceTcArgs
-  = ITC_Nil
-  | ITC_Vis   IfaceType IfaceTcArgs   -- "Vis" means show when pretty-printing
-  | ITC_Invis IfaceKind IfaceTcArgs   -- "Invis" means don't show when pretty-printing
+data IfaceAppArgs
+  = IA_Nil
+  | IA_Vis   IfaceType IfaceAppArgs   -- "Vis" means show when pretty-printing
+  | IA_Invis IfaceKind IfaceAppArgs   -- "Invis" means don't show when pretty-printing
                                       --         except with -fprint-explicit-kinds
 
-instance Monoid IfaceTcArgs where
-  mempty = ITC_Nil
-  ITC_Nil `mappend` xs           = xs
-  ITC_Vis ty rest `mappend` xs   = ITC_Vis ty (rest `mappend` xs)
-  ITC_Invis ki rest `mappend` xs = ITC_Invis ki (rest `mappend` xs)
+instance Semi.Semigroup IfaceAppArgs where
+  IA_Nil <> xs           = xs
+  IA_Vis ty rest <> xs   = IA_Vis ty (rest Semi.<> xs)
+  IA_Invis ki rest <> xs = IA_Invis ki (rest Semi.<> xs)
+
+instance Monoid IfaceAppArgs where
+  mempty = IA_Nil
+  mappend = (Semi.<>)
 
 -- Encodes type constructors, kind constructors,
 -- coercion constructors, the lot.
@@ -179,18 +202,20 @@ data IfaceTyConSort = IfaceNormalTyCon          -- ^ a regular tycon
                     | IfaceSumTyCon !Arity
                       -- ^ e.g. @(a | b | c)@
 
-                    | IfaceEqualityTyCon !Bool
-                      -- ^ a type equality. 'True' indicates kind-homogeneous.
-                      -- See Note [Equality predicates in IfaceType] for
-                      -- details.
+                    | IfaceEqualityTyCon
+                      -- ^ A heterogeneous equality TyCon
+                      --   (i.e. eqPrimTyCon, eqReprPrimTyCon, heqTyCon)
+                      -- that is actually being applied to two types
+                      -- of the same kind.  This affects pretty-printing
+                      -- only: see Note [Equality predicates in IfaceType]
                     deriving (Eq)
 
 {- Note [Free tyvars in IfaceType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Nowadays (since Nov 16, 2016) we pretty-print a Type by converting to an
-IfaceType and pretty printing that.  This eliminates a lot of
-pretty-print duplication, and it matches what we do with
-pretty-printing TyThings.
+Nowadays (since Nov 16, 2016) we pretty-print a Type by converting to
+an IfaceType and pretty printing that.  This eliminates a lot of
+pretty-print duplication, and it matches what we do with pretty-
+printing TyThings. See Note [Pretty printing via IfaceSyn] in PprTyThing.
 
 It works fine for closed types, but when printing debug traces (e.g.
 when using -ddump-tc-trace) we print a lot of /open/ types.  These
@@ -204,28 +229,61 @@ Note that:
   to deserialise one.  IfaceFreeTyVar is used only in the "convert to IfaceType
   and then pretty-print" pipeline.
 
+We do the same for covars, naturally.
 
 Note [Equality predicates in IfaceType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GHC has several varieties of type equality (see Note [The equality types story]
-in TysPrim for details) which all must be rendered with different surface syntax
-during pretty-printing. Which syntax we use depends upon,
+in TysPrim for details).  In an effort to avoid confusing users, we suppress
+the differences during pretty printing unless certain flags are enabled.
+Here is how each equality predicate* is printed in homogeneous and
+heterogeneous contexts, depending on which combination of the
+-fprint-explicit-kinds and -fprint-equality-relations flags is used:
 
- 1. Which predicate tycon was used
- 2. Whether the types being compared are of the same kind.
+---------------------------------------------------------------------------------------
+|         Predicate             |        Neither flag        | -fprint-explicit-kinds |
+|-------------------------------|----------------------------|------------------------|
+| a ~ b         (homogeneous)   |        a ~ b               | (a :: *) ~  (b :: *)   |
+| a ~~ b,       homogeneously   |        a ~ b               | (a :: *) ~  (b :: *)   |
+| a ~~ b,       heterogeneously |        a ~~ c              | (a :: *) ~~ (c :: k)   |
+| a ~# b,       homogeneously   |        a ~ b               | (a :: *) ~  (b :: *)   |
+| a ~# b,       heterogeneously |        a ~~ c              | (a :: *) ~~ (c :: k)   |
+| Coercible a b (homogeneous)   |        Coercible a b       | Coercible * a b        |
+| a ~R# b,      homogeneously   |        Coercible a b       | Coercible * a b        |
+| a ~R# b,      heterogeneously |        a ~R# b             | (a :: *) ~R# (c :: k)  |
+|-------------------------------|----------------------------|------------------------|
+|         Predicate             | -fprint-equality-relations |      Both flags        |
+|-------------------------------|----------------------------|------------------------|
+| a ~ b         (homogeneous)   |        a ~  b              | (a :: *) ~  (b :: *)   |
+| a ~~ b,       homogeneously   |        a ~~ b              | (a :: *) ~~ (b :: *)   |
+| a ~~ b,       heterogeneously |        a ~~ c              | (a :: *) ~~ (c :: k)   |
+| a ~# b,       homogeneously   |        a ~# b              | (a :: *) ~# (b :: *)   |
+| a ~# b,       heterogeneously |        a ~# c              | (a :: *) ~# (c :: k)   |
+| Coercible a b (homogeneous)   |        Coercible a b       | Coercible * a b        |
+| a ~R# b,      homogeneously   |        a ~R# b             | (a :: *) ~R# (b :: *)  |
+| a ~R# b,      heterogeneously |        a ~R# b             | (a :: *) ~R# (c :: k)  |
+---------------------------------------------------------------------------------------
 
-Unfortunately, determining (2) from an IfaceType isn't possible since we can't
-see through type synonyms. Consequently, we need to record whether the equality
-is homogeneous or not in IfaceTyConSort for the purposes of pretty-printing.
+(* There is no heterogeneous, representational, lifted equality counterpart
+to (~~). There could be, but there seems to be no use for it.)
 
-Namely we handle these cases,
+This table adheres to the following rules:
 
-    Predicate               Homogeneous        Heterogeneous
-    ----------------        -----------        -------------
-    eqTyCon                 ~                  N/A
-    heqTyCon                ~                  ~~
-    eqPrimTyCon             ~#                 ~~
-    eqReprPrimTyCon         Coercible          Coercible
+A. With -fprint-equality-relations, print the true equality relation.
+B. Without -fprint-equality-relations:
+     i. If the equality is representational and homogeneous, use Coercible.
+    ii. Otherwise, if the equality is representational, use ~R#.
+   iii. If the equality is nominal and homogeneous, use ~.
+    iv. Otherwise, if the equality is nominal, use ~~.
+C. With -fprint-explicit-kinds, print kinds on both sides of an infix operator,
+   as above; or print the kind with Coercible.
+D. Without -fprint-explicit-kinds, don't print kinds.
+
+A hetero-kinded equality is used homogeneously when it is applied to two
+identical kinds. Unfortunately, determining this from an IfaceType isn't
+possible since we can't see through type synonyms. Consequently, we need to
+record whether this particular application is homogeneous in IfaceTyConSort
+for the purposes of pretty-printing.
 
 See Note [The equality types story] in TysPrim.
 -}
@@ -236,47 +294,51 @@ data IfaceTyConInfo   -- Used to guide pretty-printing
                    , ifaceTyConSort       :: IfaceTyConSort }
     deriving (Eq)
 
+data IfaceMCoercion
+  = IfaceMRefl
+  | IfaceMCo IfaceCoercion
+
 data IfaceCoercion
-  = IfaceReflCo       Role IfaceType
+  = IfaceReflCo       IfaceType
+  | IfaceGReflCo      Role IfaceType (IfaceMCoercion)
   | IfaceFunCo        Role IfaceCoercion IfaceCoercion
   | IfaceTyConAppCo   Role IfaceTyCon [IfaceCoercion]
   | IfaceAppCo        IfaceCoercion IfaceCoercion
-  | IfaceForAllCo     IfaceTvBndr IfaceCoercion IfaceCoercion
+  | IfaceForAllCo     IfaceBndr IfaceCoercion IfaceCoercion
   | IfaceCoVarCo      IfLclName
   | IfaceAxiomInstCo  IfExtName BranchIndex [IfaceCoercion]
+  | IfaceAxiomRuleCo  IfLclName [IfaceCoercion]
+       -- There are only a fixed number of CoAxiomRules, so it suffices
+       -- to use an IfaceLclName to distinguish them.
+       -- See Note [Adding built-in type families] in TcTypeNats
   | IfaceUnivCo       IfaceUnivCoProv Role IfaceType IfaceType
   | IfaceSymCo        IfaceCoercion
   | IfaceTransCo      IfaceCoercion IfaceCoercion
   | IfaceNthCo        Int IfaceCoercion
   | IfaceLRCo         LeftOrRight IfaceCoercion
   | IfaceInstCo       IfaceCoercion IfaceCoercion
-  | IfaceCoherenceCo  IfaceCoercion IfaceCoercion
   | IfaceKindCo       IfaceCoercion
   | IfaceSubCo        IfaceCoercion
-  | IfaceAxiomRuleCo  IfLclName [IfaceCoercion]
+  | IfaceFreeCoVar    CoVar    -- See Note [Free tyvars in IfaceType]
+  | IfaceHoleCo       CoVar    -- ^ See Note [Holes in IfaceCoercion]
 
 data IfaceUnivCoProv
   = IfaceUnsafeCoerceProv
   | IfacePhantomProv IfaceCoercion
   | IfaceProofIrrelProv IfaceCoercion
   | IfacePluginProv String
-  | IfaceHoleProv Unique
-    -- ^ See Note [Holes in IfaceUnivCoProv]
 
-{-
-Note [Holes in IfaceUnivCoProv]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When typechecking fails the typechecker will produce a HoleProv UnivCoProv to
-stand in place of the unproven assertion. While we generally don't want to let
-these unproven assertions leak into interface files, we still need to be able to
-pretty-print them as we use IfaceType's pretty-printer to render Types. For this
-reason IfaceUnivCoProv has a IfaceHoleProv constructor; however, we fails when
-asked to serialize to a IfaceHoleProv to ensure that they don't end up in an
-interface file. To avoid an import loop between IfaceType and TyCoRep we only
-keep the hole's Unique, since that is all we need to print.
--}
+{- Note [Holes in IfaceCoercion]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When typechecking fails the typechecker will produce a HoleCo to stand
+in place of the unproven assertion. While we generally don't want to
+let these unproven assertions leak into interface files, we still need
+to be able to pretty-print them as we use IfaceType's pretty-printer
+to render Types. For this reason IfaceCoercion has a IfaceHoleCo
+constructor; however, we fails when asked to serialize to a
+IfaceHoleCo to ensure that they don't end up in an interface file.
 
-{-
+
 %************************************************************************
 %*                                                                      *
                 Functions over IFaceTypes
@@ -288,18 +350,33 @@ ifaceTyConHasKey :: IfaceTyCon -> Unique -> Bool
 ifaceTyConHasKey tc key = ifaceTyConName tc `hasKey` key
 
 isIfaceLiftedTypeKind :: IfaceKind -> Bool
-isIfaceLiftedTypeKind (IfaceTyConApp tc ITC_Nil)
+isIfaceLiftedTypeKind (IfaceTyConApp tc IA_Nil)
   = isLiftedTypeKindTyConName (ifaceTyConName tc)
 isIfaceLiftedTypeKind (IfaceTyConApp tc
-                       (ITC_Vis (IfaceTyConApp ptr_rep_lifted ITC_Nil) ITC_Nil))
+                       (IA_Vis (IfaceTyConApp ptr_rep_lifted IA_Nil) IA_Nil))
   =  tc `ifaceTyConHasKey` tYPETyConKey
   && ptr_rep_lifted `ifaceTyConHasKey` liftedRepDataConKey
 isIfaceLiftedTypeKind _ = False
 
 splitIfaceSigmaTy :: IfaceType -> ([IfaceForAllBndr], [IfacePredType], IfaceType)
 -- Mainly for printing purposes
+--
+-- Here we split nested IfaceSigmaTy properly.
+--
+-- @
+-- forall t. T t => forall m a b. M m => (a -> m b) -> t a -> m (t b)
+-- @
+--
+-- If you called @splitIfaceSigmaTy@ on this type:
+--
+-- @
+-- ([t, m, a, b], [T t, M m], (a -> m b) -> t a -> m (t b))
+-- @
 splitIfaceSigmaTy ty
-  = (bndrs, theta, tau)
+  = case (bndrs, theta) of
+      ([], []) -> (bndrs, theta, tau)
+      _        -> let (bndrs', theta', tau') = splitIfaceSigmaTy tau
+                   in (bndrs ++ bndrs', theta ++ theta', tau')
   where
     (bndrs, rho)   = split_foralls ty
     (theta, tau)   = split_rho rho
@@ -319,22 +396,30 @@ suppressIfaceInvisibles dflags tys xs
     where
       suppress _       []      = []
       suppress []      a       = a
-      suppress (k:ks) a@(_:xs)
-        | isInvisibleTyConBinder k = suppress ks xs
-        | otherwise                = a
+      suppress (k:ks) (x:xs)
+        | isInvisibleTyConBinder k =     suppress ks xs
+        | otherwise                = x : suppress ks xs
 
 stripIfaceInvisVars :: DynFlags -> [IfaceTyConBinder] -> [IfaceTyConBinder]
 stripIfaceInvisVars dflags tyvars
   | gopt Opt_PrintExplicitKinds dflags = tyvars
   | otherwise = filterOut isInvisibleTyConBinder tyvars
 
--- | Extract a IfaceTvBndr from a IfaceTyConBinder
-ifTyConBinderTyVar :: IfaceTyConBinder -> IfaceTvBndr
-ifTyConBinderTyVar = binderVar
+-- | Extract an 'IfaceBndr' from an 'IfaceForAllBndr'.
+ifForAllBndrVar :: IfaceForAllBndr -> IfaceBndr
+ifForAllBndrVar = binderVar
 
--- | Extract the variable name from a IfaceTyConBinder
+-- | Extract the variable name from an 'IfaceForAllBndr'.
+ifForAllBndrName :: IfaceForAllBndr -> IfLclName
+ifForAllBndrName fab = ifaceBndrName (ifForAllBndrVar fab)
+
+-- | Extract an 'IfaceBndr' from an 'IfaceTyConBinder'.
+ifTyConBinderVar :: IfaceTyConBinder -> IfaceBndr
+ifTyConBinderVar = binderVar
+
+-- | Extract the variable name from an 'IfaceTyConBinder'.
 ifTyConBinderName :: IfaceTyConBinder -> IfLclName
-ifTyConBinderName tcb = ifaceTvBndrName (ifTyConBinderTyVar tcb)
+ifTyConBinderName tcb = ifaceBndrName (ifTyConBinderVar tcb)
 
 ifTypeIsVarFree :: IfaceType -> Bool
 -- Returns True if the type definitely has no variables at all
@@ -343,7 +428,7 @@ ifTypeIsVarFree ty = go ty
   where
     go (IfaceTyVar {})         = False
     go (IfaceFreeTyVar {})     = False
-    go (IfaceAppTy fun arg)    = go fun && go arg
+    go (IfaceAppTy fun args)   = go fun && go_args args
     go (IfaceFunTy arg res)    = go arg && go res
     go (IfaceDFunTy arg res)   = go arg && go res
     go (IfaceForAllTy {})      = False
@@ -353,9 +438,9 @@ ifTypeIsVarFree ty = go ty
     go (IfaceCastTy {})        = False -- Safe
     go (IfaceCoercionTy {})    = False -- Safe
 
-    go_args ITC_Nil = True
-    go_args (ITC_Vis   arg args) = go arg && go_args args
-    go_args (ITC_Invis arg args) = go arg && go_args args
+    go_args IA_Nil = True
+    go_args (IA_Vis   arg args) = go arg && go_args args
+    go_args (IA_Invis arg args) = go arg && go_args args
 
 {- Note [Substitution on IfaceType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -380,22 +465,28 @@ substIfaceType env ty
   where
     go (IfaceFreeTyVar tv)    = IfaceFreeTyVar tv
     go (IfaceTyVar tv)        = substIfaceTyVar env tv
-    go (IfaceAppTy  t1 t2)    = IfaceAppTy  (go t1) (go t2)
+    go (IfaceAppTy  t ts)     = IfaceAppTy  (go t) (substIfaceAppArgs env ts)
     go (IfaceFunTy  t1 t2)    = IfaceFunTy  (go t1) (go t2)
     go (IfaceDFunTy t1 t2)    = IfaceDFunTy (go t1) (go t2)
     go ty@(IfaceLitTy {})     = ty
-    go (IfaceTyConApp tc tys) = IfaceTyConApp tc (substIfaceTcArgs env tys)
-    go (IfaceTupleTy s i tys) = IfaceTupleTy s i (substIfaceTcArgs env tys)
+    go (IfaceTyConApp tc tys) = IfaceTyConApp tc (substIfaceAppArgs env tys)
+    go (IfaceTupleTy s i tys) = IfaceTupleTy s i (substIfaceAppArgs env tys)
     go (IfaceForAllTy {})     = pprPanic "substIfaceType" (ppr ty)
     go (IfaceCastTy ty co)    = IfaceCastTy (go ty) (go_co co)
     go (IfaceCoercionTy co)   = IfaceCoercionTy (go_co co)
 
-    go_co (IfaceReflCo r ty)     = IfaceReflCo r (go ty)
-    go_co (IfaceFunCo r c1 c2)   = IfaceFunCo r (go_co c1) (go_co c2)
+    go_mco IfaceMRefl    = IfaceMRefl
+    go_mco (IfaceMCo co) = IfaceMCo $ go_co co
+
+    go_co (IfaceReflCo ty)           = IfaceReflCo (go ty)
+    go_co (IfaceGReflCo r ty mco)    = IfaceGReflCo r (go ty) (go_mco mco)
+    go_co (IfaceFunCo r c1 c2)       = IfaceFunCo r (go_co c1) (go_co c2)
     go_co (IfaceTyConAppCo r tc cos) = IfaceTyConAppCo r tc (go_cos cos)
     go_co (IfaceAppCo c1 c2)         = IfaceAppCo (go_co c1) (go_co c2)
     go_co (IfaceForAllCo {})         = pprPanic "substIfaceCoercion" (ppr ty)
+    go_co (IfaceFreeCoVar cv)        = IfaceFreeCoVar cv
     go_co (IfaceCoVarCo cv)          = IfaceCoVarCo cv
+    go_co (IfaceHoleCo cv)           = IfaceHoleCo cv
     go_co (IfaceAxiomInstCo a i cos) = IfaceAxiomInstCo a i (go_cos cos)
     go_co (IfaceUnivCo prov r t1 t2) = IfaceUnivCo (go_prov prov) r (go t1) (go t2)
     go_co (IfaceSymCo co)            = IfaceSymCo (go_co co)
@@ -403,7 +494,6 @@ substIfaceType env ty
     go_co (IfaceNthCo n co)          = IfaceNthCo n (go_co co)
     go_co (IfaceLRCo lr co)          = IfaceLRCo lr (go_co co)
     go_co (IfaceInstCo c1 c2)        = IfaceInstCo (go_co c1) (go_co c2)
-    go_co (IfaceCoherenceCo c1 c2)   = IfaceCoherenceCo (go_co c1) (go_co c2)
     go_co (IfaceKindCo co)           = IfaceKindCo (go_co co)
     go_co (IfaceSubCo co)            = IfaceSubCo (go_co co)
     go_co (IfaceAxiomRuleCo n cos)   = IfaceAxiomRuleCo n (go_cos cos)
@@ -414,15 +504,14 @@ substIfaceType env ty
     go_prov (IfacePhantomProv co)    = IfacePhantomProv (go_co co)
     go_prov (IfaceProofIrrelProv co) = IfaceProofIrrelProv (go_co co)
     go_prov (IfacePluginProv str)    = IfacePluginProv str
-    go_prov (IfaceHoleProv h)        = IfaceHoleProv h
 
-substIfaceTcArgs :: IfaceTySubst -> IfaceTcArgs -> IfaceTcArgs
-substIfaceTcArgs env args
+substIfaceAppArgs :: IfaceTySubst -> IfaceAppArgs -> IfaceAppArgs
+substIfaceAppArgs env args
   = go args
   where
-    go ITC_Nil            = ITC_Nil
-    go (ITC_Vis ty tys)   = ITC_Vis   (substIfaceType env ty) (go tys)
-    go (ITC_Invis ty tys) = ITC_Invis (substIfaceType env ty) (go tys)
+    go IA_Nil            = IA_Nil
+    go (IA_Vis ty tys)   = IA_Vis   (substIfaceType env ty) (go tys)
+    go (IA_Invis ty tys) = IA_Invis (substIfaceType env ty) (go tys)
 
 substIfaceTyVar :: IfaceTySubst -> IfLclName -> IfaceType
 substIfaceTyVar env tv
@@ -433,47 +522,96 @@ substIfaceTyVar env tv
 {-
 ************************************************************************
 *                                                                      *
-                Functions over IFaceTcArgs
+                Functions over IfaceAppArgs
 *                                                                      *
 ************************************************************************
 -}
 
-stripInvisArgs :: DynFlags -> IfaceTcArgs -> IfaceTcArgs
+stripInvisArgs :: DynFlags -> IfaceAppArgs -> IfaceAppArgs
 stripInvisArgs dflags tys
   | gopt Opt_PrintExplicitKinds dflags = tys
   | otherwise = suppress_invis tys
     where
       suppress_invis c
         = case c of
-            ITC_Invis _ ts -> suppress_invis ts
-            _ -> c
+            IA_Nil        -> IA_Nil
+            IA_Invis _ ts -> suppress_invis ts
+            IA_Vis   t ts -> IA_Vis t $ suppress_invis ts
+              -- Keep recursing through the remainder of the arguments, as it's
+              -- possible that there are remaining invisible ones.
+              -- See the "In type declarations" section of Note [VarBndrs,
+              -- TyCoVarBinders, TyConBinders, and visibility] in TyCoRep.
 
-tcArgsIfaceTypes :: IfaceTcArgs -> [IfaceType]
-tcArgsIfaceTypes ITC_Nil = []
-tcArgsIfaceTypes (ITC_Invis t ts) = t : tcArgsIfaceTypes ts
-tcArgsIfaceTypes (ITC_Vis   t ts) = t : tcArgsIfaceTypes ts
+appArgsIfaceTypes :: IfaceAppArgs -> [IfaceType]
+appArgsIfaceTypes IA_Nil = []
+appArgsIfaceTypes (IA_Invis t ts) = t : appArgsIfaceTypes ts
+appArgsIfaceTypes (IA_Vis   t ts) = t : appArgsIfaceTypes ts
 
-ifaceVisTcArgsLength :: IfaceTcArgs -> Int
-ifaceVisTcArgsLength = go 0
+ifaceVisAppArgsLength :: IfaceAppArgs -> Int
+ifaceVisAppArgsLength = go 0
   where
-    go !n ITC_Nil            = n
-    go n  (ITC_Vis _ rest)   = go (n+1) rest
-    go n  (ITC_Invis _ rest) = go n rest
+    go !n IA_Nil            = n
+    go n  (IA_Vis _ rest)   = go (n+1) rest
+    go n  (IA_Invis _ rest) = go n rest
 
 {-
 Note [Suppressing invisible arguments]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We use the IfaceTcArgs to specify which of the arguments to a type
-constructor should be displayed when pretty-printing, under
-the control of -fprint-explicit-kinds.
+We use the IfaceAppArgs data type to specify which of the arguments to a type
+should be displayed when pretty-printing, under the control of
+-fprint-explicit-kinds.
 See also Type.filterOutInvisibleTypes.
 For example, given
+
     T :: forall k. (k->*) -> k -> *    -- Ordinary kind polymorphism
     'Just :: forall k. k -> 'Maybe k   -- Promoted
-we want
-  T * Tree Int    prints as    T Tree Int
-  'Just *         prints as    Just *
 
+we want
+
+    T * Tree Int    prints as    T Tree Int
+    'Just *         prints as    Just *
+
+For type constructors (IfaceTyConApp), IfaceAppArgs is a quite natural fit,
+since the corresponding Core constructor:
+
+    data Type
+      = ...
+      | TyConApp TyCon [Type]
+
+Already puts all of its arguments into a list. So when converting a Type to an
+IfaceType (see toIfaceAppArgsX in ToIface), we simply use the kind of the TyCon
+(which is cached) to guide the process of converting the argument Types into an
+IfaceAppArgs list.
+
+We also want this behavior for IfaceAppTy, since given:
+
+    data Proxy (a :: k)
+    f :: forall (t :: forall a. a -> Type). Proxy Type (t Bool True)
+
+We want to print the return type as `Proxy (t True)` without the use of
+-fprint-explicit-kinds (#15330). Accomplishing this is trickier than in the
+tycon case, because the corresponding Core constructor for IfaceAppTy:
+
+    data Type
+      = ...
+      | AppTy Type Type
+
+Only stores one argument at a time. Therefore, when converting an AppTy to an
+IfaceAppTy (in toIfaceTypeX in ToIface), we:
+
+1. Flatten the chain of AppTys down as much as possible
+2. Use typeKind to determine the function Type's kind
+3. Use this kind to guide the process of converting the argument Types into an
+   IfaceAppArgs list.
+
+By flattening the arguments like this, we obtain two benefits:
+
+(a) We can reuse the same machinery to pretty-print IfaceTyConApp arguments as
+    we do IfaceTyApp arguments, which means that we only need to implement the
+    logic to filter out invisible arguments once.
+(b) Unlike for tycons, finding the kind of a type in general (through typeKind)
+    is not a constant-time operation, so by flattening the arguments first, we
+    decrease the number of times we have to call typeKind.
 
 ************************************************************************
 *                                                                      *
@@ -493,15 +631,15 @@ if_print_coercions yes no
     then yes
     else no
 
-pprIfaceInfixApp :: TyPrec -> SDoc -> SDoc -> SDoc -> SDoc
+pprIfaceInfixApp :: PprPrec -> SDoc -> SDoc -> SDoc -> SDoc
 pprIfaceInfixApp ctxt_prec pp_tc pp_ty1 pp_ty2
-  = maybeParen ctxt_prec TyOpPrec $
+  = maybeParen ctxt_prec opPrec $
     sep [pp_ty1, pp_tc <+> pp_ty2]
 
-pprIfacePrefixApp :: TyPrec -> SDoc -> [SDoc] -> SDoc
+pprIfacePrefixApp :: PprPrec -> SDoc -> [SDoc] -> SDoc
 pprIfacePrefixApp ctxt_prec pp_fun pp_tys
   | null pp_tys = pp_fun
-  | otherwise   = maybeParen ctxt_prec TyConPrec $
+  | otherwise   = maybeParen ctxt_prec appPrec $
                   hang pp_fun 2 (sep pp_tys)
 
 -- ----------------------------- Printing binders ------------------------------------
@@ -529,9 +667,10 @@ pprIfaceTvBndr use_parens (tv, ki)
                  | otherwise  = id
 
 pprIfaceTyConBinders :: [IfaceTyConBinder] -> SDoc
-pprIfaceTyConBinders = sep . map go
+pprIfaceTyConBinders = sep . map (go . ifTyConBinderVar)
   where
-    go tcb = pprIfaceTvBndr True (ifTyConBinderTyVar tcb)
+    go (IfaceIdBndr bndr) = pprIfaceIdBndr bndr
+    go (IfaceTvBndr bndr) = pprIfaceTvBndr True bndr
 
 instance Binary IfaceBndr where
     put_ bh (IfaceIdBndr aa) = do
@@ -566,57 +705,58 @@ instance Outputable IfaceType where
   ppr ty = pprIfaceType ty
 
 pprIfaceType, pprParendIfaceType :: IfaceType -> SDoc
-pprIfaceType       = pprPrecIfaceType TopPrec
-pprParendIfaceType = pprPrecIfaceType TyConPrec
+pprIfaceType       = pprPrecIfaceType topPrec
+pprParendIfaceType = pprPrecIfaceType appPrec
 
-pprPrecIfaceType :: TyPrec -> IfaceType -> SDoc
+pprPrecIfaceType :: PprPrec -> IfaceType -> SDoc
+-- We still need `eliminateRuntimeRep`, since the `pprPrecIfaceType` maybe
+-- called from other places, besides `:type` and `:info`.
 pprPrecIfaceType prec ty = eliminateRuntimeRep (ppr_ty prec) ty
 
-ppr_ty :: TyPrec -> IfaceType -> SDoc
-ppr_ty _         (IfaceFreeTyVar tyvar) = ppr tyvar  -- This is the main reson for IfaceFreeTyVar!
+ppr_ty :: PprPrec -> IfaceType -> SDoc
+ppr_ty _         (IfaceFreeTyVar tyvar) = ppr tyvar  -- This is the main reason for IfaceFreeTyVar!
 ppr_ty _         (IfaceTyVar tyvar)     = ppr tyvar  -- See Note [TcTyVars in IfaceType]
 ppr_ty ctxt_prec (IfaceTyConApp tc tys) = pprTyTcApp ctxt_prec tc tys
-ppr_ty _         (IfaceTupleTy i p tys) = pprTuple i p tys
+ppr_ty ctxt_prec (IfaceTupleTy i p tys) = pprTuple ctxt_prec i p tys
 ppr_ty _         (IfaceLitTy n)         = pprIfaceTyLit n
         -- Function types
 ppr_ty ctxt_prec (IfaceFunTy ty1 ty2)
   = -- We don't want to lose synonyms, so we mustn't use splitFunTys here.
-    maybeParen ctxt_prec FunPrec $
-    sep [ppr_ty FunPrec ty1, sep (ppr_fun_tail ty2)]
+    maybeParen ctxt_prec funPrec $
+    sep [ppr_ty funPrec ty1, sep (ppr_fun_tail ty2)]
   where
     ppr_fun_tail (IfaceFunTy ty1 ty2)
-      = (arrow <+> ppr_ty FunPrec ty1) : ppr_fun_tail ty2
+      = (arrow <+> ppr_ty funPrec ty1) : ppr_fun_tail ty2
     ppr_fun_tail other_ty
       = [arrow <+> pprIfaceType other_ty]
 
-ppr_ty ctxt_prec (IfaceAppTy ty1 ty2)
+ppr_ty ctxt_prec (IfaceAppTy t ts)
   = if_print_coercions
       ppr_app_ty
       ppr_app_ty_no_casts
   where
     ppr_app_ty =
-        maybeParen ctxt_prec TyConPrec
-        $ ppr_ty FunPrec ty1 <+> ppr_ty TyConPrec ty2
+        sdocWithDynFlags $ \dflags ->
+        pprIfacePrefixApp ctxt_prec
+                          (ppr_ty funPrec t)
+                          (map (ppr_ty appPrec) (tys_wo_kinds dflags))
+
+    tys_wo_kinds dflags = appArgsIfaceTypes $ stripInvisArgs dflags ts
 
     -- Strip any casts from the head of the application
     ppr_app_ty_no_casts =
-        case split_app_tys ty1 (ITC_Vis ty2 ITC_Nil) of
-          (IfaceCastTy head _, args) -> ppr_ty ctxt_prec (mk_app_tys head args)
-          _                          -> ppr_app_ty
+        case t of
+          IfaceCastTy head _ -> ppr_ty ctxt_prec (mk_app_tys head ts)
+          _                  -> ppr_app_ty
 
-    split_app_tys :: IfaceType -> IfaceTcArgs -> (IfaceType, IfaceTcArgs)
-    split_app_tys (IfaceAppTy t1 t2) args = split_app_tys t1 (t2 `ITC_Vis` args)
-    split_app_tys head               args = (head, args)
-
-    mk_app_tys :: IfaceType -> IfaceTcArgs -> IfaceType
+    mk_app_tys :: IfaceType -> IfaceAppArgs -> IfaceType
     mk_app_tys (IfaceTyConApp tc tys1) tys2 =
         IfaceTyConApp tc (tys1 `mappend` tys2)
-    mk_app_tys t1                      tys2 =
-        foldl' IfaceAppTy t1 (tcArgsIfaceTypes tys2)
+    mk_app_tys t1 tys2 = IfaceAppTy t1 tys2
 
 ppr_ty ctxt_prec (IfaceCastTy ty co)
   = if_print_coercions
-      (parens (ppr_ty TopPrec ty <+> text "|>" <+> ppr co))
+      (parens (ppr_ty topPrec ty <+> text "|>" <+> ppr co))
       (ppr_ty ctxt_prec ty)
 
 ppr_ty ctxt_prec (IfaceCoercionTy co)
@@ -624,8 +764,8 @@ ppr_ty ctxt_prec (IfaceCoercionTy co)
       (ppr_co ctxt_prec co)
       (text "<>")
 
-ppr_ty ctxt_prec ty
-  = maybeParen ctxt_prec FunPrec (pprIfaceSigmaType ShowForAllMust ty)
+ppr_ty ctxt_prec ty -- IfaceForAllTy
+  = maybeParen ctxt_prec funPrec (pprIfaceSigmaType ShowForAllMust ty)
 
 {-
 Note [Defaulting RuntimeRep variables]
@@ -649,7 +789,7 @@ overhead.
 
 For this reason it was decided that we would hide RuntimeRep variables for now
 (see #11549). We do this by defaulting all type variables of kind RuntimeRep to
-PtrLiftedRep. This is done in a pass right before pretty-printing
+LiftedRep. This is done in a pass right before pretty-printing
 (defaultRuntimeRepVars, controlled by -fprint-explicit-runtime-reps)
 -}
 
@@ -668,30 +808,44 @@ PtrLiftedRep. This is done in a pass right before pretty-printing
 -- syntactic overhead in otherwise simple type signatures (e.g. ($)). See
 -- Note [Defaulting RuntimeRep variables] and #11549 for further discussion.
 --
-defaultRuntimeRepVars :: IfaceType -> IfaceType
-defaultRuntimeRepVars = go emptyFsEnv
+defaultRuntimeRepVars :: PprStyle -> IfaceType -> IfaceType
+defaultRuntimeRepVars sty = go emptyFsEnv
   where
     go :: FastStringEnv () -> IfaceType -> IfaceType
-    go subs (IfaceForAllTy bndr ty)
+    go subs (IfaceForAllTy (Bndr (IfaceTvBndr (var, var_kind)) argf) ty)
       | isRuntimeRep var_kind
+      , isInvisibleArgFlag argf -- don't default *visible* quantification
+                                -- or we get the mess in #13963
       = let subs' = extendFsEnv subs var ()
         in go subs' ty
-      | otherwise
-      = IfaceForAllTy (TvBndr (var, go subs var_kind) (binderArgFlag bndr))
-        (go subs ty)
-      where
-        var :: IfLclName
-        (var, var_kind) = binderVar bndr
 
-    go subs (IfaceTyVar tv)
+    go subs (IfaceForAllTy bndr ty)
+      = IfaceForAllTy (go_ifacebndr subs bndr) (go subs ty)
+
+    go subs ty@(IfaceTyVar tv)
       | tv `elemFsEnv` subs
-      = IfaceTyConApp liftedRep ITC_Nil
+      = IfaceTyConApp liftedRep IA_Nil
+      | otherwise
+      = ty
 
-    go subs (IfaceFunTy kind ty)
-      = IfaceFunTy (go subs kind) (go subs ty)
+    go _ ty@(IfaceFreeTyVar tv)
+      | userStyle sty && TyCoRep.isRuntimeRepTy (tyVarKind tv)
+         -- don't require -fprint-explicit-runtime-reps for good debugging output
+      = IfaceTyConApp liftedRep IA_Nil
+      | otherwise
+      = ty
 
-    go subs (IfaceAppTy x y)
-      = IfaceAppTy (go subs x) (go subs y)
+    go subs (IfaceTyConApp tc tc_args)
+      = IfaceTyConApp tc (go_args subs tc_args)
+
+    go subs (IfaceTupleTy sort is_prom tc_args)
+      = IfaceTupleTy sort is_prom (go_args subs tc_args)
+
+    go subs (IfaceFunTy arg res)
+      = IfaceFunTy (go subs arg) (go subs res)
+
+    go subs (IfaceAppTy t ts)
+      = IfaceAppTy (go subs t) (go_args subs ts)
 
     go subs (IfaceDFunTy x y)
       = IfaceDFunTy (go subs x) (go subs y)
@@ -699,7 +853,19 @@ defaultRuntimeRepVars = go emptyFsEnv
     go subs (IfaceCastTy x co)
       = IfaceCastTy (go subs x) co
 
-    go _ other = other
+    go _ ty@(IfaceLitTy {}) = ty
+    go _ ty@(IfaceCoercionTy {}) = ty
+
+    go_ifacebndr :: FastStringEnv () -> IfaceForAllBndr -> IfaceForAllBndr
+    go_ifacebndr subs (Bndr (IfaceIdBndr (n, t)) argf)
+      = Bndr (IfaceIdBndr (n, go subs t)) argf
+    go_ifacebndr subs (Bndr (IfaceTvBndr (n, t)) argf)
+      = Bndr (IfaceTvBndr (n, go subs t)) argf
+
+    go_args :: FastStringEnv () -> IfaceAppArgs -> IfaceAppArgs
+    go_args _ IA_Nil = IA_Nil
+    go_args subs (IA_Vis ty args)   = IA_Vis   (go subs ty) (go_args subs args)
+    go_args subs (IA_Invis ty args) = IA_Invis (go subs ty) (go_args subs args)
 
     liftedRep :: IfaceTyCon
     liftedRep =
@@ -715,27 +881,36 @@ eliminateRuntimeRep :: (IfaceType -> SDoc) -> IfaceType -> SDoc
 eliminateRuntimeRep f ty = sdocWithDynFlags $ \dflags ->
     if gopt Opt_PrintExplicitRuntimeReps dflags
       then f ty
-      else f (defaultRuntimeRepVars ty)
+      else getPprStyle $ \sty -> f (defaultRuntimeRepVars sty ty)
 
-instance Outputable IfaceTcArgs where
-  ppr tca = pprIfaceTcArgs tca
+instance Outputable IfaceAppArgs where
+  ppr tca = pprIfaceAppArgs tca
 
-pprIfaceTcArgs, pprParendIfaceTcArgs :: IfaceTcArgs -> SDoc
-pprIfaceTcArgs  = ppr_tc_args TopPrec
-pprParendIfaceTcArgs = ppr_tc_args TyConPrec
+pprIfaceAppArgs, pprParendIfaceAppArgs :: IfaceAppArgs -> SDoc
+pprIfaceAppArgs  = ppr_app_args topPrec
+pprParendIfaceAppArgs = ppr_app_args appPrec
 
-ppr_tc_args :: TyPrec -> IfaceTcArgs -> SDoc
-ppr_tc_args ctx_prec args
- = let pprTys t ts = ppr_ty ctx_prec t <+> ppr_tc_args ctx_prec ts
+ppr_app_args :: PprPrec -> IfaceAppArgs -> SDoc
+ppr_app_args ctx_prec args
+ = let ppr_rest    = ppr_app_args ctx_prec
+       pprTys t ts = ppr_ty ctx_prec t <+> ppr_rest ts
    in case args of
-        ITC_Nil        -> empty
-        ITC_Vis   t ts -> pprTys t ts
-        ITC_Invis t ts -> pprTys t ts
+        IA_Nil        -> empty
+        IA_Vis   t ts -> pprTys t ts
+        IA_Invis t ts -> sdocWithDynFlags $ \dflags ->
+                         if gopt Opt_PrintExplicitKinds dflags
+                            then pprTys t ts
+                            else ppr_rest ts
 
 -------------------
 pprIfaceForAllPart :: [IfaceForAllBndr] -> [IfacePredType] -> SDoc -> SDoc
 pprIfaceForAllPart tvs ctxt sdoc
   = ppr_iface_forall_part ShowForAllWhen tvs ctxt sdoc
+
+-- | Like 'pprIfaceForAllPart', but always uses an explicit @forall@.
+pprIfaceForAllPartMust :: [IfaceForAllBndr] -> [IfacePredType] -> SDoc -> SDoc
+pprIfaceForAllPartMust tvs ctxt sdoc
+  = ppr_iface_forall_part ShowForAllMust tvs ctxt sdoc
 
 pprIfaceForAllCoPart :: [(IfLclName, IfaceCoercion)] -> SDoc -> SDoc
 pprIfaceForAllCoPart tvs sdoc
@@ -753,7 +928,7 @@ ppr_iface_forall_part show_forall tvs ctxt sdoc
 -- | Render the "forall ... ." or "forall ... ->" bit of a type.
 pprIfaceForAll :: [IfaceForAllBndr] -> SDoc
 pprIfaceForAll [] = empty
-pprIfaceForAll bndrs@(TvBndr _ vis : _)
+pprIfaceForAll bndrs@(Bndr _ vis : _)
   = add_separator (forAllLit <+> doc) <+> pprIfaceForAll bndrs'
   where
     (bndrs', doc) = ppr_itv_bndrs bndrs vis
@@ -769,7 +944,7 @@ pprIfaceForAll bndrs@(TvBndr _ vis : _)
 ppr_itv_bndrs :: [IfaceForAllBndr]
              -> ArgFlag  -- ^ visibility of the first binder in the list
              -> ([IfaceForAllBndr], SDoc)
-ppr_itv_bndrs all_bndrs@(bndr@(TvBndr _ vis) : bndrs) vis1
+ppr_itv_bndrs all_bndrs@(bndr@(Bndr _ vis) : bndrs) vis1
   | vis `sameVis` vis1 = let (bndrs', doc) = ppr_itv_bndrs bndrs vis1 in
                          (bndrs', pprIfaceForAllBndr bndr <+> doc)
   | otherwise   = (all_bndrs, empty)
@@ -783,11 +958,13 @@ pprIfaceForAllCoBndrs :: [(IfLclName, IfaceCoercion)] -> SDoc
 pprIfaceForAllCoBndrs bndrs = hsep $ map pprIfaceForAllCoBndr bndrs
 
 pprIfaceForAllBndr :: IfaceForAllBndr -> SDoc
-pprIfaceForAllBndr (TvBndr tv Inferred) = sdocWithDynFlags $ \dflags ->
-                                           if gopt Opt_PrintExplicitForalls dflags
-                                           then braces $ pprIfaceTvBndr False tv
-                                           else pprIfaceTvBndr True tv
-pprIfaceForAllBndr (TvBndr tv _)        = pprIfaceTvBndr True tv
+pprIfaceForAllBndr (Bndr (IfaceTvBndr tv) Inferred)
+  = sdocWithDynFlags $ \dflags ->
+                          if gopt Opt_PrintExplicitForalls dflags
+                          then braces $ pprIfaceTvBndr False tv
+                          else pprIfaceTvBndr True tv
+pprIfaceForAllBndr (Bndr (IfaceTvBndr tv) _)  = pprIfaceTvBndr True tv
+pprIfaceForAllBndr (Bndr (IfaceIdBndr idv) _) = pprIfaceIdBndr idv
 
 pprIfaceForAllCoBndr :: (IfLclName, IfaceCoercion) -> SDoc
 pprIfaceForAllCoBndr (tv, kind_co)
@@ -802,102 +979,158 @@ data ShowForAllFlag = ShowForAllMust | ShowForAllWhen
 
 pprIfaceSigmaType :: ShowForAllFlag -> IfaceType -> SDoc
 pprIfaceSigmaType show_forall ty
-  = ppr_iface_forall_part show_forall tvs theta (ppr tau)
+  = eliminateRuntimeRep ppr_fn ty
   where
-    (tvs, theta, tau) = splitIfaceSigmaTy ty
+    ppr_fn iface_ty =
+      let (tvs, theta, tau) = splitIfaceSigmaTy iface_ty
+       in ppr_iface_forall_part show_forall tvs theta (ppr tau)
 
 pprUserIfaceForAll :: [IfaceForAllBndr] -> SDoc
 pprUserIfaceForAll tvs
    = sdocWithDynFlags $ \dflags ->
-     ppWhen (any tv_has_kind_var tvs || gopt Opt_PrintExplicitForalls dflags) $
+     -- See Note [When to print foralls]
+     ppWhen (any tv_has_kind_var tvs
+             || any tv_is_required tvs
+             || gopt Opt_PrintExplicitForalls dflags) $
      pprIfaceForAll tvs
    where
-     tv_has_kind_var (TvBndr (_,kind) _) = not (ifTypeIsVarFree kind)
+     tv_has_kind_var (Bndr (IfaceTvBndr (_,kind)) _)
+       = not (ifTypeIsVarFree kind)
+     tv_has_kind_var _ = False
 
+     tv_is_required = isVisibleArgFlag . binderArgFlag
+
+{-
+Note [When to print foralls]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We opt to explicitly pretty-print `forall`s if any of the following
+criteria are met:
+
+1. -fprint-explicit-foralls is on.
+
+2. A bound type variable has a polymorphic kind. E.g.,
+
+     forall k (a::k). Proxy a -> Proxy a
+
+   Since a's kind mentions a variable k, we print the foralls.
+
+3. A bound type variable is a visible argument (#14238).
+   Suppose we are printing the kind of:
+
+     T :: forall k -> k -> Type
+
+   The "forall k ->" notation means that this kind argument is required.
+   That is, it must be supplied at uses of T. E.g.,
+
+     f :: T (Type->Type)  Monad -> Int
+
+   So we print an explicit "T :: forall k -> k -> Type",
+   because omitting it and printing "T :: k -> Type" would be
+   utterly misleading.
+
+   See Note [VarBndrs, TyCoVarBinders, TyConBinders, and visibility]
+   in TyCoRep.
+
+N.B. Until now (Aug 2018) we didn't check anything for coercion variables.
+-}
 
 -------------------
 
+-- | Prefix a space if the given 'IfaceType' is a promoted 'TyCon'.
+pprSpaceIfPromotedTyCon :: IfaceType -> SDoc -> SDoc
+pprSpaceIfPromotedTyCon (IfaceTyConApp tyCon _)
+  = case ifaceTyConIsPromoted (ifaceTyConInfo tyCon) of
+      IsPromoted -> (space <>)
+      _ -> id
+pprSpaceIfPromotedTyCon _
+  = id
+
 -- See equivalent function in TyCoRep.hs
-pprIfaceTyList :: TyPrec -> IfaceType -> IfaceType -> SDoc
+pprIfaceTyList :: PprPrec -> IfaceType -> IfaceType -> SDoc
 -- Given a type-level list (t1 ': t2), see if we can print
 -- it in list notation [t1, ...].
 -- Precondition: Opt_PrintExplicitKinds is off
 pprIfaceTyList ctxt_prec ty1 ty2
   = case gather ty2 of
       (arg_tys, Nothing)
-        -> char '\'' <> brackets (fsep (punctuate comma
-                        (map (ppr_ty TopPrec) (ty1:arg_tys))))
+        -> char '\'' <> brackets (pprSpaceIfPromotedTyCon ty1 (fsep
+                        (punctuate comma (map (ppr_ty topPrec) (ty1:arg_tys)))))
       (arg_tys, Just tl)
-        -> maybeParen ctxt_prec FunPrec $ hang (ppr_ty FunPrec ty1)
-           2 (fsep [ colon <+> ppr_ty FunPrec ty | ty <- arg_tys ++ [tl]])
+        -> maybeParen ctxt_prec funPrec $ hang (ppr_ty funPrec ty1)
+           2 (fsep [ colon <+> ppr_ty funPrec ty | ty <- arg_tys ++ [tl]])
   where
     gather :: IfaceType -> ([IfaceType], Maybe IfaceType)
      -- (gather ty) = (tys, Nothing) means ty is a list [t1, .., tn]
      --             = (tys, Just tl) means ty is of form t1:t2:...tn:tl
     gather (IfaceTyConApp tc tys)
       | tc `ifaceTyConHasKey` consDataConKey
-      , (ITC_Invis _ (ITC_Vis ty1 (ITC_Vis ty2 ITC_Nil))) <- tys
+      , (IA_Invis _ (IA_Vis ty1 (IA_Vis ty2 IA_Nil))) <- tys
       , (args, tl) <- gather ty2
       = (ty1:args, tl)
       | tc `ifaceTyConHasKey` nilDataConKey
       = ([], Nothing)
     gather ty = ([], Just ty)
 
-pprIfaceTypeApp :: TyPrec -> IfaceTyCon -> IfaceTcArgs -> SDoc
+pprIfaceTypeApp :: PprPrec -> IfaceTyCon -> IfaceAppArgs -> SDoc
 pprIfaceTypeApp prec tc args = pprTyTcApp prec tc args
 
-pprTyTcApp :: TyPrec -> IfaceTyCon -> IfaceTcArgs -> SDoc
+pprTyTcApp :: PprPrec -> IfaceTyCon -> IfaceAppArgs -> SDoc
 pprTyTcApp ctxt_prec tc tys =
     sdocWithDynFlags $ \dflags ->
     getPprStyle $ \style ->
     pprTyTcApp' ctxt_prec tc tys dflags style
 
-pprTyTcApp' :: TyPrec -> IfaceTyCon -> IfaceTcArgs
+pprTyTcApp' :: PprPrec -> IfaceTyCon -> IfaceAppArgs
             -> DynFlags -> PprStyle -> SDoc
 pprTyTcApp' ctxt_prec tc tys dflags style
   | ifaceTyConName tc `hasKey` ipClassKey
-  , ITC_Vis (IfaceLitTy (IfaceStrTyLit n)) (ITC_Vis ty ITC_Nil) <- tys
-  = maybeParen ctxt_prec FunPrec
-    $ char '?' <> ftext n <> text "::" <> ppr_ty TopPrec ty
+  , IA_Vis (IfaceLitTy (IfaceStrTyLit n)) (IA_Vis ty IA_Nil) <- tys
+  = maybeParen ctxt_prec funPrec
+    $ char '?' <> ftext n <> text "::" <> ppr_ty topPrec ty
 
   | IfaceTupleTyCon arity sort <- ifaceTyConSort info
   , not (debugStyle style)
-  , arity == ifaceVisTcArgsLength tys
-  = pprTuple sort (ifaceTyConIsPromoted info) tys
+  , arity == ifaceVisAppArgsLength tys
+  = pprTuple ctxt_prec sort (ifaceTyConIsPromoted info) tys
 
   | IfaceSumTyCon arity <- ifaceTyConSort info
   = pprSum arity (ifaceTyConIsPromoted info) tys
 
   | tc `ifaceTyConHasKey` consDataConKey
   , not (gopt Opt_PrintExplicitKinds dflags)
-  , ITC_Invis _ (ITC_Vis ty1 (ITC_Vis ty2 ITC_Nil)) <- tys
+  , IA_Invis _ (IA_Vis ty1 (IA_Vis ty2 IA_Nil)) <- tys
   = pprIfaceTyList ctxt_prec ty1 ty2
 
   | tc `ifaceTyConHasKey` tYPETyConKey
-  , ITC_Vis (IfaceTyConApp rep ITC_Nil) ITC_Nil <- tys
+  , IA_Vis (IfaceTyConApp rep IA_Nil) IA_Nil <- tys
   , rep `ifaceTyConHasKey` liftedRepDataConKey
-  = kindStar
+  = kindType
 
   | otherwise
-  = sdocWithPprDebug $ \dbg ->
+  = getPprDebug $ \dbg ->
     if | not dbg && tc `ifaceTyConHasKey` errorMessageTypeErrorFamKey
          -- Suppress detail unles you _really_ want to see
          -> text "(TypeError ...)"
 
-       | Just doc <- ppr_equality ctxt_prec tc (tcArgsIfaceTypes tys)
+       | Just doc <- ppr_equality ctxt_prec tc (appArgsIfaceTypes tys)
          -> doc
 
        | otherwise
          -> ppr_iface_tc_app ppr_ty ctxt_prec tc tys_wo_kinds
   where
     info = ifaceTyConInfo tc
-    tys_wo_kinds = tcArgsIfaceTypes $ stripInvisArgs dflags tys
+    tys_wo_kinds = appArgsIfaceTypes $ stripInvisArgs dflags tys
 
 -- | Pretty-print a type-level equality.
+-- Returns (Just doc) if the argument is a /saturated/ application
+-- of   eqTyCon          (~)
+--      eqPrimTyCon      (~#)
+--      eqReprPrimTyCon  (~R#)
+--      heqTyCon         (~~)
 --
 -- See Note [Equality predicates in IfaceType]
 -- and Note [The equality types story] in TysPrim
-ppr_equality :: TyPrec -> IfaceTyCon -> [IfaceType] -> Maybe SDoc
+ppr_equality :: PprPrec -> IfaceTyCon -> [IfaceType] -> Maybe SDoc
 ppr_equality ctxt_prec tc args
   | hetero_eq_tc
   , [k1, k2, t1, t2] <- args
@@ -910,94 +1143,119 @@ ppr_equality ctxt_prec tc args
   | otherwise
   = Nothing
   where
-    homogeneous = case ifaceTyConSort $ ifaceTyConInfo tc of
-                    IfaceEqualityTyCon hom -> hom
-                    _other -> pprPanic "ppr_equality: homogeneity" (ppr tc)
+    homogeneous = tc_name `hasKey` eqTyConKey -- (~)
+               || hetero_tc_used_homogeneously
+      where
+        hetero_tc_used_homogeneously
+          = case ifaceTyConSort $ ifaceTyConInfo tc of
+                          IfaceEqualityTyCon -> True
+                          _other             -> False
+             -- True <=> a heterogeneous equality whose arguments
+             --          are (in this case) of the same kind
+
     tc_name = ifaceTyConName tc
     pp = ppr_ty
     hom_eq_tc = tc_name `hasKey` eqTyConKey            -- (~)
     hetero_eq_tc = tc_name `hasKey` eqPrimTyConKey     -- (~#)
                 || tc_name `hasKey` eqReprPrimTyConKey -- (~R#)
                 || tc_name `hasKey` heqTyConKey        -- (~~)
+    nominal_eq_tc = tc_name `hasKey` heqTyConKey       -- (~~)
+                 || tc_name `hasKey` eqPrimTyConKey    -- (~#)
     print_equality args =
         sdocWithDynFlags $ \dflags ->
         getPprStyle      $ \style  ->
         print_equality' args style dflags
 
     print_equality' (ki1, ki2, ty1, ty2) style dflags
-      | print_eqs
+      | -- If -fprint-equality-relations is on, just print the original TyCon
+        print_eqs
       = ppr_infix_eq (ppr tc)
 
-      | hetero_eq_tc
-      , print_kinds || not homogeneous
-      = ppr_infix_eq (text "~~")
+      | -- Homogeneous use of heterogeneous equality (ty1 ~~ ty2)
+        --                 or unlifted equality      (ty1 ~# ty2)
+        nominal_eq_tc, homogeneous
+      = ppr_infix_eq (text "~")
 
+      | -- Heterogeneous use of unlifted equality (ty1 ~# ty2)
+        not homogeneous
+      = ppr_infix_eq (ppr heqTyCon)
+
+      | -- Homogeneous use of representational unlifted equality (ty1 ~R# ty2)
+        tc_name `hasKey` eqReprPrimTyConKey, homogeneous
+      = let ki | print_kinds = [pp appPrec ki1]
+               | otherwise   = []
+        in pprIfacePrefixApp ctxt_prec (ppr coercibleTyCon)
+                            (ki ++ [pp appPrec ty1, pp appPrec ty2])
+
+        -- The other cases work as you'd expect
       | otherwise
-      = if tc_name `hasKey` eqReprPrimTyConKey
-        then pprIfacePrefixApp ctxt_prec (text "Coercible")
-                               [pp TyConPrec ty1, pp TyConPrec ty2]
-        else pprIfaceInfixApp ctxt_prec (char '~')
-                 (pp TyOpPrec ty1) (pp TyOpPrec ty2)
+      = ppr_infix_eq (ppr tc)
       where
-        ppr_infix_eq eq_op
-           = pprIfaceInfixApp ctxt_prec eq_op
-                 (parens (pp TopPrec ty1 <+> dcolon <+> pp TyOpPrec ki1))
-                 (parens (pp TopPrec ty2 <+> dcolon <+> pp TyOpPrec ki2))
+        ppr_infix_eq :: SDoc -> SDoc
+        ppr_infix_eq eq_op = pprIfaceInfixApp ctxt_prec eq_op
+                               (pp_ty_ki ty1 ki1) (pp_ty_ki ty2 ki2)
+          where
+            pp_ty_ki ty ki
+              | print_kinds
+              = parens (pp topPrec ty <+> dcolon <+> pp opPrec ki)
+              | otherwise
+              = pp opPrec ty
 
         print_kinds = gopt Opt_PrintExplicitKinds dflags
         print_eqs   = gopt Opt_PrintEqualityRelations dflags ||
                       dumpStyle style || debugStyle style
 
 
-pprIfaceCoTcApp :: TyPrec -> IfaceTyCon -> [IfaceCoercion] -> SDoc
+pprIfaceCoTcApp :: PprPrec -> IfaceTyCon -> [IfaceCoercion] -> SDoc
 pprIfaceCoTcApp ctxt_prec tc tys = ppr_iface_tc_app ppr_co ctxt_prec tc tys
 
-ppr_iface_tc_app :: (TyPrec -> a -> SDoc) -> TyPrec -> IfaceTyCon -> [a] -> SDoc
+ppr_iface_tc_app :: (PprPrec -> a -> SDoc) -> PprPrec -> IfaceTyCon -> [a] -> SDoc
 ppr_iface_tc_app pp _ tc [ty]
-  | tc `ifaceTyConHasKey` listTyConKey = pprPromotionQuote tc <> brackets (pp TopPrec ty)
-  | tc `ifaceTyConHasKey` parrTyConKey = pprPromotionQuote tc <> paBrackets (pp TopPrec ty)
+  | tc `ifaceTyConHasKey` listTyConKey = pprPromotionQuote tc <> brackets (pp topPrec ty)
 
 ppr_iface_tc_app pp ctxt_prec tc tys
-  |  tc `ifaceTyConHasKey` starKindTyConKey
-  || tc `ifaceTyConHasKey` liftedTypeKindTyConKey
-  || tc `ifaceTyConHasKey` unicodeStarKindTyConKey
-  = kindStar   -- Handle unicode; do not wrap * in parens
+  | tc `ifaceTyConHasKey` liftedTypeKindTyConKey
+  = kindType
 
   | not (isSymOcc (nameOccName (ifaceTyConName tc)))
-  = pprIfacePrefixApp ctxt_prec (ppr tc) (map (pp TyConPrec) tys)
+  = pprIfacePrefixApp ctxt_prec (ppr tc) (map (pp appPrec) tys)
 
   | [ty1,ty2] <- tys  -- Infix, two arguments;
                       -- we know nothing of precedence though
   = pprIfaceInfixApp ctxt_prec (ppr tc)
-                     (pp TyOpPrec ty1) (pp TyOpPrec ty2)
+                     (pp opPrec ty1) (pp opPrec ty2)
 
   | otherwise
-  = pprIfacePrefixApp ctxt_prec (parens (ppr tc)) (map (pp TyConPrec) tys)
+  = pprIfacePrefixApp ctxt_prec (parens (ppr tc)) (map (pp appPrec) tys)
 
-pprSum :: Arity -> IsPromoted -> IfaceTcArgs -> SDoc
+pprSum :: Arity -> IsPromoted -> IfaceAppArgs -> SDoc
 pprSum _arity is_promoted args
   =   -- drop the RuntimeRep vars.
       -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
-    let tys   = tcArgsIfaceTypes args
+    let tys   = appArgsIfaceTypes args
         args' = drop (length tys `div` 2) tys
     in pprPromotionQuoteI is_promoted
-       <> sumParens (pprWithBars (ppr_ty TopPrec) args')
+       <> sumParens (pprWithBars (ppr_ty topPrec) args')
 
-pprTuple :: TupleSort -> IsPromoted -> IfaceTcArgs -> SDoc
-pprTuple ConstraintTuple IsNotPromoted ITC_Nil
-  = text "() :: Constraint"
+pprTuple :: PprPrec -> TupleSort -> IsPromoted -> IfaceAppArgs -> SDoc
+pprTuple ctxt_prec ConstraintTuple IsNotPromoted IA_Nil
+  = maybeParen ctxt_prec appPrec $
+    text "() :: Constraint"
 
 -- All promoted constructors have kind arguments
-pprTuple sort IsPromoted args
-  = let tys = tcArgsIfaceTypes args
+pprTuple _ sort IsPromoted args
+  = let tys = appArgsIfaceTypes args
         args' = drop (length tys `div` 2) tys
+        spaceIfPromoted = case args' of
+          arg0:_ -> pprSpaceIfPromotedTyCon arg0
+          _ -> id
     in pprPromotionQuoteI IsPromoted <>
-       tupleParens sort (pprWithCommas pprIfaceType args')
+       tupleParens sort (spaceIfPromoted (pprWithCommas pprIfaceType args'))
 
-pprTuple sort promoted args
+pprTuple _ sort promoted args
   =   -- drop the RuntimeRep vars.
       -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
-    let tys   = tcArgsIfaceTypes args
+    let tys   = appArgsIfaceTypes args
         args' = case sort of
                   UnboxedTuple -> drop (length tys `div` 2) tys
                   _            -> tys
@@ -1010,76 +1268,84 @@ pprIfaceTyLit (IfaceNumTyLit n) = integer n
 pprIfaceTyLit (IfaceStrTyLit n) = text (show n)
 
 pprIfaceCoercion, pprParendIfaceCoercion :: IfaceCoercion -> SDoc
-pprIfaceCoercion = ppr_co TopPrec
-pprParendIfaceCoercion = ppr_co TyConPrec
+pprIfaceCoercion = ppr_co topPrec
+pprParendIfaceCoercion = ppr_co appPrec
 
-ppr_co :: TyPrec -> IfaceCoercion -> SDoc
-ppr_co _         (IfaceReflCo r ty) = angleBrackets (ppr ty) <> ppr_role r
+ppr_co :: PprPrec -> IfaceCoercion -> SDoc
+ppr_co _         (IfaceReflCo ty) = angleBrackets (ppr ty) <> ppr_role Nominal
+ppr_co _         (IfaceGReflCo r ty IfaceMRefl)
+  = angleBrackets (ppr ty) <> ppr_role r
+ppr_co ctxt_prec (IfaceGReflCo r ty (IfaceMCo co))
+  = ppr_special_co ctxt_prec
+    (text "GRefl" <+> ppr r <+> pprParendIfaceType ty) [co]
 ppr_co ctxt_prec (IfaceFunCo r co1 co2)
-  = maybeParen ctxt_prec FunPrec $
-    sep (ppr_co FunPrec co1 : ppr_fun_tail co2)
+  = maybeParen ctxt_prec funPrec $
+    sep (ppr_co funPrec co1 : ppr_fun_tail co2)
   where
     ppr_fun_tail (IfaceFunCo r co1 co2)
-      = (arrow <> ppr_role r <+> ppr_co FunPrec co1) : ppr_fun_tail co2
+      = (arrow <> ppr_role r <+> ppr_co funPrec co1) : ppr_fun_tail co2
     ppr_fun_tail other_co
       = [arrow <> ppr_role r <+> pprIfaceCoercion other_co]
 
 ppr_co _         (IfaceTyConAppCo r tc cos)
-  = parens (pprIfaceCoTcApp TopPrec tc cos) <> ppr_role r
+  = parens (pprIfaceCoTcApp topPrec tc cos) <> ppr_role r
 ppr_co ctxt_prec (IfaceAppCo co1 co2)
-  = maybeParen ctxt_prec TyConPrec $
-    ppr_co FunPrec co1 <+> pprParendIfaceCoercion co2
+  = maybeParen ctxt_prec appPrec $
+    ppr_co funPrec co1 <+> pprParendIfaceCoercion co2
 ppr_co ctxt_prec co@(IfaceForAllCo {})
-  = maybeParen ctxt_prec FunPrec $
+  = maybeParen ctxt_prec funPrec $
     pprIfaceForAllCoPart tvs (pprIfaceCoercion inner_co)
   where
     (tvs, inner_co) = split_co co
 
-    split_co (IfaceForAllCo (name, _) kind_co co')
+    split_co (IfaceForAllCo (IfaceTvBndr (name, _)) kind_co co')
+      = let (tvs, co'') = split_co co' in ((name,kind_co):tvs,co'')
+    split_co (IfaceForAllCo (IfaceIdBndr (name, _)) kind_co co')
       = let (tvs, co'') = split_co co' in ((name,kind_co):tvs,co'')
     split_co co' = ([], co')
 
-ppr_co _         (IfaceCoVarCo covar)       = ppr covar
+-- Why these three? See Note [TcTyVars in IfaceType]
+ppr_co _ (IfaceFreeCoVar covar) = ppr covar
+ppr_co _ (IfaceCoVarCo covar)   = ppr covar
+ppr_co _ (IfaceHoleCo covar)    = braces (ppr covar)
 
 ppr_co ctxt_prec (IfaceUnivCo IfaceUnsafeCoerceProv r ty1 ty2)
-  = maybeParen ctxt_prec TyConPrec $
+  = maybeParen ctxt_prec appPrec $
     text "UnsafeCo" <+> ppr r <+>
     pprParendIfaceType ty1 <+> pprParendIfaceType ty2
 
-ppr_co _ctxt_prec (IfaceUnivCo (IfaceHoleProv u) _ _ _)
- = braces $ ppr u
-
-ppr_co _         (IfaceUnivCo _ _ ty1 ty2)
-  = angleBrackets ( ppr ty1 <> comma <+> ppr ty2 )
+ppr_co _ (IfaceUnivCo prov role ty1 ty2)
+  = text "Univ" <> (parens $
+      sep [ ppr role <+> pprIfaceUnivCoProv prov
+          , dcolon <+>  ppr ty1 <> comma <+> ppr ty2 ])
 
 ppr_co ctxt_prec (IfaceInstCo co ty)
-  = maybeParen ctxt_prec TyConPrec $
+  = maybeParen ctxt_prec appPrec $
     text "Inst" <+> pprParendIfaceCoercion co
                         <+> pprParendIfaceCoercion ty
 
 ppr_co ctxt_prec (IfaceAxiomRuleCo tc cos)
-  = maybeParen ctxt_prec TyConPrec $ ppr tc <+> parens (interpp'SP cos)
+  = maybeParen ctxt_prec appPrec $ ppr tc <+> parens (interpp'SP cos)
 
 ppr_co ctxt_prec (IfaceAxiomInstCo n i cos)
   = ppr_special_co ctxt_prec (ppr n <> brackets (ppr i)) cos
 ppr_co ctxt_prec (IfaceSymCo co)
   = ppr_special_co ctxt_prec (text "Sym") [co]
 ppr_co ctxt_prec (IfaceTransCo co1 co2)
-  = ppr_special_co ctxt_prec  (text "Trans") [co1,co2]
+  = maybeParen ctxt_prec opPrec $
+    ppr_co opPrec co1 <+> semi <+> ppr_co opPrec co2
 ppr_co ctxt_prec (IfaceNthCo d co)
   = ppr_special_co ctxt_prec (text "Nth:" <> int d) [co]
 ppr_co ctxt_prec (IfaceLRCo lr co)
   = ppr_special_co ctxt_prec (ppr lr) [co]
 ppr_co ctxt_prec (IfaceSubCo co)
   = ppr_special_co ctxt_prec (text "Sub") [co]
-ppr_co ctxt_prec (IfaceCoherenceCo co1 co2)
-  = ppr_special_co ctxt_prec (text "Coh") [co1,co2]
 ppr_co ctxt_prec (IfaceKindCo co)
   = ppr_special_co ctxt_prec (text "Kind") [co]
 
-ppr_special_co :: TyPrec -> SDoc -> [IfaceCoercion] -> SDoc
+ppr_special_co :: PprPrec -> SDoc -> [IfaceCoercion] -> SDoc
 ppr_special_co ctxt_prec doc cos
-  = maybeParen ctxt_prec TyConPrec
+  = maybeParen ctxt_prec appPrec
                (sep [doc, nest 4 (sep (map pprParendIfaceCoercion cos))])
 
 ppr_role :: Role -> SDoc
@@ -1088,6 +1354,17 @@ ppr_role r = underscore <> pp_role
                     Nominal          -> char 'N'
                     Representational -> char 'R'
                     Phantom          -> char 'P'
+
+------------------
+pprIfaceUnivCoProv :: IfaceUnivCoProv -> SDoc
+pprIfaceUnivCoProv IfaceUnsafeCoerceProv
+  = text "unsafe"
+pprIfaceUnivCoProv (IfacePhantomProv co)
+  = text "phantom" <+> pprParendIfaceCoercion co
+pprIfaceUnivCoProv (IfaceProofIrrelProv co)
+  = text "irrel" <+> pprParendIfaceCoercion co
+pprIfaceUnivCoProv (IfacePluginProv s)
+  = text "plugin" <+> doubleQuotes (text s)
 
 -------------------
 instance Outputable IfaceTyCon where
@@ -1126,9 +1403,7 @@ instance Binary IfaceTyConSort where
    put_ bh IfaceNormalTyCon             = putByte bh 0
    put_ bh (IfaceTupleTyCon arity sort) = putByte bh 1 >> put_ bh arity >> put_ bh sort
    put_ bh (IfaceSumTyCon arity)        = putByte bh 2 >> put_ bh arity
-   put_ bh (IfaceEqualityTyCon hom)
-     | hom                              = putByte bh 3
-     | otherwise                        = putByte bh 4
+   put_ bh IfaceEqualityTyCon           = putByte bh 3
 
    get bh = do
        n <- getByte bh
@@ -1136,9 +1411,7 @@ instance Binary IfaceTyConSort where
          0 -> return IfaceNormalTyCon
          1 -> IfaceTupleTyCon <$> get bh <*> get bh
          2 -> IfaceSumTyCon <$> get bh
-         3 -> return $ IfaceEqualityTyCon True
-         4 -> return $ IfaceEqualityTyCon False
-         _ -> fail "Binary(IfaceTyConSort): fail"
+         _ -> return IfaceEqualityTyCon
 
 instance Binary IfaceTyConInfo where
    put_ bh (IfaceTyConInfo i s) = put_ bh i >> put_ bh s
@@ -1161,12 +1434,12 @@ instance Binary IfaceTyLit where
                  ; return (IfaceStrTyLit n) }
          _ -> panic ("get IfaceTyLit " ++ show tag)
 
-instance Binary IfaceTcArgs where
+instance Binary IfaceAppArgs where
   put_ bh tk =
     case tk of
-      ITC_Vis   t ts -> putByte bh 0 >> put_ bh t >> put_ bh ts
-      ITC_Invis t ts -> putByte bh 1 >> put_ bh t >> put_ bh ts
-      ITC_Nil        -> putByte bh 2
+      IA_Vis   t ts -> putByte bh 0 >> put_ bh t >> put_ bh ts
+      IA_Invis t ts -> putByte bh 1 >> put_ bh t >> put_ bh ts
+      IA_Nil        -> putByte bh 2
 
   get bh =
     do c <- getByte bh
@@ -1174,13 +1447,13 @@ instance Binary IfaceTcArgs where
          0 -> do
            t  <- get bh
            ts <- get bh
-           return $! ITC_Vis t ts
+           return $! IA_Vis t ts
          1 -> do
            t  <- get bh
            ts <- get bh
-           return $! ITC_Invis t ts
-         2 -> return ITC_Nil
-         _ -> panic ("get IfaceTcArgs " ++ show c)
+           return $! IA_Invis t ts
+         2 -> return IA_Nil
+         _ -> panic ("get IfaceAppArgs " ++ show c)
 
 -------------------
 
@@ -1188,7 +1461,7 @@ instance Binary IfaceTcArgs where
 --
 -- In the event that we are printing a singleton context (e.g. @Eq a@) we can
 -- omit parentheses. However, we must take care to set the precedence correctly
--- to TyOpPrec, since something like @a :~: b@ must be parenthesized (see
+-- to opPrec, since something like @a :~: b@ must be parenthesized (see
 -- #9658).
 --
 -- When printing a larger context we use 'fsep' instead of 'sep' so that
@@ -1217,16 +1490,16 @@ instance Binary IfaceTcArgs where
 
 -- | Prints "(C a, D b) =>", including the arrow.
 -- Used when we want to print a context in a type, so we
--- use FunPrec to decide whether to parenthesise a singleton
+-- use 'funPrec' to decide whether to parenthesise a singleton
 -- predicate; e.g.   Num a => a -> a
 pprIfaceContextArr :: [IfacePredType] -> SDoc
 pprIfaceContextArr []     = empty
-pprIfaceContextArr [pred] = ppr_ty FunPrec pred <+> darrow
+pprIfaceContextArr [pred] = ppr_ty funPrec pred <+> darrow
 pprIfaceContextArr preds  = ppr_parend_preds preds <+> darrow
 
 -- | Prints a context or @()@ if empty
 -- You give it the context precedence
-pprIfaceContext :: TyPrec -> [IfacePredType] -> SDoc
+pprIfaceContext :: PprPrec -> [IfacePredType] -> SDoc
 pprIfaceContext _    []     = text "()"
 pprIfaceContext prec [pred] = ppr_ty prec pred
 pprIfaceContext _    preds  = ppr_parend_preds preds
@@ -1297,64 +1570,79 @@ instance Binary IfaceType where
               _  -> do n <- get bh
                        return (IfaceLitTy n)
 
+instance Binary IfaceMCoercion where
+  put_ bh IfaceMRefl = do
+          putByte bh 1
+  put_ bh (IfaceMCo co) = do
+          putByte bh 2
+          put_ bh co
+
+  get bh = do
+    tag <- getByte bh
+    case tag of
+         1 -> return IfaceMRefl
+         2 -> do a <- get bh
+                 return $ IfaceMCo a
+         _ -> panic ("get IfaceMCoercion " ++ show tag)
+
 instance Binary IfaceCoercion where
-  put_ bh (IfaceReflCo a b) = do
+  put_ bh (IfaceReflCo a) = do
           putByte bh 1
           put_ bh a
-          put_ bh b
-  put_ bh (IfaceFunCo a b c) = do
+  put_ bh (IfaceGReflCo a b c) = do
           putByte bh 2
           put_ bh a
           put_ bh b
           put_ bh c
-  put_ bh (IfaceTyConAppCo a b c) = do
+  put_ bh (IfaceFunCo a b c) = do
           putByte bh 3
           put_ bh a
           put_ bh b
           put_ bh c
-  put_ bh (IfaceAppCo a b) = do
+  put_ bh (IfaceTyConAppCo a b c) = do
           putByte bh 4
           put_ bh a
           put_ bh b
-  put_ bh (IfaceForAllCo a b c) = do
+          put_ bh c
+  put_ bh (IfaceAppCo a b) = do
           putByte bh 5
+          put_ bh a
+          put_ bh b
+  put_ bh (IfaceForAllCo a b c) = do
+          putByte bh 6
           put_ bh a
           put_ bh b
           put_ bh c
   put_ bh (IfaceCoVarCo a) = do
-          putByte bh 6
+          putByte bh 7
           put_ bh a
   put_ bh (IfaceAxiomInstCo a b c) = do
-          putByte bh 7
+          putByte bh 8
           put_ bh a
           put_ bh b
           put_ bh c
   put_ bh (IfaceUnivCo a b c d) = do
-          putByte bh 8
+          putByte bh 9
           put_ bh a
           put_ bh b
           put_ bh c
           put_ bh d
   put_ bh (IfaceSymCo a) = do
-          putByte bh 9
-          put_ bh a
-  put_ bh (IfaceTransCo a b) = do
           putByte bh 10
           put_ bh a
-          put_ bh b
-  put_ bh (IfaceNthCo a b) = do
+  put_ bh (IfaceTransCo a b) = do
           putByte bh 11
           put_ bh a
           put_ bh b
-  put_ bh (IfaceLRCo a b) = do
+  put_ bh (IfaceNthCo a b) = do
           putByte bh 12
           put_ bh a
           put_ bh b
-  put_ bh (IfaceInstCo a b) = do
+  put_ bh (IfaceLRCo a b) = do
           putByte bh 13
           put_ bh a
           put_ bh b
-  put_ bh (IfaceCoherenceCo a b) = do
+  put_ bh (IfaceInstCo a b) = do
           putByte bh 14
           put_ bh a
           put_ bh b
@@ -1368,56 +1656,61 @@ instance Binary IfaceCoercion where
           putByte bh 17
           put_ bh a
           put_ bh b
+  put_ _ (IfaceFreeCoVar cv)
+       = pprPanic "Can't serialise IfaceFreeCoVar" (ppr cv)
+  put_ _  (IfaceHoleCo cv)
+       = pprPanic "Can't serialise IfaceHoleCo" (ppr cv)
+          -- See Note [Holes in IfaceUnivCoProv]
 
   get bh = do
       tag <- getByte bh
       case tag of
            1 -> do a <- get bh
-                   b <- get bh
-                   return $ IfaceReflCo a b
+                   return $ IfaceReflCo a
            2 -> do a <- get bh
                    b <- get bh
                    c <- get bh
-                   return $ IfaceFunCo a b c
+                   return $ IfaceGReflCo a b c
            3 -> do a <- get bh
                    b <- get bh
                    c <- get bh
-                   return $ IfaceTyConAppCo a b c
+                   return $ IfaceFunCo a b c
            4 -> do a <- get bh
                    b <- get bh
-                   return $ IfaceAppCo a b
+                   c <- get bh
+                   return $ IfaceTyConAppCo a b c
            5 -> do a <- get bh
+                   b <- get bh
+                   return $ IfaceAppCo a b
+           6 -> do a <- get bh
                    b <- get bh
                    c <- get bh
                    return $ IfaceForAllCo a b c
-           6 -> do a <- get bh
-                   return $ IfaceCoVarCo a
            7 -> do a <- get bh
+                   return $ IfaceCoVarCo a
+           8 -> do a <- get bh
                    b <- get bh
                    c <- get bh
                    return $ IfaceAxiomInstCo a b c
-           8 -> do a <- get bh
+           9 -> do a <- get bh
                    b <- get bh
                    c <- get bh
                    d <- get bh
                    return $ IfaceUnivCo a b c d
-           9 -> do a <- get bh
-                   return $ IfaceSymCo a
            10-> do a <- get bh
-                   b <- get bh
-                   return $ IfaceTransCo a b
+                   return $ IfaceSymCo a
            11-> do a <- get bh
                    b <- get bh
-                   return $ IfaceNthCo a b
+                   return $ IfaceTransCo a b
            12-> do a <- get bh
                    b <- get bh
-                   return $ IfaceLRCo a b
+                   return $ IfaceNthCo a b
            13-> do a <- get bh
                    b <- get bh
-                   return $ IfaceInstCo a b
+                   return $ IfaceLRCo a b
            14-> do a <- get bh
                    b <- get bh
-                   return $ IfaceCoherenceCo a b
+                   return $ IfaceInstCo a b
            15-> do a <- get bh
                    return $ IfaceKindCo a
            16-> do a <- get bh
@@ -1438,9 +1731,6 @@ instance Binary IfaceUnivCoProv where
   put_ bh (IfacePluginProv a) = do
           putByte bh 4
           put_ bh a
-  put_ _  (IfaceHoleProv _) =
-          pprPanic "Binary(IfaceUnivCoProv) hit a hole" empty
-  -- See Note [Holes in IfaceUnivCoProv]
 
   get bh = do
       tag <- getByte bh

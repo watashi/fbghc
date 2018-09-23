@@ -10,6 +10,8 @@ module NameCache
     , NameCache(..), OrigNameCache
     ) where
 
+import GhcPrelude
+
 import Module
 import Name
 import UniqSupply
@@ -115,4 +117,4 @@ initNameCache us names
                 nsNames = initOrigNames names }
 
 initOrigNames :: [Name] -> OrigNameCache
-initOrigNames names = foldl extendOrigNameCache emptyModuleEnv names
+initOrigNames names = foldl' extendOrigNameCache emptyModuleEnv names

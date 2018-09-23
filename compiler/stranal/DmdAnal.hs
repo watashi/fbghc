@@ -13,6 +13,8 @@ module DmdAnal ( dmdAnalProgram ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import DynFlags
 import WwLib            ( findTypeShape, deepSplitProductType_maybe )
 import Demand   -- All of it
@@ -399,7 +401,7 @@ situation actually arises in GHC.IO.Handle.Internals.wantReadableHandle
 
 So if the scrutinee is a primop call, we *don't* apply the
 state hack:
-  - If is a simple, terminating one like getMaskingState,
+  - If it is a simple, terminating one like getMaskingState,
     applying the hack is over-conservative.
   - If the primop is raise# then it returns bottom, so
     the case alternatives are already discarded.
@@ -642,7 +644,7 @@ dmdAnalRhsLetDown top_lvl rec_flag env let_dmd id rhs
            Nothing | (bndrs, body) <- collectBinders rhs
                    -> (bndrs, body, mkBodyDmd env body)
 
-    env_body         = foldl extendSigsWithLam env bndrs
+    env_body         = foldl' extendSigsWithLam env bndrs
     (body_ty, body') = dmdAnal env_body body_dmd body
     body_ty'         = removeDmdTyArgs body_ty -- zap possible deep CPR info
     (DmdType rhs_fv rhs_dmds rhs_res, bndrs')
@@ -1191,7 +1193,7 @@ extendSigsWithLam env id
 extendEnvForProdAlt :: AnalEnv -> CoreExpr -> Id -> DataCon -> [Var] -> AnalEnv
 -- See Note [CPR in a product case alternative]
 extendEnvForProdAlt env scrut case_bndr dc bndrs
-  = foldl do_con_arg env1 ids_w_strs
+  = foldl' do_con_arg env1 ids_w_strs
   where
     env1 = extendAnalEnv NotTopLevel env case_bndr case_bndr_sig
 

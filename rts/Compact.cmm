@@ -24,7 +24,7 @@ import CLOSURE base_GHCziIOziException_cannotCompactPinned_closure;
     hp = StgCompactNFData_hp(compact);                                  \
     if (hp + WDS(sizeW) <= StgCompactNFData_hpLim(compact)) {           \
         to = hp;                                                        \
-        StgCompactNFData_hp(compact) = hp + WDS(sizeW);                  \
+        StgCompactNFData_hp(compact) = hp + WDS(sizeW);                 \
     } else {                                                            \
         ("ptr" to) = ccall allocateForCompact(                          \
             MyCapability() "ptr", compact "ptr", sizeW);                \
@@ -154,8 +154,8 @@ eval:
     }
 
     case
-        MUT_ARR_PTRS_FROZEN0,
-        MUT_ARR_PTRS_FROZEN: {
+        MUT_ARR_PTRS_FROZEN_DIRTY,
+        MUT_ARR_PTRS_FROZEN_CLEAN: {
 
         (should) = ccall shouldCompact(compact "ptr", p "ptr");
         if (should == SHOULDCOMPACT_IN_CNF) { P_[pp] = p; return(); }
@@ -174,7 +174,7 @@ eval:
         prim %memcpy(to + cards, p + cards , size - cards, 1);
         i = 0;
       loop0:
-        if (i < ptrs) {
+        if (i < ptrs) ( likely: True ) {
             W_ q;
             q = to + SIZEOF_StgMutArrPtrs + WDS(i);
             call stg_compactAddWorkerzh(
@@ -186,11 +186,31 @@ eval:
     }
 
     case
-        SMALL_MUT_ARR_PTRS_FROZEN0,
-        SMALL_MUT_ARR_PTRS_FROZEN: {
-        // (P_ to) = allocateForCompact(cap, compact, size);
-        // use prim memcpy
-        ccall barf("stg_compactAddWorkerzh: TODO: SMALL_MUT_ARR_PTRS");
+        SMALL_MUT_ARR_PTRS_FROZEN_DIRTY,
+        SMALL_MUT_ARR_PTRS_FROZEN_CLEAN: {
+
+        (should) = ccall shouldCompact(compact "ptr", p "ptr");
+        if (should == SHOULDCOMPACT_IN_CNF) { P_[pp] = p; return(); }
+
+        CHECK_HASH();
+
+        W_ i, ptrs;
+        ptrs = StgSmallMutArrPtrs_ptrs(p);
+        ALLOCATE(compact, BYTES_TO_WDS(SIZEOF_StgSmallMutArrPtrs) + ptrs, p, to, tag);
+        P_[pp] = tag | to;
+        SET_HDR(to, StgHeader_info(p), StgHeader_ccs(p));
+        StgSmallMutArrPtrs_ptrs(to) = ptrs;
+        i = 0;
+      loop1:
+        if (i < ptrs) ( likely: True ) {
+            W_ q;
+            q = to + SIZEOF_StgSmallMutArrPtrs + WDS(i);
+            call stg_compactAddWorkerzh(
+                compact, P_[p + SIZEOF_StgSmallMutArrPtrs + WDS(i)], q);
+            i = i + 1;
+            goto loop1;
+        }
+        return();
     }
 
     // Everything else we should copy and evaluate the components:
@@ -220,16 +240,16 @@ eval:
         // First, copy the non-pointers
         if (nptrs > 0) {
             i = ptrs;
-        loop1:
+        loop2:
             StgClosure_payload(to,i) = StgClosure_payload(p,i);
             i = i + 1;
-            if (i < ptrs + nptrs) goto loop1;
+            if (i < ptrs + nptrs) ( likely: True ) goto loop2;
         }
 
         // Next, recursively compact and copy the pointers
         if (ptrs == 0) { return(); }
         i = 0;
-      loop2:
+      loop3:
         W_ q;
         q = to + SIZEOF_StgHeader + OFFSET_StgClosure_payload + WDS(i);
         // Tail-call the last one.  This means we don't build up a deep
@@ -239,7 +259,7 @@ eval:
         }
         call stg_compactAddWorkerzh(compact, StgClosure_payload(p,i), q);
         i = i + 1;
-        goto loop2;
+        goto loop3;
     }
 
     // these might be static closures that we can avoid copying into
@@ -435,4 +455,3 @@ stg_compactFixupPointerszh ( W_ first_block, W_ root )
     gcstr = str;
     return (gcstr, ok);
 }
-

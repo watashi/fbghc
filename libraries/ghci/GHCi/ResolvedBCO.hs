@@ -6,6 +6,7 @@ module GHCi.ResolvedBCO
   , isLittleEndian
   ) where
 
+import Prelude -- See note [Why do we import Prelude here?]
 import SizedSeq
 import GHCi.RemoteTypes
 import GHCi.BreakArray
@@ -46,9 +47,9 @@ data ResolvedBCO
 
 -- | The Binary instance for ResolvedBCOs.
 --
--- Note, that we do encode the endianess, however there is no support for mixed
--- endianess setups.  This is primarily to ensure that ghc and iserv share the
--- same endianess.
+-- Note, that we do encode the endianness, however there is no support for mixed
+-- endianness setups.  This is primarily to ensure that ghc and iserv share the
+-- same endianness.
 instance Binary ResolvedBCO where
   put ResolvedBCO{..} = do
     put resolvedBCOIsLE

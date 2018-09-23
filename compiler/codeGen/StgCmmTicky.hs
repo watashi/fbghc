@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, CPP #-}
+{-# LANGUAGE BangPatterns #-}
 
 -----------------------------------------------------------------------------
 --
@@ -104,7 +104,7 @@ module StgCmmTicky (
   tickySlowCall, tickySlowCallPat,
   ) where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import StgCmmArgRep    ( slowCallPattern , toArgRep , argRepString )
 import StgCmmClosure

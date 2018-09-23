@@ -25,6 +25,8 @@ module AsmCodeGen (
 #include "nativeGen/NCG.h"
 
 
+import GhcPrelude
+
 import qualified X86.CodeGen
 import qualified X86.Regs
 import qualified X86.Instr
@@ -363,7 +365,7 @@ finishNativeGen dflags modLoc bufh@(BufHandle _ _ h) us ngs
 
           -- build the global register conflict graph
           let graphGlobal
-                  = foldl Color.union Color.initGraph
+                  = foldl' Color.union Color.initGraph
                   $ [ Color.raGraph stat
                           | stat@Color.RegAllocStatsStart{} <- stats]
 
@@ -927,16 +929,18 @@ generateJumpTables ncgImpl xs = concatMap f xs
 
 shortcutBranches
         :: DynFlags
-    -> NcgImpl statics instr jumpDest
+        -> NcgImpl statics instr jumpDest
         -> [NatCmmDecl statics instr]
         -> [NatCmmDecl statics instr]
 
 shortcutBranches dflags ncgImpl tops
-  | optLevel dflags < 1 = tops    -- only with -O or higher
-  | otherwise           = map (apply_mapping ncgImpl mapping) tops'
+  | gopt Opt_AsmShortcutting dflags
+  = map (apply_mapping ncgImpl mapping) tops'
+  | otherwise
+  = tops
   where
     (tops', mappings) = mapAndUnzip (build_mapping ncgImpl) tops
-    mapping = foldr plusUFM emptyUFM mappings
+    mapping = plusUFMList mappings
 
 build_mapping :: NcgImpl statics instr jumpDest
               -> GenCmmDecl d (LabelMap t) (ListGraph instr)
@@ -953,7 +957,7 @@ build_mapping ncgImpl (CmmProc info lbl live (ListGraph (head:blocks)))
     -- shorted.
     -- Don't completely eliminate loops here -- that can leave a dangling jump!
     (_, shortcut_blocks, others) =
-        foldl split (setEmpty :: LabelSet, [], []) blocks
+        foldl' split (setEmpty :: LabelSet, [], []) blocks
     split (s, shortcut_blocks, others) b@(BasicBlock id [insn])
         | Just jd <- canShortcut ncgImpl insn,
           Just dest <- getJumpDestBlockId ncgImpl jd,
@@ -970,7 +974,7 @@ build_mapping ncgImpl (CmmProc info lbl live (ListGraph (head:blocks)))
     has_info l = mapMember l info
 
     -- build a mapping from BlockId to JumpDest for shorting branches
-    mapping = foldl add emptyUFM shortcut_blocks
+    mapping = foldl' add emptyUFM shortcut_blocks
     add ufm (id,dest) = addToUFM ufm id dest
 
 apply_mapping :: NcgImpl statics instr jumpDest
@@ -1212,15 +1216,15 @@ cmmExprNative referenceKind expr = do
         -- to use the register table, so we replace these registers
         -- with the corresponding labels:
         CmmReg (CmmGlobal EagerBlackholeInfo)
-          | arch == ArchPPC && not (gopt Opt_PIC dflags)
+          | arch == ArchPPC && not (positionIndependent dflags)
           -> cmmExprNative referenceKind $
              CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_EAGER_BLACKHOLE_info")))
         CmmReg (CmmGlobal GCEnter1)
-          | arch == ArchPPC && not (gopt Opt_PIC dflags)
+          | arch == ArchPPC && not (positionIndependent dflags)
           -> cmmExprNative referenceKind $
              CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_gc_enter_1")))
         CmmReg (CmmGlobal GCFun)
-          | arch == ArchPPC && not (gopt Opt_PIC dflags)
+          | arch == ArchPPC && not (positionIndependent dflags)
           -> cmmExprNative referenceKind $
              CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_gc_fun")))
 

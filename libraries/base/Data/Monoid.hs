@@ -1,9 +1,9 @@
-{-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE NoImplicitPrelude #-}
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveGeneric              #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
-{-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE NoImplicitPrelude          #-}
+{-# LANGUAGE PolyKinds                  #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE Trustworthy                #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -16,8 +16,43 @@
 -- Stability   :  experimental
 -- Portability :  portable
 --
--- A class for monoids (types with an associative binary operation that
--- has an identity) with various general-purpose instances.
+-- A type @a@ is a 'Monoid' if it provides an associative function ('<>')
+-- that lets you combine any two values of type @a@ into one, and a neutral
+-- element (`mempty`) such that
+--
+-- > a <> mempty == mempty <> a == a
+--
+-- A 'Monoid' is a 'Semigroup' with the added requirement of a neutral element.
+-- Thus any 'Monoid' is a 'Semigroup', but not the other way around.
+--
+-- ==== __Examples__
+--
+-- The 'Sum' monoid is defined by the numerical addition operator and `0` as neutral element:
+--
+-- >>> mempty :: Sum Int
+-- Sum 0
+-- >>> Sum 1 <> Sum 2 <> Sum 3 <> Sum 4 :: Sum Int
+-- Sum {getSum = 10}
+--
+-- We can combine multiple values in a list into a single value using the `mconcat` function.
+-- Note that we have to specify the type here since 'Int' is a monoid under several different
+-- operations:
+--
+-- >>> mconcat [1,2,3,4] :: Sum Int
+-- Sum {getSum = 10}
+-- >>> mconcat [] :: Sum Int
+-- Sum {getSum = 0}
+--
+-- Another valid monoid instance of 'Int' is 'Product' It is defined by multiplication
+-- and `1` as neutral element:
+--
+-- >>> Product 1 <> Product 2 <> Product 3 <> Product 4 :: Product Int
+-- Product {getProduct = 24}
+-- >>> mconcat [1,2,3,4] :: Product Int
+-- Product {getProduct = 24}
+-- >>> mconcat [] :: Product Int
+-- Product {getProduct = 1}
+--
 --
 -----------------------------------------------------------------------------
 
@@ -38,131 +73,25 @@ module Data.Monoid (
         First(..),
         Last(..),
         -- * 'Alternative' wrapper
-        Alt (..)
+        Alt(..),
+        -- * 'Applicative' wrapper
+        Ap(..)
   ) where
 
 -- Push down the module in the dependency hierarchy.
 import GHC.Base hiding (Any)
 import GHC.Enum
+import GHC.Generics
 import GHC.Num
 import GHC.Read
 import GHC.Show
-import GHC.Generics
 
-{-
--- just for testing
-import Data.Maybe
-import Test.QuickCheck
--- -}
+import Control.Monad.Fail (MonadFail)
 
-infixr 6 <>
-
--- | An infix synonym for 'mappend'.
---
--- @since 4.5.0.0
-(<>) :: Monoid m => m -> m -> m
-(<>) = mappend
-{-# INLINE (<>) #-}
-
--- Monoid instances.
-
--- | The dual of a 'Monoid', obtained by swapping the arguments of 'mappend'.
-newtype Dual a = Dual { getDual :: a }
-        deriving (Eq, Ord, Read, Show, Bounded, Generic, Generic1)
-
--- | @since 2.01
-instance Monoid a => Monoid (Dual a) where
-        mempty = Dual mempty
-        Dual x `mappend` Dual y = Dual (y `mappend` x)
-
--- | @since 4.8.0.0
-instance Functor Dual where
-    fmap     = coerce
-
--- | @since 4.8.0.0
-instance Applicative Dual where
-    pure     = Dual
-    (<*>)    = coerce
-
--- | @since 4.8.0.0
-instance Monad Dual where
-    m >>= k  = k (getDual m)
-
--- | The monoid of endomorphisms under composition.
-newtype Endo a = Endo { appEndo :: a -> a }
-               deriving (Generic)
-
--- | @since 2.01
-instance Monoid (Endo a) where
-        mempty = Endo id
-        Endo f `mappend` Endo g = Endo (f . g)
-
--- | Boolean monoid under conjunction ('&&').
-newtype All = All { getAll :: Bool }
-        deriving (Eq, Ord, Read, Show, Bounded, Generic)
-
--- | @since 2.01
-instance Monoid All where
-        mempty = All True
-        All x `mappend` All y = All (x && y)
-
--- | Boolean monoid under disjunction ('||').
-newtype Any = Any { getAny :: Bool }
-        deriving (Eq, Ord, Read, Show, Bounded, Generic)
-
--- | @since 2.01
-instance Monoid Any where
-        mempty = Any False
-        Any x `mappend` Any y = Any (x || y)
-
--- | Monoid under addition.
-newtype Sum a = Sum { getSum :: a }
-        deriving (Eq, Ord, Read, Show, Bounded, Generic, Generic1, Num)
-
--- | @since 2.01
-instance Num a => Monoid (Sum a) where
-        mempty = Sum 0
-        mappend = coerce ((+) :: a -> a -> a)
---        Sum x `mappend` Sum y = Sum (x + y)
-
--- | @since 4.8.0.0
-instance Functor Sum where
-    fmap     = coerce
-
--- | @since 4.8.0.0
-instance Applicative Sum where
-    pure     = Sum
-    (<*>)    = coerce
-
--- | @since 4.8.0.0
-instance Monad Sum where
-    m >>= k  = k (getSum m)
-
--- | Monoid under multiplication.
-newtype Product a = Product { getProduct :: a }
-        deriving (Eq, Ord, Read, Show, Bounded, Generic, Generic1, Num)
-
--- | @since 2.01
-instance Num a => Monoid (Product a) where
-        mempty = Product 1
-        mappend = coerce ((*) :: a -> a -> a)
---        Product x `mappend` Product y = Product (x * y)
-
--- | @since 4.8.0.0
-instance Functor Product where
-    fmap     = coerce
-
--- | @since 4.8.0.0
-instance Applicative Product where
-    pure     = Product
-    (<*>)    = coerce
-
--- | @since 4.8.0.0
-instance Monad Product where
-    m >>= k  = k (getProduct m)
+import Data.Semigroup.Internal
 
 -- $MaybeExamples
--- To implement @find@ or @findLast@ on any 'Foldable':
+-- To implement @find@ or @findLast@ on any 'Data.Foldable.Foldable':
 --
 -- @
 -- findLast :: Foldable t => (a -> Bool) -> t a -> Maybe a
@@ -171,20 +100,20 @@ instance Monad Product where
 --                                            else Last Nothing)
 -- @
 --
--- Much of Data.Map's interface can be implemented with
--- Data.Map.alter. Some of the rest can be implemented with a new
--- @alterA@ function and either 'First' or 'Last':
+-- Much of 'Data.Map.Lazy.Map's interface can be implemented with
+-- 'Data.Map.Lazy.alter'. Some of the rest can be implemented with a new
+-- 'Data.Map.Lazy.alterF' function and either 'First' or 'Last':
 --
--- > alterA :: (Applicative f, Ord k) =>
+-- > alterF :: (Functor f, Ord k) =>
 -- >           (Maybe a -> f (Maybe a)) -> k -> Map k a -> f (Map k a)
 -- >
--- > instance Monoid a => Applicative ((,) a)  -- from Control.Applicative
+-- > instance Monoid a => Functor ((,) a)  -- from Data.Functor
 --
 -- @
 -- insertLookupWithKey :: Ord k => (k -> v -> v -> v) -> k -> v
 --                     -> Map k v -> (Maybe v, Map k v)
 -- insertLookupWithKey combine key value =
---   Arrow.first getFirst . alterA doChange key
+--   Arrow.first getFirst . 'Data.Map.Lazy.alterF' doChange key
 --   where
 --   doChange Nothing = (First Nothing, Just value)
 --   doChange (Just oldValue) =
@@ -197,41 +126,121 @@ instance Monad Product where
 --
 -- @'First' a@ is isomorphic to @'Alt' 'Maybe' a@, but precedes it
 -- historically.
+--
+-- >>> getFirst (First (Just "hello") <> First Nothing <> First (Just "world"))
+-- Just "hello"
+--
+-- Use of this type is discouraged. Note the following equivalence:
+--
+-- > Data.Monoid.First x === Maybe (Data.Semigroup.First x)
+--
+-- In addition to being equivalent in the structural sense, the two
+-- also have 'Monoid' instances that behave the same. This type will
+-- be marked deprecated in GHC 8.8, and removed in GHC 8.10.
+-- Users are advised to use the variant from "Data.Semigroup" and wrap
+-- it in 'Maybe'.
 newtype First a = First { getFirst :: Maybe a }
-        deriving (Eq, Ord, Read, Show, Generic, Generic1,
-                  Functor, Applicative, Monad)
+        deriving ( Eq          -- ^ @since 2.01
+                 , Ord         -- ^ @since 2.01
+                 , Read        -- ^ @since 2.01
+                 , Show        -- ^ @since 2.01
+                 , Generic     -- ^ @since 4.7.0.0
+                 , Generic1    -- ^ @since 4.7.0.0
+                 , Functor     -- ^ @since 4.8.0.0
+                 , Applicative -- ^ @since 4.8.0.0
+                 , Monad       -- ^ @since 4.8.0.0
+                 )
+
+-- | @since 4.9.0.0
+instance Semigroup (First a) where
+        First Nothing <> b = b
+        a             <> _ = a
+        stimes = stimesIdempotentMonoid
 
 -- | @since 2.01
 instance Monoid (First a) where
         mempty = First Nothing
-        First Nothing `mappend` r = r
-        l `mappend` _             = l
 
 -- | Maybe monoid returning the rightmost non-Nothing value.
 --
 -- @'Last' a@ is isomorphic to @'Dual' ('First' a)@, and thus to
 -- @'Dual' ('Alt' 'Maybe' a)@
+--
+-- >>> getLast (Last (Just "hello") <> Last Nothing <> Last (Just "world"))
+-- Just "world"
+--
+-- Use of this type is discouraged. Note the following equivalence:
+--
+-- > Data.Monoid.Last x === Maybe (Data.Semigroup.Last x)
+--
+-- In addition to being equivalent in the structural sense, the two
+-- also have 'Monoid' instances that behave the same. This type will
+-- be marked deprecated in GHC 8.8, and removed in GHC 8.10.
+-- Users are advised to use the variant from "Data.Semigroup" and wrap
+-- it in 'Maybe'.
 newtype Last a = Last { getLast :: Maybe a }
-        deriving (Eq, Ord, Read, Show, Generic, Generic1,
-                  Functor, Applicative, Monad)
+        deriving ( Eq          -- ^ @since 2.01
+                 , Ord         -- ^ @since 2.01
+                 , Read        -- ^ @since 2.01
+                 , Show        -- ^ @since 2.01
+                 , Generic     -- ^ @since 4.7.0.0
+                 , Generic1    -- ^ @since 4.7.0.0
+                 , Functor     -- ^ @since 4.8.0.0
+                 , Applicative -- ^ @since 4.8.0.0
+                 , Monad       -- ^ @since 4.8.0.0
+                 )
+
+-- | @since 4.9.0.0
+instance Semigroup (Last a) where
+        a <> Last Nothing = a
+        _ <> b                   = b
+        stimes = stimesIdempotentMonoid
 
 -- | @since 2.01
 instance Monoid (Last a) where
         mempty = Last Nothing
-        l `mappend` Last Nothing = l
-        _ `mappend` r            = r
 
--- | Monoid under '<|>'.
+-- | This data type witnesses the lifting of a 'Monoid' into an
+-- 'Applicative' pointwise.
 --
--- @since 4.8.0.0
-newtype Alt f a = Alt {getAlt :: f a}
-  deriving (Generic, Generic1, Read, Show, Eq, Ord, Num, Enum,
-            Monad, MonadPlus, Applicative, Alternative, Functor)
+-- @since 4.12.0.0
+newtype Ap f a = Ap { getAp :: f a }
+        deriving ( Alternative -- ^ @since 4.12.0.0
+                 , Applicative -- ^ @since 4.12.0.0
+                 , Enum        -- ^ @since 4.12.0.0
+                 , Eq          -- ^ @since 4.12.0.0
+                 , Functor     -- ^ @since 4.12.0.0
+                 , Generic     -- ^ @since 4.12.0.0
+                 , Generic1    -- ^ @since 4.12.0.0
+                 , Monad       -- ^ @since 4.12.0.0
+                 , MonadFail   -- ^ @since 4.12.0.0
+                 , MonadPlus   -- ^ @since 4.12.0.0
+                 , Ord         -- ^ @since 4.12.0.0
+                 , Read        -- ^ @since 4.12.0.0
+                 , Show        -- ^ @since 4.12.0.0
+                 )
 
--- | @since 4.8.0.0
-instance Alternative f => Monoid (Alt f a) where
-        mempty = Alt empty
-        mappend = coerce ((<|>) :: f a -> f a -> f a)
+-- | @since 4.12.0.0
+instance (Applicative f, Semigroup a) => Semigroup (Ap f a) where
+        (Ap x) <> (Ap y) = Ap $ liftA2 (<>) x y
+
+-- | @since 4.12.0.0
+instance (Applicative f, Monoid a) => Monoid (Ap f a) where
+        mempty = Ap $ pure mempty
+
+-- | @since 4.12.0.0
+instance (Applicative f, Bounded a) => Bounded (Ap f a) where
+  minBound = pure minBound
+  maxBound = pure maxBound
+
+-- | @since 4.12.0.0
+instance (Applicative f, Num a) => Num (Ap f a) where
+  (+)         = liftA2 (+)
+  (*)         = liftA2 (*)
+  negate      = fmap negate
+  fromInteger = pure . fromInteger
+  abs         = fmap abs
+  signum      = fmap signum
 
 {-
 {--------------------------------------------------------------------
@@ -253,3 +262,6 @@ prop_mconcatLast x =
         where listLastToMaybe [] = Nothing
               listLastToMaybe lst = Just (last lst)
 -- -}
+
+-- $setup
+-- >>> import Prelude

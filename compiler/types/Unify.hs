@@ -26,15 +26,17 @@ module Unify (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Var
 import VarEnv
 import VarSet
-import Kind
 import Name( Name )
 import Type hiding ( getTvSubstEnv )
 import Coercion hiding ( getCvSubstEnv )
 import TyCon
 import TyCoRep hiding ( getTvSubstEnv, getCvSubstEnv )
+import FV( FV, fvVarSet, fvVarList )
 import Util
 import Pair
 import Outputable
@@ -42,9 +44,7 @@ import UniqFM
 import UniqSet
 
 import Control.Monad
-#if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
-#endif
 import Control.Applicative hiding ( empty )
 import qualified Control.Applicative
 
@@ -70,6 +70,34 @@ Unification is much tricker than you might think.
    where x is the template type variable.  Then we do not want to
    bind x to a/b!  This is a kind of occurs check.
    The necessary locals accumulate in the RnEnv2.
+
+Note [tcMatchTy vs tcMatchTyKi]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+This module offers two variants of matching: with kinds and without.
+The TyKi variant takes two types, of potentially different kinds,
+and matches them. Along the way, it necessarily also matches their
+kinds. The Ty variant instead assumes that the kinds are already
+eqType and so skips matching up the kinds.
+
+How do you choose between them?
+
+1. If you know that the kinds of the two types are eqType, use
+   the Ty variant. It is more efficient, as it does less work.
+
+2. If the kinds of variables in the template type might mention type families,
+   use the Ty variant (and do other work to make sure the kinds
+   work out). These pure unification functions do a straightforward
+   syntactic unification and do no complex reasoning about type
+   families. Note that the types of the variables in instances can indeed
+   mention type families, so instance lookup must use the Ty variant.
+
+   (Nothing goes terribly wrong -- no panics -- if there might be type
+   families in kinds in the TyKi variant. You just might get match
+   failure even though a reducing a type family would lead to success.)
+
+3. Otherwise, if you're sure that the variable kinds do not mention
+   type families and you're not already sure that the kind of the template
+   equals the kind of the target, then use the TyKi version.
 -}
 
 -- | @tcMatchTy t1 t2@ produces a substitution (over fvs(t1))
@@ -83,15 +111,18 @@ Unification is much tricker than you might think.
 -- by the match, because tcMatchTy (and similar functions) are
 -- always used on top-level types, so we can bind any of the
 -- free variables of the LHS.
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTy :: Type -> Type -> Maybe TCvSubst
 tcMatchTy ty1 ty2 = tcMatchTys [ty1] [ty2]
 
 -- | Like 'tcMatchTy', but allows the kinds of the types to differ,
 -- and thus matches them as well.
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTyKi :: Type -> Type -> Maybe TCvSubst
 tcMatchTyKi ty1 ty2 = tcMatchTyKis [ty1] [ty2]
 
 -- | This is similar to 'tcMatchTy', but extends a substitution
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTyX :: TCvSubst            -- ^ Substitution to extend
            -> Type                -- ^ Template
            -> Type                -- ^ Target
@@ -99,6 +130,7 @@ tcMatchTyX :: TCvSubst            -- ^ Substitution to extend
 tcMatchTyX subst ty1 ty2 = tcMatchTysX subst [ty1] [ty2]
 
 -- | Like 'tcMatchTy' but over a list of types.
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTys :: [Type]         -- ^ Template
            -> [Type]         -- ^ Target
            -> Maybe TCvSubst -- ^ One-shot; in principle the template
@@ -109,6 +141,7 @@ tcMatchTys tys1 tys2
     in_scope = mkInScopeSet (tyCoVarsOfTypes tys1 `unionVarSet` tyCoVarsOfTypes tys2)
 
 -- | Like 'tcMatchTyKi' but over a list of types.
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTyKis :: [Type]         -- ^ Template
              -> [Type]         -- ^ Target
              -> Maybe TCvSubst -- ^ One-shot substitution
@@ -118,6 +151,7 @@ tcMatchTyKis tys1 tys2
     in_scope = mkInScopeSet (tyCoVarsOfTypes tys1 `unionVarSet` tyCoVarsOfTypes tys2)
 
 -- | Like 'tcMatchTys', but extending a substitution
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTysX :: TCvSubst       -- ^ Substitution to extend
             -> [Type]         -- ^ Template
             -> [Type]         -- ^ Target
@@ -126,6 +160,7 @@ tcMatchTysX subst tys1 tys2
   = tc_match_tys_x False subst tys1 tys2
 
 -- | Like 'tcMatchTyKis', but extending a substitution
+-- See also Note [tcMatchTy vs tcMatchTyKi]
 tcMatchTyKisX :: TCvSubst        -- ^ Substitution to extend
               -> [Type]          -- ^ Template
               -> [Type]          -- ^ Target
@@ -394,7 +429,7 @@ tcUnifyTyKis bind_fn tys1 tys2
 type UnifyResult = UnifyResultM TCvSubst
 data UnifyResultM a = Unifiable a        -- the subst that unifies the types
                     | MaybeApart a       -- the subst has as much as we know
-                                         -- it must be part of an most general unifier
+                                         -- it must be part of a most general unifier
                                          -- See Note [The substitution in MaybeApart]
                     | SurelyApart
                     deriving Functor
@@ -463,6 +498,17 @@ tc_unify_tys :: (TyVar -> BindFlag)
              -> CvSubstEnv
              -> [Type] -> [Type]
              -> UnifyResultM (TvSubstEnv, CvSubstEnv)
+-- NB: It's tempting to ASSERT here that, if we're not matching kinds, then
+-- the kinds of the types should be the same. However, this doesn't work,
+-- as the types may be a dependent telescope, where later types have kinds
+-- that mention variables occurring earlier in the list of types. Here's an
+-- example (from typecheck/should_fail/T12709):
+--   template: [rep :: RuntimeRep,       a :: TYPE rep]
+--   target:   [LiftedRep :: RuntimeRep, Int :: TYPE LiftedRep]
+-- We can see that matching the first pair will make the kinds of the second
+-- pair equal. Yet, we still don't need a separate pass to unify the kinds
+-- of these types, so it's appropriate to use the Ty variant of unification.
+-- See also Note [tcMatchTy vs tcMatchTyKi].
 tc_unify_tys bind_fn unif inj_check match_kis rn_env tv_env cv_env tys1 tys2
   = initUM tv_env cv_env $
     do { when match_kis $
@@ -471,6 +517,7 @@ tc_unify_tys bind_fn unif inj_check match_kis rn_env tv_env cv_env tys1 tys2
        ; (,) <$> getTvSubstEnv <*> getCvSubstEnv }
   where
     env = UMEnv { um_bind_fun = bind_fn
+                , um_skols    = emptyVarSet
                 , um_unif     = unif
                 , um_inj_tf   = inj_check
                 , um_rn_env   = rn_env }
@@ -499,7 +546,7 @@ During unification we use a TvSubstEnv/CvSubstEnv pair that is
 Note [Finding the substitution fixpoint]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Finding the fixpoint of a non-idempotent substitution arising from a
-unification is harder than it looks, because of kinds.  Consider
+unification is much trickier than it looks, because of kinds.  Consider
    T k (H k (f:k)) ~ T * (g:*)
 If we unify, we get the substitution
    [ k -> *
@@ -514,41 +561,96 @@ If we don't do this, we may apply the substitution to something,
 and get an ill-formed type, i.e. one where typeKind will fail.
 This happened, for example, in Trac #9106.
 
-This is the reason for extending env with [f:k -> f:*], in the
-definition of env' in niFixTvSubst
+It gets worse.  In Trac #14164 we wanted to take the fixpoint of
+this substitution
+   [ xs_asV :-> F a_aY6 (z_aY7 :: a_aY6)
+                        (rest_aWF :: G a_aY6 (z_aY7 :: a_aY6))
+   , a_aY6  :-> a_aXQ ]
+
+We have to apply the substitution for a_aY6 two levels deep inside
+the invocation of F!  We don't have a function that recursively
+applies substitutions inside the kinds of variable occurrences (and
+probably rightly so).
+
+So, we work as follows:
+
+ 1. Start with the current substitution (which we are
+    trying to fixpoint
+       [ xs :-> F a (z :: a) (rest :: G a (z :: a))
+       , a  :-> b ]
+
+ 2. Take all the free vars of the range of the substitution:
+       {a, z, rest, b}
+    NB: the free variable finder closes over
+    the kinds of variable occurrences
+
+ 3. If none are in the domain of the substitution, stop.
+    We have found a fixpoint.
+
+ 4. Remove the variables that are bound by the substitution, leaving
+       {z, rest, b}
+
+ 5. Do a topo-sort to put them in dependency order:
+       [ b :: *, z :: a, rest :: G a z ]
+
+ 6. Apply the substitution left-to-right to the kinds of these
+    tyvars, extending it each time with a new binding, so we
+    finish up with
+       [ xs   :-> ..as before..
+       , a    :-> b
+       , b    :-> b    :: *
+       , z    :-> z    :: b
+       , rest :-> rest :: G b (z :: b) ]
+    Note that rest now has the right kind
+
+ 7. Apply this extended substitution (once) to the range of
+    the /original/ substitution.  (Note that we do the
+    extended substitution would go on forever if you tried
+    to find its fixpoint, because it maps z to z.)
+
+ 8. And go back to step 1
+
+In Step 6 we use the free vars from Step 2 as the initial
+in-scope set, because all of those variables appear in the
+range of the substitution, so they must all be in the in-scope
+set.  But NB that the type substitution engine does not look up
+variables in the in-scope set; it is used only to ensure no
+shadowing.
 -}
 
 niFixTCvSubst :: TvSubstEnv -> TCvSubst
 -- Find the idempotent fixed point of the non-idempotent substitution
--- See Note [Finding the substitution fixpoint]
+-- This is surprisingly tricky:
+--   see Note [Finding the substitution fixpoint]
 -- ToDo: use laziness instead of iteration?
-niFixTCvSubst tenv = f tenv
+niFixTCvSubst tenv
+  | not_fixpoint = niFixTCvSubst (mapVarEnv (substTy subst) tenv)
+  | otherwise    = subst
   where
-    f tenv
-        | not_fixpoint = f (mapVarEnv (substTy subst') tenv)
-        | otherwise    = subst
-        where
-          not_fixpoint  = anyVarSet in_domain range_tvs
-          in_domain tv  = tv `elemVarEnv` tenv
+    range_fvs :: FV
+    range_fvs = tyCoFVsOfTypes (nonDetEltsUFM tenv)
+          -- It's OK to use nonDetEltsUFM here because the
+          -- order of range_fvs, range_tvs is immaterial
 
-          range_tvs     = nonDetFoldUFM (unionVarSet . tyCoVarsOfType) emptyVarSet tenv
-                          -- It's OK to use nonDetFoldUFM here because we
-                          -- forget the order immediately by creating a set
-          subst         = mkTvSubst (mkInScopeSet range_tvs) tenv
+    range_tvs :: [TyVar]
+    range_tvs = fvVarList range_fvs
 
-             -- env' extends env by replacing any free type with
-             -- that same tyvar with a substituted kind
-             -- See note [Finding the substitution fixpoint]
-          tenv'  = extendVarEnvList tenv [ (rtv, mkTyVarTy $
-                                                 setTyVarKind rtv $
-                                                 substTy subst $
-                                                 tyVarKind rtv)
-                                         | rtv <- nonDetEltsUniqSet range_tvs
-                                         -- It's OK to use nonDetEltsUniqSet here
-                                         -- because we forget the order
-                                         -- immediatedly by putting it in VarEnv
-                                         , not (in_domain rtv) ]
-          subst' = mkTvSubst (mkInScopeSet range_tvs) tenv'
+    not_fixpoint  = any in_domain range_tvs
+    in_domain tv  = tv `elemVarEnv` tenv
+
+    free_tvs = toposortTyVars (filterOut in_domain range_tvs)
+
+    -- See Note [Finding the substitution fixpoint], Step 6
+    init_in_scope = mkInScopeSet (fvVarSet range_fvs)
+    subst = foldl' add_free_tv
+                  (mkTvSubst init_in_scope tenv)
+                  free_tvs
+
+    add_free_tv :: TCvSubst -> TyVar -> TCvSubst
+    add_free_tv subst tv
+      = extendTvSubst subst tv (mkTyVarTy tv')
+     where
+        tv' = updateTyVarKind (substTy subst) tv
 
 niSubstTvSet :: TvSubstEnv -> TyCoVarSet -> TyCoVarSet
 -- Apply the non-idempotent substitution to a set of type variables,
@@ -711,7 +813,7 @@ Consider this:
    type instance Foo MkG = False
 
 We would like that to be accepted. For that to work, we need to introduce
-a coercion variable on the left an then use it on the right. Accordingly,
+a coercion variable on the left and then use it on the right. Accordingly,
 at use sites of Foo, we need to be able to use matching to figure out the
 value for the coercion. (See the desugared version:
 
@@ -771,6 +873,41 @@ dependent/should_compile/KindEqualities2, we see, for example the
 constraint Num (Int |> (blah ; sym blah)).  We naturally want to find
 a dictionary for that constraint, which requires dealing with
 coercions in this manner.
+
+Note [Matching in the presence of casts]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When matching, it is crucial that no variables from the template
+end up in the range of the matching substitution (obviously!).
+When unifying, that's not a constraint; instead we take the fixpoint
+of the substitution at the end.
+
+So what should we do with this, when matching?
+   unify_ty (tmpl |> co) tgt kco
+
+Previously, wrongly, we pushed 'co' in the (horrid) accumulating
+'kco' argument like this:
+   unify_ty (tmpl |> co) tgt kco
+     = unify_ty tmpl tgt (kco ; co)
+
+But that is obviously wrong because 'co' (from the template) ends
+up in 'kco', which in turn ends up in the range of the substitution.
+
+This all came up in Trac #13910.  Because we match tycon arguments
+left-to-right, the ambient substitution will already have a matching
+substitution for any kinds; so there is an easy fix: just apply
+the substitution-so-far to the coercion from the LHS.
+
+Note that
+
+* When matching, the first arg of unify_ty is always the template;
+  we never swap round.
+
+* The above argument is distressingly indirect. We seek a
+  better way.
+
+* One better way is to ensure that type patterns (the template
+  in the matching process) have no casts.  See Trac #14119.
+
 -}
 
 -------------- unify_ty: the main workhorse -----------
@@ -780,7 +917,7 @@ type AmIUnifying = Bool   -- True  <=> Unifying
 
 unify_ty :: UMEnv
          -> Type -> Type  -- Types to be unified and a co
-         -> Coercion      -- A coercion between their kinds
+         -> CoercionN     -- A coercion between their kinds
                           -- See Note [Kind coercions in Unify]
          -> UM ()
 -- See Note [Specification of unification]
@@ -790,7 +927,12 @@ unify_ty env ty1 ty2 kco
     -- TODO: More commentary needed here
   | Just ty1' <- tcView ty1   = unify_ty env ty1' ty2 kco
   | Just ty2' <- tcView ty2   = unify_ty env ty1 ty2' kco
-  | CastTy ty1' co <- ty1     = unify_ty env ty1' ty2 (co `mkTransCo` kco)
+  | CastTy ty1' co <- ty1     = if um_unif env
+                                then unify_ty env ty1' ty2 (co `mkTransCo` kco)
+                                else -- See Note [Matching in the presence of casts]
+                                     do { subst <- getSubst env
+                                        ; let co' = substCo subst co
+                                        ; unify_ty env ty1' ty2 (co' `mkTransCo` kco) }
   | CastTy ty2' co <- ty2     = unify_ty env ty1 ty2' (kco `mkTransCo` mkSymCo co)
 
 unify_ty env (TyVarTy tv1) ty2 kco
@@ -802,11 +944,11 @@ unify_ty env ty1 (TyVarTy tv2) kco
 unify_ty env ty1 ty2 _kco
   | Just (tc1, tys1) <- mb_tc_app1
   , Just (tc2, tys2) <- mb_tc_app2
-  , tc1 == tc2 || (tcIsStarKind ty1 && tcIsStarKind ty2)
+  , tc1 == tc2 || (tcIsLiftedTypeKind ty1 && tcIsLiftedTypeKind ty2)
   = if isInjectiveTyCon tc1 Nominal
     then unify_tys env tys1 tys2
     else do { let inj | isTypeFamilyTyCon tc1
-                      = case familyTyConInjectivityInfo tc1 of
+                      = case tyConInjectivityInfo tc1 of
                                NotInjective -> repeat False
                                Injective bs -> bs
                       | otherwise
@@ -853,8 +995,8 @@ unify_ty env ty1 (AppTy ty2a ty2b) _kco
 
 unify_ty _ (LitTy x) (LitTy y) _kco | x == y = return ()
 
-unify_ty env (ForAllTy (TvBndr tv1 _) ty1) (ForAllTy (TvBndr tv2 _) ty2) kco
-  = do { unify_ty env (tyVarKind tv1) (tyVarKind tv2) (mkNomReflCo liftedTypeKind)
+unify_ty env (ForAllTy (Bndr tv1 _) ty1) (ForAllTy (Bndr tv2 _) ty2) kco
+  = do { unify_ty env (varType tv1) (varType tv2) (mkNomReflCo liftedTypeKind)
        ; let env' = umRnBndr2 env tv1 tv2
        ; unify_ty env' ty1 ty2 kco }
 
@@ -865,9 +1007,9 @@ unify_ty env (CoercionTy co1) (CoercionTy co2) kco
            CoVarCo cv
              | not (um_unif env)
              , not (cv `elemVarEnv` c_subst)
-             , BindMe <- tvBindFlagL env cv
-             -> do { checkRnEnvRCo env co2
-                   ; let (co_l, co_r) = decomposeFunCo kco
+             , BindMe <- tvBindFlag env cv
+             -> do { checkRnEnv env (tyCoVarsOfCo co2)
+                   ; let (co_l, co_r) = decomposeFunCo Nominal kco
                       -- cv :: t1 ~ t2
                       -- co2 :: s1 ~ s2
                       -- co_l :: t1 ~ s1
@@ -906,27 +1048,30 @@ unify_tys env orig_xs orig_ys
 
 ---------------------------------
 uVar :: UMEnv
-     -> TyVar           -- Variable to be unified
+     -> InTyVar         -- Variable to be unified
      -> Type            -- with this Type
      -> Coercion        -- :: kind tv ~N kind ty
      -> UM ()
 
 uVar env tv1 ty kco
- = do { -- Check to see whether tv1 is refined by the substitution
-        subst <- getTvSubstEnv
-      ; case (lookupVarEnv subst tv1) of
-          Just ty' | um_unif env                 -- Unifying, so
-                   -> unify_ty env ty' ty kco   -- call back into unify
+ = do { -- Apply the ambient renaming
+        let tv1' = umRnOccL env tv1
+
+        -- Check to see whether tv1 is refined by the substitution
+      ; subst <- getTvSubstEnv
+      ; case (lookupVarEnv subst tv1') of
+          Just ty' | um_unif env                -- Unifying, so call
+                   -> unify_ty env ty' ty kco   -- back into unify
                    | otherwise
                    -> -- Matching, we don't want to just recur here.
                       -- this is because the range of the subst is the target
                       -- type, not the template type. So, just check for
                       -- normal type equality.
                       guard ((ty' `mkCastTy` kco) `eqType` ty)
-          Nothing  -> uUnrefined env tv1 ty ty kco } -- No, continue
+          Nothing  -> uUnrefined env tv1' ty ty kco } -- No, continue
 
 uUnrefined :: UMEnv
-           -> TyVar             -- variable to be unified
+           -> OutTyVar          -- variable to be unified
            -> Type              -- with this Type
            -> Type              -- (version w/ expanded synonyms)
            -> Coercion          -- :: kind tv ~N kind ty
@@ -934,36 +1079,35 @@ uUnrefined :: UMEnv
 
 -- We know that tv1 isn't refined
 
-uUnrefined env tv1 ty2 ty2' kco
+uUnrefined env tv1' ty2 ty2' kco
   | Just ty2'' <- coreView ty2'
-  = uUnrefined env tv1 ty2 ty2'' kco    -- Unwrap synonyms
+  = uUnrefined env tv1' ty2 ty2'' kco    -- Unwrap synonyms
                 -- This is essential, in case we have
                 --      type Foo a = a
                 -- and then unify a ~ Foo a
 
   | TyVarTy tv2 <- ty2'
-  = do { let tv1' = umRnOccL env tv1
-             tv2' = umRnOccR env tv2
+  = do { let tv2' = umRnOccR env tv2
+       ; unless (tv1' == tv2' && um_unif env) $ do
+           -- If we are unifying a ~ a, just return immediately
+           -- Do not extend the substitution
            -- See Note [Self-substitution when matching]
-       ; when (tv1' /= tv2' || not (um_unif env)) $ do
-       { subst <- getTvSubstEnv
-          -- Check to see whether tv2 is refined
-       ; case lookupVarEnv subst tv2 of
-         {  Just ty' | um_unif env -> uUnrefined env tv1 ty' ty' kco
-         ;  _                      -> do
-       {   -- So both are unrefined
 
-           -- And then bind one or the other,
-           -- depending on which is bindable
-       ; let b1  = tvBindFlagL env tv1
-             b2  = tvBindFlagR env tv2
-             ty1 = mkTyVarTy tv1
+          -- Check to see whether tv2 is refined
+       { subst <- getTvSubstEnv
+       ; case lookupVarEnv subst tv2 of
+         {  Just ty' | um_unif env -> uUnrefined env tv1' ty' ty' kco
+         ;  _ ->
+
+    do {   -- So both are unrefined
+           -- Bind one or the other, depending on which is bindable
+       ; let b1  = tvBindFlag env tv1'
+             b2  = tvBindFlag env tv2'
+             ty1 = mkTyVarTy tv1'
        ; case (b1, b2) of
-           (BindMe, _) -> do { checkRnEnvR env ty2 -- make sure ty2 is not a local
-                             ; extendTvEnv tv1 (ty2 `mkCastTy` mkSymCo kco) }
+           (BindMe, _) -> bindTv env tv1' (ty2 `mkCastTy` mkSymCo kco)
            (_, BindMe) | um_unif env
-                       -> do { checkRnEnvL env ty1 -- ditto for ty1
-                             ; extendTvEnv tv2 (ty1 `mkCastTy` kco) }
+                       -> bindTv (umSwapRn env) tv2 (ty1 `mkCastTy` kco)
 
            _ | tv1' == tv2' -> return ()
              -- How could this happen? If we're only matching and if
@@ -972,25 +1116,37 @@ uUnrefined env tv1 ty2 ty2' kco
            _ -> maybeApart -- See Note [Unification with skolems]
   }}}}
 
-uUnrefined env tv1 ty2 ty2' kco -- ty2 is not a type variable
-  = do { occurs <- elemNiSubstSet tv1 (tyCoVarsOfType ty2')
-       ; if um_unif env && occurs  -- See Note [Self-substitution when matching]
-         then maybeApart       -- Occurs check, see Note [Fine-grained unification]
-         else do bindTv env tv1 (ty2 `mkCastTy` mkSymCo kco) }
-            -- Bind tyvar to the synonym if poss
+uUnrefined env tv1' ty2 _ kco -- ty2 is not a type variable
+  = case tvBindFlag env tv1' of
+      Skolem -> maybeApart  -- See Note [Unification with skolems]
+      BindMe -> bindTv env tv1' (ty2 `mkCastTy` mkSymCo kco)
 
-elemNiSubstSet :: TyVar -> TyCoVarSet -> UM Bool
-elemNiSubstSet v set
+bindTv :: UMEnv -> OutTyVar -> Type -> UM ()
+-- OK, so we want to extend the substitution with tv := ty
+-- But first, we must do a couple of checks
+bindTv env tv1 ty2
+  = do  { let free_tvs2 = tyCoVarsOfType ty2
+
+        -- Make sure tys mentions no local variables
+        -- E.g.  (forall a. b) ~ (forall a. [a])
+        -- We should not unify b := [a]!
+        ; checkRnEnv env free_tvs2
+
+        -- Occurs check, see Note [Fine-grained unification]
+        -- Make sure you include 'kco' (which ty2 does) Trac #14846
+        ; occurs <- occursCheck env tv1 free_tvs2
+
+        ; if occurs then maybeApart
+                    else extendTvEnv tv1 ty2 }
+
+occursCheck :: UMEnv -> TyVar -> VarSet -> UM Bool
+occursCheck env tv free_tvs
+  | um_unif env
   = do { tsubst <- getTvSubstEnv
-       ; return $ v `elemVarSet` niSubstTvSet tsubst set }
+       ; return (tv `elemVarSet` niSubstTvSet tsubst free_tvs) }
 
-bindTv :: UMEnv -> TyVar -> Type -> UM ()
-bindTv env tv ty    -- ty is not a variable
-  = do  { checkRnEnvR env ty -- make sure ty mentions no local variables
-        ; case tvBindFlagL env tv of
-            Skolem -> maybeApart  -- See Note [Unification with skolems]
-            BindMe -> extendTvEnv tv ty
-        }
+  | otherwise      -- Matching; no occurs check
+  = return False   -- See Note [Self-substitution when matching]
 
 {-
 %************************************************************************
@@ -1015,12 +1171,27 @@ data BindFlag
 ************************************************************************
 -}
 
-data UMEnv = UMEnv { um_bind_fun :: TyVar -> BindFlag
-                                       -- User-supplied BindFlag function
-                   , um_unif     :: AmIUnifying
-                   , um_inj_tf   :: Bool         -- Checking for injectivity?
-                          -- See (end of) Note [Specification of unification]
-                   , um_rn_env   :: RnEnv2 }
+data UMEnv
+  = UMEnv { um_unif :: AmIUnifying
+
+          , um_inj_tf :: Bool
+            -- Checking for injectivity?
+            -- See (end of) Note [Specification of unification]
+
+          , um_rn_env :: RnEnv2
+            -- Renaming InTyVars to OutTyVars; this eliminates
+            -- shadowing, and lines up matching foralls on the left
+            -- and right
+
+          , um_skols :: TyVarSet
+            -- OutTyVars bound by a forall in this unification;
+            -- Do not bind these in the substitution!
+            -- See the function tvBindFlag
+
+          , um_bind_fun :: TyVar -> BindFlag
+            -- User-supplied BindFlag function,
+            -- for variables not in um_skols
+          }
 
 data UMState = UMState
                    { um_tv_env   :: TvSubstEnv
@@ -1036,7 +1207,7 @@ instance Applicative UM where
       (<*>)  = ap
 
 instance Monad UM where
-  fail _   = UM (\_ -> SurelyApart) -- failed pattern match
+  fail     = MonadFail.fail
   m >>= k  = UM (\state ->
                   do { (state', v) <- unUM m state
                      ; unUM (k v) state' })
@@ -1050,10 +1221,8 @@ instance Alternative UM where
 
 instance MonadPlus UM
 
-#if __GLASGOW_HASKELL__ > 710
 instance MonadFail.MonadFail UM where
     fail _   = UM (\_ -> SurelyApart) -- failed pattern match
-#endif
 
 initUM :: TvSubstEnv  -- subst to extend
        -> CvSubstEnv
@@ -1067,21 +1236,22 @@ initUM subst_env cv_subst_env um
     state = UMState { um_tv_env = subst_env
                     , um_cv_env = cv_subst_env }
 
-tvBindFlagL :: UMEnv -> TyVar -> BindFlag
-tvBindFlagL env tv
-  | inRnEnvL (um_rn_env env) tv = Skolem
-  | otherwise                   = um_bind_fun env tv
-
-tvBindFlagR :: UMEnv -> TyVar -> BindFlag
-tvBindFlagR env tv
-  | inRnEnvR (um_rn_env env) tv = Skolem
-  | otherwise                   = um_bind_fun env tv
+tvBindFlag :: UMEnv -> OutTyVar -> BindFlag
+tvBindFlag env tv
+  | tv `elemVarSet` um_skols env = Skolem
+  | otherwise                    = um_bind_fun env tv
 
 getTvSubstEnv :: UM TvSubstEnv
 getTvSubstEnv = UM $ \state -> Unifiable (state, um_tv_env state)
 
 getCvSubstEnv :: UM CvSubstEnv
 getCvSubstEnv = UM $ \state -> Unifiable (state, um_cv_env state)
+
+getSubst :: UMEnv -> UM TCvSubst
+getSubst env = do { tv_env <- getTvSubstEnv
+                  ; cv_env <- getCvSubstEnv
+                  ; let in_scope = rnInScopeSet (um_rn_env env)
+                  ; return (mkTCvSubst in_scope (tv_env, cv_env)) }
 
 extendTvEnv :: TyVar -> Type -> UM ()
 extendTvEnv tv ty = UM $ \state ->
@@ -1093,17 +1263,22 @@ extendCvEnv cv co = UM $ \state ->
 
 umRnBndr2 :: UMEnv -> TyCoVar -> TyCoVar -> UMEnv
 umRnBndr2 env v1 v2
-  = env { um_rn_env = rnBndr2 (um_rn_env env) v1 v2 }
+  = env { um_rn_env = rn_env', um_skols = um_skols env `extendVarSet` v' }
+  where
+    (rn_env', v') = rnBndr2_var (um_rn_env env) v1 v2
 
-checkRnEnv :: (RnEnv2 -> VarEnv Var) -> UMEnv -> VarSet -> UM ()
-checkRnEnv get_set env varset = UM $ \ state ->
-  let env_vars = get_set (um_rn_env env) in
-  if isEmptyVarEnv env_vars || (getUniqSet varset `disjointVarEnv` env_vars)
-     -- NB: That isEmptyVarSet is a critical optimization; it
-     -- means we don't have to calculate the free vars of
-     -- the type, often saving quite a bit of allocation.
-  then Unifiable  (state, ())
-  else MaybeApart (state, ())
+checkRnEnv :: UMEnv -> VarSet -> UM ()
+checkRnEnv env varset
+  | isEmptyVarSet skol_vars           = return ()
+  | varset `disjointVarSet` skol_vars = return ()
+  | otherwise                         = maybeApart
+               -- ToDo: why MaybeApart?
+               -- I think SurelyApart would be right
+  where
+    skol_vars = um_skols env
+    -- NB: That isEmptyVarSet guard is a critical optimization;
+    -- it means we don't have to calculate the free vars of
+    -- the type, often saving quite a bit of allocation.
 
 -- | Converts any SurelyApart to a MaybeApart
 don'tBeSoSure :: UM () -> UM ()
@@ -1111,15 +1286,6 @@ don'tBeSoSure um = UM $ \ state ->
   case unUM um state of
     SurelyApart -> MaybeApart (state, ())
     other       -> other
-
-checkRnEnvR :: UMEnv -> Type -> UM ()
-checkRnEnvR env ty = checkRnEnv rnEnvR env (tyCoVarsOfType ty)
-
-checkRnEnvL :: UMEnv -> Type -> UM ()
-checkRnEnvL env ty = checkRnEnv rnEnvL env (tyCoVarsOfType ty)
-
-checkRnEnvRCo :: UMEnv -> Coercion -> UM ()
-checkRnEnvRCo env co = checkRnEnv rnEnvR env (tyCoVarsOfCo co)
 
 umRnOccL :: UMEnv -> TyVar -> TyVar
 umRnOccL env v = rnOccL (um_rn_env env) v
@@ -1152,7 +1318,7 @@ data MatchEnv = ME { me_tmpls :: TyVarSet
                    , me_env   :: RnEnv2 }
 
 -- | 'liftCoMatch' is sort of inverse to 'liftCoSubst'.  In particular, if
---   @liftCoMatch vars ty co == Just s@, then @listCoSubst s ty == co@,
+--   @liftCoMatch vars ty co == Just s@, then @liftCoSubst s ty == co@,
 --   where @==@ there means that the result of 'liftCoSubst' has the same
 --   type as the original co; but may be different under the hood.
 --   That is, it matches a type against a coercion of the same
@@ -1217,10 +1383,13 @@ ty_co_match menv subst ty co lkco rkco
 
 ty_co_match menv subst ty co lkco rkco
   | CastTy ty' co' <- ty
-  = ty_co_match menv subst ty' co (co' `mkTransCo` lkco) (co' `mkTransCo` rkco)
-
-  | CoherenceCo co1 co2 <- co
-  = ty_co_match menv subst ty co1 (lkco `mkTransCo` mkSymCo co2) rkco
+     -- See Note [Matching in the presence of casts]
+  = let empty_subst  = mkEmptyTCvSubst (rnInScopeSet (me_env menv))
+        substed_co_l = substCo (liftEnvSubstLeft empty_subst subst)  co'
+        substed_co_r = substCo (liftEnvSubstRight empty_subst subst) co'
+    in
+    ty_co_match menv subst ty' co (substed_co_l `mkTransCo` lkco)
+                                  (substed_co_r `mkTransCo` rkco)
 
   | SymCo co' <- co
   = swapLiftCoEnv <$> ty_co_match menv (swapLiftCoEnv subst) ty co' rkco lkco
@@ -1236,7 +1405,7 @@ ty_co_match menv subst (TyVarTy tv1) co lkco rkco
   = if any (inRnEnvR rn_env) (tyCoVarsOfCoList co)
     then Nothing      -- occurs check failed
     else Just $ extendVarEnv subst tv1' $
-                castCoercionKind co (mkSymCo lkco) (mkSymCo rkco)
+                castCoercionKindI co (mkSymCo lkco) (mkSymCo rkco)
 
   | otherwise
   = Nothing
@@ -1269,9 +1438,10 @@ ty_co_match menv subst (FunTy ty1 ty2) co _lkco _rkco
   = let Pair lkcos rkcos = traverse (fmap mkNomReflCo . coercionKind) [co1,co2]
     in ty_co_match_args menv subst [ty1, ty2] [co1, co2] lkcos rkcos
 
-ty_co_match menv subst (ForAllTy (TvBndr tv1 _) ty1)
+ty_co_match menv subst (ForAllTy (Bndr tv1 _) ty1)
                        (ForAllCo tv2 kind_co2 co2)
                        lkco rkco
+  | isTyVar tv1 && isTyVar tv2
   = do { subst1 <- ty_co_match menv subst (tyVarKind tv1) kind_co2
                                ki_ki_co ki_ki_co
        ; let rn_env0 = me_env menv
@@ -1281,8 +1451,46 @@ ty_co_match menv subst (ForAllTy (TvBndr tv1 _) ty1)
   where
     ki_ki_co = mkNomReflCo liftedTypeKind
 
+-- ty_co_match menv subst (ForAllTy (Bndr cv1 _) ty1)
+--                        (ForAllCo cv2 kind_co2 co2)
+--                        lkco rkco
+--   | isCoVar cv1 && isCoVar cv2
+--   We seems not to have enough information for this case
+--   1. Given:
+--        cv1      :: (s1 :: k1) ~r (s2 :: k2)
+--        kind_co2 :: (s1' ~ s2') ~N (t1 ~ t2)
+--        eta1      = mkNthCo role 2 (downgradeRole r Nominal kind_co2)
+--                 :: s1' ~ t1
+--        eta2      = mkNthCo role 3 (downgradeRole r Nominal kind_co2)
+--                 :: s2' ~ t2
+--      Wanted:
+--        subst1 <- ty_co_match menv subst  s1 eta1 kco1 kco2
+--        subst2 <- ty_co_match menv subst1 s2 eta2 kco3 kco4
+--      Question: How do we get kcoi?
+--   2. Given:
+--        lkco :: <*>    -- See Note [Weird typing rule for ForAllTy] in Type
+--        rkco :: <*>
+--      Wanted:
+--        ty_co_match menv' subst2 ty1 co2 lkco' rkco'
+--      Question: How do we get lkco' and rkco'?
+
 ty_co_match _ subst (CoercionTy {}) _ _ _
   = Just subst -- don't inspect coercions
+
+ty_co_match menv subst ty (GRefl r t (MCo co)) lkco rkco
+  =  ty_co_match menv subst ty (GRefl r t MRefl) lkco (rkco `mkTransCo` mkSymCo co)
+
+ty_co_match menv subst ty co1 lkco rkco
+  | Just (CastTy t co, r) <- isReflCo_maybe co1
+  -- In @pushRefl@, pushing reflexive coercion inside CastTy will give us
+  -- t |> co ~ t ; <t> ; t ~ t |> co
+  -- But transitive coercions are not helpful. Therefore we deal
+  -- with it here: we do recursion on the smaller reflexive coercion,
+  -- while propagating the correct kind coercions.
+  = let kco' = mkSymCo co
+    in ty_co_match menv subst ty (mkReflCo r t) (lkco `mkTransCo` kco')
+                                                (rkco `mkTransCo` kco')
+
 
 ty_co_match menv subst ty co lkco rkco
   | Just co' <- pushRefl co = ty_co_match menv subst ty co' lkco rkco
@@ -1328,17 +1536,18 @@ ty_co_match_args menv subst (ty:tys) (arg:args) (lkco:lkcos) (rkco:rkcos)
 ty_co_match_args _    _     _        _          _ _ = Nothing
 
 pushRefl :: Coercion -> Maybe Coercion
-pushRefl (Refl Nominal (AppTy ty1 ty2))
-  = Just (AppCo (Refl Nominal ty1) (mkNomReflCo ty2))
-pushRefl (Refl r (FunTy ty1 ty2))
-  | Just rep1 <- getRuntimeRep_maybe ty1
-  , Just rep2 <- getRuntimeRep_maybe ty2
-  = Just (TyConAppCo r funTyCon [ mkReflCo r rep1, mkReflCo r rep2
-                                , mkReflCo r ty1,  mkReflCo r ty2 ])
-pushRefl (Refl r (TyConApp tc tys))
-  = Just (TyConAppCo r tc (zipWith mkReflCo (tyConRolesX r tc) tys))
-pushRefl (Refl r (ForAllTy (TvBndr tv _) ty))
-  = Just (mkHomoForAllCos_NoRefl [tv] (Refl r ty))
+pushRefl co =
+  case (isReflCo_maybe co) of
+    Just (AppTy ty1 ty2, Nominal)
+      -> Just (AppCo (mkReflCo Nominal ty1) (mkNomReflCo ty2))
+    Just (FunTy ty1 ty2, r)
+      | Just rep1 <- getRuntimeRep_maybe ty1
+      , Just rep2 <- getRuntimeRep_maybe ty2
+      ->  Just (TyConAppCo r funTyCon [ mkReflCo r rep1, mkReflCo r rep2
+                                       , mkReflCo r ty1,  mkReflCo r ty2 ])
+    Just (TyConApp tc tys, r)
+      -> Just (TyConAppCo r tc (zipWith mkReflCo (tyConRolesX r tc) tys))
+    Just (ForAllTy (Bndr tv _) ty, r)
+      -> Just (ForAllCo tv (mkNomReflCo (varType tv)) (mkReflCo r ty))
     -- NB: NoRefl variant. Otherwise, we get a loop!
-pushRefl (Refl r (CastTy ty co))  = Just (castCoercionKind (Refl r ty) co co)
-pushRefl _                        = Nothing
+    _ -> Nothing

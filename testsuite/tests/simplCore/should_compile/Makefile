@@ -2,11 +2,20 @@ TOP=../../..
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
+T14978:
+	$(RM) -f T14978.o T14978.hi
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T14978.hs -dsuppress-coercions | grep 'foo'
+        # Expecting the defn of 'foo' to apply Goof to an unboxed coercion
+
 T13468:
 	$(RM) -f T13468.o T13468.hi
 	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T13468.hs | grep 'Error'
         # Expecting no output from the grep, hence "-"
         # If the case branch is not eliminated, we get a patError
+
+T3234:
+	$(RM) -f T3234.o T3234.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl-stats T3234.hs | grep 'fold/build'
 
 T3990:
 	$(RM) -f T3990.o T3990.hi
@@ -183,7 +192,7 @@ T5996:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c T5996.hs -ddump-simpl -dsuppress-uniques -dsuppress-all | grep y2
 
 T10083:
-	$(RM) -f T10083.o T10083.hi T10083.hi-boot T10083a.o T10083a.hi 
+	$(RM) -f T10083.o T10083.hi T10083.hi-boot T10083a.o T10083a.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083.hs-boot
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083a.hs
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T10083.hs
@@ -205,8 +214,8 @@ T12877:
 T13025:
 	$(RM) -f T13025.o T13025.hi T13025a.o T13025a.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025a.hs
-	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c HEq_sc
-	# No lines should match 'HEq_sc' so wc should output zeros
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13025.hs -ddump-simpl | grep -c heq_sel
+	# No lines should match 'heq_sel' so wc should output zeros
 
 .PHONY: str-rules
 str-rules:
@@ -230,3 +239,15 @@ T11272:
 .PHONY: T12600
 T12600:
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O -ddump-prep -dsuppress-all -dsuppress-uniques -dno-suppress-type-signatures -dppr-cols=200 T12600.hs | grep "wfoo" | head -n 1
+
+# We don't expect to case match on any literal numbers other than
+# 0 or 1. See T14140.hs for an explanation.
+T14140:
+	$(RM) -f T14140.o T14140.hi
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T14140.hs | grep '[2-9]# *->'
+# Expecting no output from the grep, hence "-"
+
+T15631:
+	$(RM) -f T15631.o T15631.hi
+	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl -dsuppress-uniques T15631.hs | grep 'case'
+# Expecting one fewwer case expressions after fixing Trac #15631

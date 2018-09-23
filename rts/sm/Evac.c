@@ -28,10 +28,6 @@
 #include "CNF.h"
 #include "Scav.h"
 
-#if defined(PROF_SPIN) && defined(THREADED_RTS) && defined(PARALLEL_GC)
-StgWord64 whitehole_spin = 0;
-#endif
-
 #if defined(THREADED_RTS) && !defined(PARALLEL_GC)
 #define evacuate(p) evacuate1(p)
 #define evacuate_BLACKHOLE(p) evacuate_BLACKHOLE1(p)
@@ -47,7 +43,7 @@ StgWord64 whitehole_spin = 0;
  */
 #define MAX_THUNK_SELECTOR_DEPTH 16
 
-static void eval_thunk_selector (StgClosure **q, StgSelector * p, bool);
+static void eval_thunk_selector (StgClosure **q, StgSelector *p, bool);
 STATIC_INLINE void evacuate_large(StgPtr p);
 
 /* -----------------------------------------------------------------------------
@@ -197,8 +193,9 @@ spin:
         info = xchg((StgPtr)&src->header.info, (W_)&stg_WHITEHOLE_info);
         if (info == (W_)&stg_WHITEHOLE_info) {
 #if defined(PROF_SPIN)
-            whitehole_spin++;
+            whitehole_gc_spin++;
 #endif
+            busy_wait_nop();
             goto spin;
         }
     if (IS_FORWARDING_PTR(info)) {
@@ -281,14 +278,7 @@ evacuate_large(StgPtr p)
   }
 
   // remove from large_object list
-  if (bd->u.back) {
-    bd->u.back->link = bd->link;
-  } else { // first object in the list
-    gen->large_objects = bd->link;
-  }
-  if (bd->link) {
-    bd->link->u.back = bd->u.back;
-  }
+  dbl_link_remove(bd, &gen->large_objects);
 
   /* link it on to the evacuated large object list of the destination gen
    */
@@ -417,14 +407,7 @@ evacuate_compact (StgPtr p)
     }
 
     // remove from compact_objects list
-    if (bd->u.back) {
-        bd->u.back->link = bd->link;
-    } else { // first object in the list
-        gen->compact_objects = bd->link;
-    }
-    if (bd->link) {
-        bd->link->u.back = bd->u.back;
-    }
+    dbl_link_remove(bd, &gen->compact_objects);
 
     /* link it on to the evacuated compact object list of the destination gen
      */
@@ -539,14 +522,14 @@ loop:
       switch (info->type) {
 
       case THUNK_STATIC:
-          if (info->srt_bitmap != 0) {
+          if (info->srt != 0) {
               evacuate_static_object(THUNK_STATIC_LINK((StgClosure *)q), q);
           }
           return;
 
       case FUN_STATIC:
-          if (info->srt_bitmap != 0) {
-              evacuate_static_object(FUN_STATIC_LINK((StgClosure *)q), q);
+          if (info->srt != 0 || info->layout.payload.ptrs != 0) {
+              evacuate_static_object(STATIC_LINK(info,(StgClosure *)q), q);
           }
           return;
 
@@ -707,9 +690,6 @@ loop:
   case THUNK_1_1:
   case THUNK_2_0:
   case THUNK_0_2:
-#if defined(NO_PROMOTE_THUNKS)
-#error bitrotted
-#endif
     copy(p,info,q,sizeofW(StgThunk)+2,gen_no);
     return;
 
@@ -753,6 +733,19 @@ loop:
               copy(p,info,q,sizeofW(StgInd),gen_no);
               return;
           }
+          // Note [BLACKHOLE pointing to IND]
+          //
+          // BLOCKING_QUEUE can be overwritten by IND (see
+          // wakeBlockingQueue()). However, when this happens we must
+          // be updating the BLACKHOLE, so the BLACKHOLE's indirectee
+          // should now point to the value.
+          //
+          // The mutator might observe an inconsistent state, because
+          // the writes are happening in another thread, so it's
+          // possible for the mutator to follow an indirectee and find
+          // an IND. But this should never happen in the GC, because
+          // the mutators are all stopped and the writes have
+          // completed.
           ASSERT(i != &stg_IND_info);
       }
       q = r;
@@ -818,16 +811,16 @@ loop:
 
   case MUT_ARR_PTRS_CLEAN:
   case MUT_ARR_PTRS_DIRTY:
-  case MUT_ARR_PTRS_FROZEN:
-  case MUT_ARR_PTRS_FROZEN0:
+  case MUT_ARR_PTRS_FROZEN_CLEAN:
+  case MUT_ARR_PTRS_FROZEN_DIRTY:
       // just copy the block
       copy(p,info,q,mut_arr_ptrs_sizeW((StgMutArrPtrs *)q),gen_no);
       return;
 
   case SMALL_MUT_ARR_PTRS_CLEAN:
   case SMALL_MUT_ARR_PTRS_DIRTY:
-  case SMALL_MUT_ARR_PTRS_FROZEN:
-  case SMALL_MUT_ARR_PTRS_FROZEN0:
+  case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+  case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
       // just copy the block
       copy(p,info,q,small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs *)q),gen_no);
       return;
@@ -898,9 +891,16 @@ evacuate_BLACKHOLE(StgClosure **p)
 
     bd = Bdescr((P_)q);
 
-    // blackholes can't be in a compact, or large
-    ASSERT((bd->flags & (BF_COMPACT | BF_LARGE)) == 0);
+    // blackholes can't be in a compact
+    ASSERT((bd->flags & BF_COMPACT) == 0);
 
+    // blackholes *can* be in a large object: when raiseAsync() creates an
+    // AP_STACK the payload might be large enough to create a large object.
+    // See #14497.
+    if (bd->flags & BF_LARGE) {
+        evacuate_large((P_)q);
+        return;
+    }
     if (bd->flags & BF_EVACUATED) {
         if (bd->gen_no < gct->evac_gen_no) {
             gct->failed_to_evac = true;
@@ -934,23 +934,34 @@ evacuate_BLACKHOLE(StgClosure **p)
     copy(p,info,q,sizeofW(StgInd),gen_no);
 }
 
-/* -----------------------------------------------------------------------------
-   Evaluate a THUNK_SELECTOR if possible.
+/* ----------------------------------------------------------------------------
+   Update a chain of thunk selectors with the given value. All selectors in the
+   chain become IND pointing to the value, except when there is a loop (i.e.
+   the value of a THUNK_SELECTOR is the THUNK_SELECTOR itself), in that case we
+   leave the selector as-is.
 
-   p points to a THUNK_SELECTOR that we want to evaluate.  The
-   result of "evaluating" it will be evacuated and a pointer to the
-   to-space closure will be returned.
+   p is the current selector to update. In eval_thunk_selector we make a list
+   from selectors using ((StgThunk*)p)->payload[0] for the link field and use
+   that field to traverse the chain here.
 
-   If the THUNK_SELECTOR could not be evaluated (its selectee is still
-   a THUNK, for example), then the THUNK_SELECTOR itself will be
-   evacuated.
+   val is the final value of the selector chain.
+
+   A chain is formed when we've got something like:
+
+      let x = C1 { f1 = e1 }
+          y = C2 { f2 = f1 x }
+          z = f2 y
+
+   Here the chain (p) we get when evacuating z is:
+
+      [ f2 y, f1 x ]
+
+   and val is e1.
    -------------------------------------------------------------------------- */
+
 static void
 unchain_thunk_selectors(StgSelector *p, StgClosure *val)
 {
-    StgSelector *prev;
-
-    prev = NULL;
     while (p)
     {
         ASSERT(p->header.info == &stg_WHITEHOLE_info);
@@ -960,7 +971,7 @@ unchain_thunk_selectors(StgSelector *p, StgClosure *val)
         // not evacuate it), so in this case val is in from-space.
         // ASSERT(!HEAP_ALLOCED_GC(val) || Bdescr((P_)val)->gen_no > N || (Bdescr((P_)val)->flags & BF_EVACUATED));
 
-        prev = (StgSelector*)((StgClosure *)p)->payload[0];
+        StgSelector *prev = (StgSelector*)((StgClosure *)p)->payload[0];
 
         // Update the THUNK_SELECTOR with an indirection to the
         // value.  The value is still in from-space at this stage.
@@ -997,8 +1008,18 @@ unchain_thunk_selectors(StgSelector *p, StgClosure *val)
     }
 }
 
+/* -----------------------------------------------------------------------------
+   Evaluate a THUNK_SELECTOR if possible.
+
+   p points to a THUNK_SELECTOR that we want to evaluate.
+
+   If the THUNK_SELECTOR could not be evaluated (its selectee is still a THUNK,
+   for example), then the THUNK_SELECTOR itself will be evacuated depending on
+   the evac parameter.
+   -------------------------------------------------------------------------- */
+
 static void
-eval_thunk_selector (StgClosure **q, StgSelector * p, bool evac)
+eval_thunk_selector (StgClosure **q, StgSelector *p, bool evac)
                  // NB. for legacy reasons, p & q are swapped around :(
 {
     uint32_t field;
@@ -1007,7 +1028,6 @@ eval_thunk_selector (StgClosure **q, StgSelector * p, bool evac)
     StgClosure *selectee;
     StgSelector *prev_thunk_selector;
     bdescr *bd;
-    StgClosure *val;
 
     prev_thunk_selector = NULL;
     // this is a chain of THUNK_SELECTORs that we are going to update
@@ -1057,9 +1077,14 @@ selector_chain:
     // In threaded mode, we'll use WHITEHOLE to lock the selector
     // thunk while we evaluate it.
     {
-        do {
+        while(true) {
             info_ptr = xchg((StgPtr)&p->header.info, (W_)&stg_WHITEHOLE_info);
-        } while (info_ptr == (W_)&stg_WHITEHOLE_info);
+            if (info_ptr != (W_)&stg_WHITEHOLE_info) { break; }
+#if defined(PROF_SPIN)
+            ++whitehole_gc_spin;
+#endif
+            busy_wait_nop();
+        }
 
         // make sure someone else didn't get here first...
         if (IS_FORWARDING_PTR(info_ptr) ||
@@ -1127,7 +1152,7 @@ selector_loop:
                                           info->layout.payload.nptrs));
 
               // Select the right field from the constructor
-              val = selectee->payload[field];
+              StgClosure *val = selectee->payload[field];
 
 #if defined(PROFILING)
               // For the purposes of LDV profiling, we have destroyed
@@ -1159,6 +1184,8 @@ selector_loop:
                       val = ((StgInd *)val)->indirectee;
                       goto val_loop;
                   case THUNK_SELECTOR:
+                      // Use payload to make a list of thunk selectors, to be
+                      // used in unchain_thunk_selectors
                       ((StgClosure*)p)->payload[0] = (StgClosure *)prev_thunk_selector;
                       prev_thunk_selector = p;
                       p = (StgSelector*)val;
@@ -1273,5 +1300,4 @@ bale_out:
         copy(q,(const StgInfoTable *)info_ptr,(StgClosure *)p,THUNK_SELECTOR_sizeW(),bd->dest_no);
     }
     unchain_thunk_selectors(prev_thunk_selector, *q);
-    return;
 }

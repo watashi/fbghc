@@ -13,8 +13,8 @@
 --
 -- As such, this should be a well-defined syntax: we want it to look nice.
 -- Thus, we try wherever possible to use syntax defined in [1],
--- "The C-- Reference Manual", http://www.cminusminus.org/. We differ
--- slightly, in some cases. For one, we use I8 .. I64 for types, rather
+-- "The C-- Reference Manual", http://www.cs.tufts.edu/~nr/c--/index.html. We
+-- differ slightly, in some cases. For one, we use I8 .. I64 for types, rather
 -- than C--'s bits8 .. bits64.
 --
 -- We try to ensure that all information available in the abstract
@@ -38,9 +38,12 @@ module PprCmmExpr
     )
 where
 
+import GhcPrelude
+
 import CmmExpr
 
 import Outputable
+import DynFlags
 
 import Data.Maybe
 import Numeric ( fromRat )
@@ -196,7 +199,7 @@ pprLit lit = sdocWithDynFlags $ \dflags ->
     CmmVec lits        -> char '<' <> commafy (map pprLit lits) <> char '>'
     CmmLabel clbl      -> ppr clbl
     CmmLabelOff clbl i -> ppr clbl <> ppr_offset i
-    CmmLabelDiffOff clbl1 clbl2 i -> ppr clbl1 <> char '-'
+    CmmLabelDiffOff clbl1 clbl2 i _ -> ppr clbl1 <> char '-'
                                   <> ppr clbl2 <> ppr_offset i
     CmmBlock id        -> ppr id
     CmmHighStackMark -> text "<highSp>"
@@ -224,14 +227,18 @@ pprReg r
 -- We only print the type of the local reg if it isn't wordRep
 --
 pprLocalReg :: LocalReg -> SDoc
-pprLocalReg (LocalReg uniq rep)
+pprLocalReg (LocalReg uniq rep) = sdocWithDynFlags $ \dflags ->
 --   = ppr rep <> char '_' <> ppr uniq
 -- Temp Jan08
-   = char '_' <> ppr uniq <>
+    char '_' <> pprUnique dflags uniq <>
        (if isWord32 rep -- && not (isGcPtrType rep) -- Temp Jan08               -- sigh
                     then dcolon <> ptr <> ppr rep
                     else dcolon <> ptr <> ppr rep)
    where
+     pprUnique dflags unique =
+        if gopt Opt_SuppressUniques dflags
+            then text "_locVar_"
+            else ppr unique
      ptr = empty
          --if isGcPtrType rep
          --      then doubleQuotes (text "ptr")

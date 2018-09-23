@@ -53,8 +53,8 @@ import {-# SOURCE #-} GHC.IO.Exception ( userError, IOError )
 -- The IO Monad
 
 {-
-The IO Monad is just an instance of the ST monad, where the state is
-the real world.  We use the exception mechanism (in GHC.Exception) to
+The IO Monad is just an instance of the ST monad, where the state thread
+is the real world.  We use the exception mechanism (in GHC.Exception) to
 implement IO exceptions.
 
 NOTE: The IO representation is deeply wired in to various parts of the
@@ -84,7 +84,7 @@ failIO s = IO (raiseIO# (toException (userError s)))
 -- ---------------------------------------------------------------------------
 -- Coercions between IO and ST
 
--- | Embed a strict state transformer in an 'IO'
+-- | Embed a strict state thread in an 'IO'
 -- action.  The 'RealWorld' parameter indicates that the internal state
 -- used by the 'ST' computation is a special one supplied by the 'IO'
 -- monad, and thus distinct from those used by invocations of 'runST'.
@@ -92,20 +92,20 @@ stToIO        :: ST RealWorld a -> IO a
 stToIO (ST m) = IO m
 
 -- | Convert an 'IO' action into an 'ST' action. The type of the result
--- is constrained to use a 'RealWorld' state, and therefore the result cannot
--- be passed to 'runST'.
+-- is constrained to use a 'RealWorld' state thread, and therefore the
+-- result cannot be passed to 'runST'.
 ioToST        :: IO a -> ST RealWorld a
 ioToST (IO m) = (ST m)
 
 -- | Convert an 'IO' action to an 'ST' action.
 -- This relies on 'IO' and 'ST' having the same representation modulo the
--- constraint on the type of the state.
+-- constraint on the state thread type parameter.
 unsafeIOToST        :: IO a -> ST s a
 unsafeIOToST (IO io) = ST $ \ s -> (unsafeCoerce# io) s
 
 -- | Convert an 'ST' action to an 'IO' action.
 -- This relies on 'IO' and 'ST' having the same representation modulo the
--- constraint on the type of the state.
+-- constraint on the state thread type parameter.
 --
 -- For an example demonstrating why this is unsafe, see
 -- https://mail.haskell.org/pipermail/haskell-cafe/2009-April/060719.html
@@ -279,7 +279,9 @@ data MaskingState
       -- ^ the state during 'mask': asynchronous exceptions are masked, but blocking operations may still be interrupted
   | MaskedUninterruptible
       -- ^ the state during 'uninterruptibleMask': asynchronous exceptions are masked, and blocking operations may not be interrupted
- deriving (Eq,Show)
+ deriving ( Eq   -- ^ @since 4.3.0.0
+          , Show -- ^ @since 4.3.0.0
+          )
 
 -- | Returns the 'MaskingState' for the current thread.
 getMaskingState :: IO MaskingState
@@ -334,7 +336,7 @@ onException io what = io `catchException` \e -> do _ <- what
 -- 'MaskedInterruptible' state,
 -- use @mask_ $ forkIO ...@.  This is particularly useful if you need
 -- to establish an exception handler in the forked thread before any
--- asynchronous exceptions are received.  To create a a new thread in
+-- asynchronous exceptions are received.  To create a new thread in
 -- an unmasked state use 'Control.Concurrent.forkIOWithUnmask'.
 --
 mask  :: ((forall a. IO a -> IO a) -> IO b) -> IO b

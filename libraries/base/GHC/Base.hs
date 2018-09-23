@@ -83,6 +83,9 @@ Other Prelude modules are much easier with fewer complex dependencies.
            , UnboxedTuples
            , ExistentialQuantification
            , RankNTypes
+           , KindSignatures
+           , PolyKinds
+           , DataKinds
   #-}
 -- -Wno-orphans is needed for things like:
 -- Orphan rule: "x# -# x#" ALWAYS forall x# :: Int# -# x# x# = 0
@@ -114,7 +117,8 @@ module GHC.Base
         module GHC.Types,
         module GHC.Prim,        -- Re-export GHC.Prim and [boot] GHC.Err,
                                 -- to avoid lots of people having to
-        module GHC.Err          -- import it explicitly
+        module GHC.Err,         -- import it explicitly
+        module GHC.Maybe
   )
         where
 
@@ -124,10 +128,20 @@ import GHC.CString
 import GHC.Magic
 import GHC.Prim
 import GHC.Err
+import GHC.Maybe
 import {-# SOURCE #-} GHC.IO (failIO,mplusIO)
 
-import GHC.Tuple ()     -- Note [Depend on GHC.Tuple]
-import GHC.Integer ()   -- Note [Depend on GHC.Integer]
+import GHC.Tuple ()              -- Note [Depend on GHC.Tuple]
+import GHC.Integer ()            -- Note [Depend on GHC.Integer]
+import GHC.Natural ()            -- Note [Depend on GHC.Natural]
+
+-- for 'class Semigroup'
+import {-# SOURCE #-} GHC.Real (Integral)
+import {-# SOURCE #-} Data.Semigroup.Internal ( stimesDefault
+                                              , stimesMaybe
+                                              , stimesList
+                                              , stimesIdempotentMonoid
+                                              )
 
 infixr 9  .
 infixr 5  ++
@@ -171,6 +185,10 @@ Similarly, tuple syntax (or ()) creates an implicit dependency on
 GHC.Tuple, so we use the same rule as for Integer --- see Note [Depend on
 GHC.Integer] --- to explain this to the build system.  We make GHC.Base
 depend on GHC.Tuple, and everything else depends on GHC.Base or Prelude.
+
+Note [Depend on GHC.Natural]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+Similar to GHC.Integer.
 -}
 
 #if 0
@@ -191,29 +209,53 @@ build = errorWithoutStackTrace "urk"
 foldr = errorWithoutStackTrace "urk"
 #endif
 
--- | The 'Maybe' type encapsulates an optional value.  A value of type
--- @'Maybe' a@ either contains a value of type @a@ (represented as @'Just' a@),
--- or it is empty (represented as 'Nothing').  Using 'Maybe' is a good way to
--- deal with errors or exceptional cases without resorting to drastic
--- measures such as 'error'.
+infixr 6 <>
+
+-- | The class of semigroups (types with an associative binary operation).
 --
--- The 'Maybe' type is also a monad.  It is a simple kind of error
--- monad, where all errors are represented by 'Nothing'.  A richer
--- error monad can be built using the 'Data.Either.Either' type.
+-- Instances should satisfy the associativity law:
 --
-data  Maybe a  =  Nothing | Just a
-  deriving (Eq, Ord)
+--  * @x '<>' (y '<>' z) = (x '<>' y) '<>' z@
+--
+-- @since 4.9.0.0
+class Semigroup a where
+        -- | An associative operation.
+        (<>) :: a -> a -> a
+
+        -- | Reduce a non-empty list with '<>'
+        --
+        -- The default definition should be sufficient, but this can be
+        -- overridden for efficiency.
+        --
+        sconcat :: NonEmpty a -> a
+        sconcat (a :| as) = go a as where
+          go b (c:cs) = b <> go c cs
+          go b []     = b
+
+        -- | Repeat a value @n@ times.
+        --
+        -- Given that this works on a 'Semigroup' it is allowed to fail if
+        -- you request 0 or fewer repetitions, and the default definition
+        -- will do so.
+        --
+        -- By making this a member of the class, idempotent semigroups
+        -- and monoids can upgrade this to execute in /O(1)/ by
+        -- picking @stimes = 'Data.Semigroup.stimesIdempotent'@ or @stimes =
+        -- 'stimesIdempotentMonoid'@ respectively.
+        stimes :: Integral b => b -> a -> a
+        stimes = stimesDefault
+
 
 -- | The class of monoids (types with an associative binary operation that
 -- has an identity).  Instances should satisfy the following laws:
 --
---  * @mappend mempty x = x@
+--  * @x '<>' 'mempty' = x@
 --
---  * @mappend x mempty = x@
+--  * @'mempty' '<>' x = x@
 --
---  * @mappend x (mappend y z) = mappend (mappend x y) z@
+--  * @x '<>' (y '<>' z) = (x '<>' y) '<>' z@ ('Semigroup' law)
 --
---  * @mconcat = 'foldr' mappend mempty@
+--  * @'mconcat' = 'foldr' ('<>') 'mempty'@
 --
 -- The method names refer to the monoid of lists under concatenation,
 -- but there are many other instances.
@@ -221,28 +263,40 @@ data  Maybe a  =  Nothing | Just a
 -- Some types can be viewed as a monoid in more than one way,
 -- e.g. both addition and multiplication on numbers.
 -- In such cases we often define @newtype@s and make those instances
--- of 'Monoid', e.g. 'Sum' and 'Product'.
-
-class Monoid a where
+-- of 'Monoid', e.g. 'Data.Semigroup.Sum' and 'Data.Semigroup.Product'.
+--
+-- __NOTE__: 'Semigroup' is a superclass of 'Monoid' since /base-4.11.0.0/.
+class Semigroup a => Monoid a where
+        -- | Identity of 'mappend'
         mempty  :: a
-        -- ^ Identity of 'mappend'
-        mappend :: a -> a -> a
-        -- ^ An associative operation
-        mconcat :: [a] -> a
 
-        -- ^ Fold a list using the monoid.
+        -- | An associative operation
+        --
+        -- __NOTE__: This method is redundant and has the default
+        -- implementation @'mappend' = ('<>')@ since /base-4.11.0.0/.
+        mappend :: a -> a -> a
+        mappend = (<>)
+        {-# INLINE mappend #-}
+
+        -- | Fold a list using the monoid.
+        --
         -- For most types, the default definition for 'mconcat' will be
         -- used, but the function is included in the class definition so
         -- that an optimized version can be provided for specific types.
-
+        mconcat :: [a] -> a
         mconcat = foldr mappend mempty
+
+-- | @since 4.9.0.0
+instance Semigroup [a] where
+        (<>) = (++)
+        {-# INLINE (<>) #-}
+
+        stimes = stimesList
 
 -- | @since 2.01
 instance Monoid [a] where
         {-# INLINE mempty #-}
         mempty  = []
-        {-# INLINE mappend #-}
-        mappend = (++)
         {-# INLINE mconcat #-}
         mconcat xss = [x | xs <- xss, x <- xs]
 -- See Note: [List comprehensions and inlining]
@@ -266,66 +320,104 @@ needed to make foldr/build forms efficient are turned off, we'll get reasonably
 efficient translations anyway.
 -}
 
+-- | @since 4.9.0.0
+instance Semigroup (NonEmpty a) where
+        (a :| as) <> ~(b :| bs) = a :| (as ++ b : bs)
+
+-- | @since 4.9.0.0
+instance Semigroup b => Semigroup (a -> b) where
+        f <> g = \x -> f x <> g x
+        stimes n f e = stimes n (f e)
+
 -- | @since 2.01
 instance Monoid b => Monoid (a -> b) where
         mempty _ = mempty
-        mappend f g x = f x `mappend` g x
+
+-- | @since 4.9.0.0
+instance Semigroup () where
+        _ <> _      = ()
+        sconcat _   = ()
+        stimes  _ _ = ()
 
 -- | @since 2.01
 instance Monoid () where
         -- Should it be strict?
         mempty        = ()
-        _ `mappend` _ = ()
         mconcat _     = ()
+
+-- | @since 4.9.0.0
+instance (Semigroup a, Semigroup b) => Semigroup (a, b) where
+        (a,b) <> (a',b') = (a<>a',b<>b')
+        stimes n (a,b) = (stimes n a, stimes n b)
 
 -- | @since 2.01
 instance (Monoid a, Monoid b) => Monoid (a,b) where
         mempty = (mempty, mempty)
-        (a1,b1) `mappend` (a2,b2) =
-                (a1 `mappend` a2, b1 `mappend` b2)
+
+-- | @since 4.9.0.0
+instance (Semigroup a, Semigroup b, Semigroup c) => Semigroup (a, b, c) where
+        (a,b,c) <> (a',b',c') = (a<>a',b<>b',c<>c')
+        stimes n (a,b,c) = (stimes n a, stimes n b, stimes n c)
 
 -- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c) => Monoid (a,b,c) where
         mempty = (mempty, mempty, mempty)
-        (a1,b1,c1) `mappend` (a2,b2,c2) =
-                (a1 `mappend` a2, b1 `mappend` b2, c1 `mappend` c2)
+
+-- | @since 4.9.0.0
+instance (Semigroup a, Semigroup b, Semigroup c, Semigroup d)
+         => Semigroup (a, b, c, d) where
+        (a,b,c,d) <> (a',b',c',d') = (a<>a',b<>b',c<>c',d<>d')
+        stimes n (a,b,c,d) = (stimes n a, stimes n b, stimes n c, stimes n d)
 
 -- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c, Monoid d) => Monoid (a,b,c,d) where
         mempty = (mempty, mempty, mempty, mempty)
-        (a1,b1,c1,d1) `mappend` (a2,b2,c2,d2) =
-                (a1 `mappend` a2, b1 `mappend` b2,
-                 c1 `mappend` c2, d1 `mappend` d2)
+
+-- | @since 4.9.0.0
+instance (Semigroup a, Semigroup b, Semigroup c, Semigroup d, Semigroup e)
+         => Semigroup (a, b, c, d, e) where
+        (a,b,c,d,e) <> (a',b',c',d',e') = (a<>a',b<>b',c<>c',d<>d',e<>e')
+        stimes n (a,b,c,d,e) =
+            (stimes n a, stimes n b, stimes n c, stimes n d, stimes n e)
 
 -- | @since 2.01
 instance (Monoid a, Monoid b, Monoid c, Monoid d, Monoid e) =>
                 Monoid (a,b,c,d,e) where
         mempty = (mempty, mempty, mempty, mempty, mempty)
-        (a1,b1,c1,d1,e1) `mappend` (a2,b2,c2,d2,e2) =
-                (a1 `mappend` a2, b1 `mappend` b2, c1 `mappend` c2,
-                 d1 `mappend` d2, e1 `mappend` e2)
+
+
+-- | @since 4.9.0.0
+instance Semigroup Ordering where
+    LT <> _ = LT
+    EQ <> y = y
+    GT <> _ = GT
+
+    stimes = stimesIdempotentMonoid
 
 -- lexicographical ordering
 -- | @since 2.01
 instance Monoid Ordering where
-        mempty         = EQ
-        LT `mappend` _ = LT
-        EQ `mappend` y = y
-        GT `mappend` _ = GT
+    mempty             = EQ
+
+-- | @since 4.9.0.0
+instance Semigroup a => Semigroup (Maybe a) where
+    Nothing <> b       = b
+    a       <> Nothing = a
+    Just a  <> Just b  = Just (a <> b)
+
+    stimes = stimesMaybe
 
 -- | Lift a semigroup into 'Maybe' forming a 'Monoid' according to
 -- <http://en.wikipedia.org/wiki/Monoid>: \"Any semigroup @S@ may be
 -- turned into a monoid simply by adjoining an element @e@ not in @S@
--- and defining @e*e = e@ and @e*s = s = s*e@ for all @s ∈ S@.\" Since
--- there used to be no \"Semigroup\" typeclass providing just 'mappend',
--- we use 'Monoid' instead.
+-- and defining @e*e = e@ and @e*s = s = s*e@ for all @s ∈ S@.\"
+--
+-- /Since 4.11.0/: constraint on inner @a@ value generalised from
+-- 'Monoid' to 'Semigroup'.
 --
 -- @since 2.01
-instance Monoid a => Monoid (Maybe a) where
-  mempty = Nothing
-  Nothing `mappend` m = m
-  m `mappend` Nothing = m
-  Just m1 `mappend` Just m2 = Just (m1 `mappend` m2)
+instance Semigroup a => Monoid (Maybe a) where
+    mempty = Nothing
 
 -- | For tuples, the 'Monoid' constraint on @a@ determines
 -- how the first values merge.
@@ -337,26 +429,27 @@ instance Monoid a => Monoid (Maybe a) where
 -- @since 2.01
 instance Monoid a => Applicative ((,) a) where
     pure x = (mempty, x)
-    (u, f) <*> (v, x) = (u `mappend` v, f x)
-    liftA2 f (u, x) (v, y) = (u `mappend` v, f x y)
+    (u, f) <*> (v, x) = (u <> v, f x)
+    liftA2 f (u, x) (v, y) = (u <> v, f x y)
 
 -- | @since 4.9.0.0
 instance Monoid a => Monad ((,) a) where
-    (u, a) >>= k = case k a of (v, b) -> (u `mappend` v, b)
+    (u, a) >>= k = case k a of (v, b) -> (u <> v, b)
+
+-- | @since 4.10.0.0
+instance Semigroup a => Semigroup (IO a) where
+    (<>) = liftA2 (<>)
 
 -- | @since 4.9.0.0
 instance Monoid a => Monoid (IO a) where
     mempty = pure mempty
-    mappend = liftA2 mappend
 
-{- | The 'Functor' class is used for types that can be mapped over.
-Instances of 'Functor' should satisfy the following laws:
+{- | A type @f@ is a Functor if it provides a function @fmap@ which, given any types @a@ and @b@
+lets you apply any function from @(a -> b)@ to turn an @f a@ into an @f b@, preserving the
+structure of @f@. Furthermore @f@ needs to adhere to the following laws:
 
-> fmap id  ==  id
-> fmap (f . g)  ==  fmap f . fmap g
-
-The instances of 'Functor' for lists, 'Data.Maybe.Maybe' and 'System.IO.IO'
-satisfy these laws.
+> fmap id == id
+> fmap (f . g) == fmap f . fmap g
 -}
 
 class  Functor f  where
@@ -379,7 +472,8 @@ class  Functor f  where
 -- the same as their default definitions:
 --
 --      @('<*>') = 'liftA2' 'id'@
---      @'liftA2' f x y = f '<$>' x '<*>' y@
+--
+--      @'liftA2' f x y = f 'Prelude.<$>' x '<*>' y@
 --
 -- Further, any definition must satisfy the following:
 --
@@ -426,6 +520,8 @@ class  Functor f  where
 --   * @'pure' = 'return'@
 --
 --   * @('<*>') = 'ap'@
+--
+--   * @('*>') = ('>>')@
 --
 -- (which implies that 'pure' and '<*>' satisfy the applicative functor laws).
 
@@ -494,6 +590,33 @@ liftA3 f a b c = liftA2 f a b <*> c
 -- | The 'join' function is the conventional monad join operator. It
 -- is used to remove one level of monadic structure, projecting its
 -- bound argument into the outer level.
+--
+-- ==== __Examples__
+--
+-- A common use of 'join' is to run an 'IO' computation returned from
+-- an 'GHC.Conc.STM' transaction, since 'GHC.Conc.STM' transactions
+-- can't perform 'IO' directly. Recall that
+--
+-- @
+-- 'GHC.Conc.atomically' :: STM a -> IO a
+-- @
+--
+-- is used to run 'GHC.Conc.STM' transactions atomically. So, by
+-- specializing the types of 'GHC.Conc.atomically' and 'join' to
+--
+-- @
+-- 'GHC.Conc.atomically' :: STM (IO b) -> IO (IO b)
+-- 'join'       :: IO (IO b)  -> IO b
+-- @
+--
+-- we can compose them as
+--
+-- @
+-- 'join' . 'GHC.Conc.atomically' :: STM (IO b) -> IO b
+-- @
+--
+-- to run an 'GHC.Conc.STM' transaction and the 'IO' action it
+-- returns.
 join              :: (Monad m) => m (m a) -> m a
 join x            =  x >>= id
 
@@ -546,8 +669,8 @@ class Applicative m => Monad m where
     -- failure in a @do@ expression.
     --
     -- As part of the MonadFail proposal (MFP), this function is moved
-    -- to its own class 'MonadFail' (see "Control.Monad.Fail" for more
-    -- details). The definition here will be removed in a future
+    -- to its own class 'Control.Monad.MonadFail' (see "Control.Monad.Fail" for
+    -- more details). The definition here will be removed in a future
     -- release.
     fail        :: String -> m a
     fail s      = errorWithoutStackTrace s
@@ -629,8 +752,8 @@ liftM f m1              = do { x1 <- m1; return (f x1) }
 -- | Promote a function to a monad, scanning the monadic arguments from
 -- left to right.  For example,
 --
--- >    liftM2 (+) [0,1] [0,2] = [0,2,1,3]
--- >    liftM2 (+) (Just 1) Nothing = Nothing
+-- > liftM2 (+) [0,1] [0,2] = [0,2,1,3]
+-- > liftM2 (+) (Just 1) Nothing = Nothing
 --
 liftM2  :: (Monad m) => (a1 -> a2 -> r) -> m a1 -> m a2 -> m r
 liftM2 f m1 m2          = do { x1 <- m1; x2 <- m2; return (f x1 x2) }
@@ -671,11 +794,11 @@ liftM5 f m1 m2 m3 m4 m5 = do { x1 <- m1; x2 <- m2; x3 <- m3; x4 <- m4; x5 <- m5;
 {- | In many situations, the 'liftM' operations can be replaced by uses of
 'ap', which promotes function application.
 
->       return f `ap` x1 `ap` ... `ap` xn
+> return f `ap` x1 `ap` ... `ap` xn
 
 is equivalent to
 
->       liftMn f x1 x2 ... xn
+> liftMn f x1 x2 ... xn
 
 -}
 
@@ -744,9 +867,9 @@ infixl 3 <|>
 -- If defined, 'some' and 'many' should be the least solutions
 -- of the equations:
 --
--- * @some v = (:) '<$>' v '<*>' many v@
+-- * @'some' v = (:) 'Prelude.<$>' v '<*>' 'many' v@
 --
--- * @many v = some v '<|>' 'pure' []@
+-- * @'many' v = 'some' v '<|>' 'pure' []@
 class Applicative f => Alternative f where
     -- | The identity of '<|>'
     empty :: f a
@@ -779,20 +902,60 @@ instance Alternative Maybe where
 
 -- | Monads that also support choice and failure.
 class (Alternative m, Monad m) => MonadPlus m where
-   -- | the identity of 'mplus'.  It should also satisfy the equations
+   -- | The identity of 'mplus'.  It should also satisfy the equations
    --
    -- > mzero >>= f  =  mzero
    -- > v >> mzero   =  mzero
    --
+   -- The default definition is
+   --
+   -- @
+   -- mzero = 'empty'
+   -- @
    mzero :: m a
    mzero = empty
 
-   -- | an associative operation
+   -- | An associative operation. The default definition is
+   --
+   -- @
+   -- mplus = ('<|>')
+   -- @
    mplus :: m a -> m a -> m a
    mplus = (<|>)
 
 -- | @since 2.01
 instance MonadPlus Maybe
+
+---------------------------------------------
+-- The non-empty list type
+
+infixr 5 :|
+
+-- | Non-empty (and non-strict) list type.
+--
+-- @since 4.9.0.0
+data NonEmpty a = a :| [a]
+  deriving ( Eq  -- ^ @since 4.9.0.0
+           , Ord -- ^ @since 4.9.0.0
+           )
+
+-- | @since 4.9.0.0
+instance Functor NonEmpty where
+  fmap f ~(a :| as) = f a :| fmap f as
+  b <$ ~(_ :| as)   = b   :| (b <$ as)
+
+-- | @since 4.9.0.0
+instance Applicative NonEmpty where
+  pure a = a :| []
+  (<*>) = ap
+  liftA2 = liftM2
+
+-- | @since 4.9.0.0
+instance Monad NonEmpty where
+  ~(a :| as) >>= f = b :| (bs ++ bs')
+    where b :| bs = f a
+          bs' = as >>= toList . f
+          toList ~(c :| cs) = c : cs
 
 ----------------------------------------------
 -- The list type
@@ -1082,6 +1245,8 @@ maxInt  = I# 0x7FFFFFFFFFFFFFFF#
 ----------------------------------------------
 
 -- | Identity function.
+--
+-- > id x = x
 id                      :: a -> a
 id x                    =  x
 
@@ -1089,8 +1254,8 @@ id x                    =  x
 -- The compiler may rewrite it to @('assertError' line)@.
 
 -- | If the first argument evaluates to 'True', then the result is the
--- second argument.  Otherwise an 'AssertionFailed' exception is raised,
--- containing a 'String' with the source file and line number of the
+-- second argument.  Otherwise an 'Control.Exception.AssertionFailed' exception
+-- is raised, containing a 'String' with the source file and line number of the
 -- call to 'assert'.
 --
 -- Assertions can normally be turned on or off with a compiler flag
@@ -1115,7 +1280,8 @@ breakpointCond _ r = r
 data Opaque = forall a. O a
 -- | @const x@ is a unary function which evaluates to @x@ for all inputs.
 --
--- For instance,
+-- >>> const 42 "hello"
+-- 42
 --
 -- >>> map (const 42) [0..3]
 -- [42,42,42,42]
@@ -1130,6 +1296,9 @@ const x _               =  x
 (.) f g = \x -> f (g x)
 
 -- | @'flip' f@ takes its (first) two arguments in the reverse order of @f@.
+--
+-- >>> flip (++) "hello" "world"
+-- "worldhello"
 flip                    :: (a -> b -> c) -> b -> a -> c
 flip f x y              =  f y x
 
@@ -1138,20 +1307,24 @@ flip f x y              =  f y x
 -- low, right-associative binding precedence, so it sometimes allows
 -- parentheses to be omitted; for example:
 --
--- >     f $ g $ h x  =  f (g (h x))
+-- > f $ g $ h x  =  f (g (h x))
 --
 -- It is also useful in higher-order situations, such as @'map' ('$' 0) xs@,
 -- or @'Data.List.zipWith' ('$') fs xs@.
+--
+-- Note that @($)@ is levity-polymorphic in its result type, so that
+--     foo $ True    where  foo :: Bool -> Int#
+-- is well-typed
 {-# INLINE ($) #-}
-($)                     :: (a -> b) -> a -> b
-f $ x                   =  f x
+($) :: forall r a (b :: TYPE r). (a -> b) -> a -> b
+f $ x =  f x
 
 -- | Strict (call-by-value) application operator. It takes a function and an
 -- argument, evaluates the argument to weak head normal form (WHNF), then calls
 -- the function with that value.
 
-($!)                    :: (a -> b) -> a -> b
-f $! x                  = let !vx = x in f vx  -- see #2273
+($!) :: forall r a (b :: TYPE r). (a -> b) -> a -> b
+f $! x = let !vx = x in f vx  -- see #2273
 
 -- | @'until' p f@ yields the result of applying @f@ until @p@ holds.
 until                   :: (a -> Bool) -> (a -> a) -> a -> a
@@ -1213,7 +1386,7 @@ unIO :: IO a -> (State# RealWorld -> (# State# RealWorld, a #))
 unIO (IO a) = a
 
 {- |
-Returns the 'tag' of a constructor application; this function is used
+Returns the tag of a constructor application; this function is used
 by the deriving code for Eq, Ord and Enum.
 
 The primitive dataToTag# requires an evaluated constructor application

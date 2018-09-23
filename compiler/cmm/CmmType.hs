@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 module CmmType
     ( CmmType   -- Abstract
     , b8, b16, b32, b64, b128, b256, b512, f32, f64, bWord, bHalfWord, gcWord
@@ -29,7 +27,8 @@ module CmmType
    )
 where
 
-#include "HsVersions.h"
+
+import GhcPrelude
 
 import DynFlags
 import FastString
@@ -71,7 +70,7 @@ instance Outputable CmmCat where
 -- Why is CmmType stratified?  For native code generation,
 -- most of the time you just want to know what sort of register
 -- to put the thing in, and for this you need to know how
--- many bits thing has and whether it goes in a floating-point
+-- many bits thing has, and whether it goes in a floating-point
 -- register.  By contrast, the distinction between GcPtr and
 -- GcNonPtr is of interest to only a few parts of the code generator.
 

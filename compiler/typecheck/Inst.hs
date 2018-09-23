@@ -12,10 +12,10 @@ The @Inst@ type: dictionaries or method instances
 module Inst (
        deeplySkolemise,
        topInstantiate, topInstantiateInferred, deeplyInstantiate,
-       instCall, instDFunType, instStupidTheta,
+       instCall, instDFunType, instStupidTheta, instTyVarsWith,
        newWanted, newWanteds,
 
-       tcInstBinders, tcInstBinder,
+       tcInstTyBinders, tcInstTyBinder,
 
        newOverloadedLit, mkOverLit,
 
@@ -32,8 +32,10 @@ module Inst (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-}   TcExpr( tcPolyExpr, tcSyntaxOp )
-import {-# SOURCE #-}   TcUnify( unifyType, unifyKind, noThing )
+import {-# SOURCE #-}   TcUnify( unifyType, unifyKind )
 
 import BasicTypes ( IntegralLit(..), SourceText(..) )
 import FastString
@@ -43,21 +45,21 @@ import TcRnMonad
 import TcEnv
 import TcEvidence
 import InstEnv
-import TysWiredIn  ( heqDataCon, coercibleDataCon )
+import TysWiredIn  ( heqDataCon, eqDataCon )
 import CoreSyn     ( isOrphan )
 import FunDeps
 import TcMType
 import Type
-import TyCoRep     ( TyBinder(..) )
+import TyCoRep
 import TcType
 import HscTypes
 import Class( Class )
 import MkId( mkDictFunId )
+import CoreSyn( Expr(..) )  -- For the Coercion constructor
 import Id
 import Name
-import Var      ( EvVar, mkTyVar, tyVarName, TyVarBndr(..) )
+import Var      ( EvVar, mkTyVar, tyVarName, VarBndr(..) )
 import DataCon
-import TyCon
 import VarEnv
 import PrelNames
 import SrcLoc
@@ -95,7 +97,7 @@ newMethodFromName origin name inst_ty
        ; wrap <- ASSERT( not (isForAllTy ty) && isSingleton theta )
                  instCall origin [inst_ty] theta
 
-       ; return (mkHsWrap wrap (HsVar (noLoc id))) }
+       ; return (mkHsWrap wrap (HsVar noExt (noLoc id))) }
 
 {-
 ************************************************************************
@@ -196,15 +198,16 @@ top_instantiate inst_all orig ty
        ; let inst_theta' = substTheta subst inst_theta
              sigma'      = substTy subst (mkForAllTys leave_bndrs $
                                           mkFunTys leave_theta rho)
+             inst_tv_tys' = mkTyVarTys inst_tvs'
 
-       ; wrap1 <- instCall orig (mkTyVarTys inst_tvs') inst_theta'
+       ; wrap1 <- instCall orig inst_tv_tys' inst_theta'
        ; traceTc "Instantiating"
                  (vcat [ text "all tyvars?" <+> ppr inst_all
                        , text "origin" <+> pprCtOrigin orig
-                       , text "type" <+> ppr ty
+                       , text "type" <+> debugPprType ty
                        , text "theta" <+> ppr theta
                        , text "leave_bndrs" <+> ppr leave_bndrs
-                       , text "with" <+> ppr inst_tvs'
+                       , text "with" <+> vcat (map debugPprType inst_tv_tys')
                        , text "theta:" <+>  ppr inst_theta' ])
 
        ; (wrap2, rho2) <-
@@ -220,7 +223,7 @@ top_instantiate inst_all orig ty
 
   | otherwise = return (idHsWrapper, ty)
   where
-    (binders, phi) = tcSplitForAllTyVarBndrs ty
+    (binders, phi) = tcSplitForAllVarBndrs ty
     (theta, rho)   = tcSplitPhiTy phi
 
     should_inst bndr
@@ -254,8 +257,9 @@ deeply_instantiate :: CtOrigin
 deeply_instantiate orig subst ty
   | Just (arg_tys, tvs, theta, rho) <- tcDeepSplitSigmaTy_maybe ty
   = do { (subst', tvs') <- newMetaTyVarsX subst tvs
-       ; ids1  <- newSysLocalIds (fsLit "di") (substTys subst' arg_tys)
-       ; let theta' = substTheta subst' theta
+       ; let arg_tys' = substTys   subst' arg_tys
+             theta'   = substTheta subst' theta
+       ; ids1  <- newSysLocalIds (fsLit "di") arg_tys'
        ; wrap1 <- instCall orig (mkTyVarTys tvs') theta'
        ; traceTc "Instantiating (deeply)" (vcat [ text "origin" <+> pprCtOrigin orig
                                                 , text "type" <+> ppr ty
@@ -268,7 +272,7 @@ deeply_instantiate orig subst ty
                     <.> wrap2
                     <.> wrap1
                     <.> mkWpEvVarApps ids1,
-                 mkFunTys arg_tys rho2) }
+                 mkFunTys arg_tys' rho2) }
 
   | otherwise
   = do { let ty' = substTy subst ty
@@ -278,6 +282,32 @@ deeply_instantiate orig subst ty
                        , text "new type:" <+> ppr ty'
                        , text "subst:"    <+> ppr subst ])
       ; return (idHsWrapper, ty') }
+
+
+instTyVarsWith :: CtOrigin -> [TyVar] -> [TcType] -> TcM TCvSubst
+-- Use this when you want to instantiate (forall a b c. ty) with
+-- types [ta, tb, tc], but when the kinds of 'a' and 'ta' might
+-- not yet match (perhaps because there are unsolved constraints; Trac #14154)
+-- If they don't match, emit a kind-equality to promise that they will
+-- eventually do so, and thus make a kind-homongeneous substitution.
+instTyVarsWith orig tvs tys
+  = go empty_subst tvs tys
+  where
+    empty_subst = mkEmptyTCvSubst (mkInScopeSet (tyCoVarsOfTypes tys))
+
+    go subst [] []
+      = return subst
+    go subst (tv:tvs) (ty:tys)
+      | tv_kind `tcEqType` ty_kind
+      = go (extendTCvSubst subst tv ty) tvs tys
+      | otherwise
+      = do { co <- emitWantedEq orig KindLevel Nominal ty_kind tv_kind
+           ; go (extendTCvSubst subst tv (ty `mkCastTy` co)) tvs tys }
+      where
+        tv_kind = substTy subst (tyVarKind tv)
+        ty_kind = typeKind ty
+
+    go _ _ _ = pprPanic "instTysWith" (ppr tvs $$ ppr tys)
 
 {-
 ************************************************************************
@@ -322,16 +352,17 @@ instCallConstraints orig preds
        ; traceTc "instCallConstraints" (ppr evs)
        ; return (mkWpEvApps evs) }
   where
+    go :: TcPredType -> TcM EvTerm
     go pred
      | Just (Nominal, ty1, ty2) <- getEqPredTys_maybe pred -- Try short-cut #1
-     = do  { co <- unifyType noThing ty1 ty2
-           ; return (EvCoercion co) }
+     = do  { co <- unifyType Nothing ty1 ty2
+           ; return (evCoercion co) }
 
        -- Try short-cut #2
      | Just (tc, args@[_, _, ty1, ty2]) <- splitTyConApp_maybe pred
      , tc `hasKey` heqTyConKey
-     = do { co <- unifyType noThing ty1 ty2
-          ; return (EvDFunApp (dataConWrapId heqDataCon) args [EvCoercion co]) }
+     = do { co <- unifyType Nothing ty1 ty2
+          ; return (evDFunApp (dataConWrapId heqDataCon) args [Coercion co]) }
 
      | otherwise
      = emitWanted orig pred
@@ -341,10 +372,14 @@ instDFunType :: DFunId -> [DFunInstType]
                     , TcThetaType ) -- instantiated constraint
 -- See Note [DFunInstType: instantiating types] in InstEnv
 instDFunType dfun_id dfun_inst_tys
-  = do { (subst, inst_tys) <- go emptyTCvSubst dfun_tvs dfun_inst_tys
+  = do { (subst, inst_tys) <- go empty_subst dfun_tvs dfun_inst_tys
        ; return (inst_tys, substTheta subst dfun_theta) }
   where
-    (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy (idType dfun_id)
+    dfun_ty = idType dfun_id
+    (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy dfun_ty
+    empty_subst = mkEmptyTCvSubst (mkInScopeSet (tyCoVarsOfType dfun_ty))
+                  -- With quantified constraints, the
+                  -- type of a dfun may not be closed
 
     go :: TCvSubst -> [TyVar] -> [DFunInstType] -> TcM (TCvSubst, [TcType])
     go subst [] [] = return (subst, [])
@@ -374,25 +409,97 @@ instStupidTheta orig theta
 *                                                                      *
 ************************************************************************
 
+Note [Constraints handled in types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Generally, we cannot handle constraints written in types. For example,
+if we declare
+
+  data C a where
+    MkC :: Show a => a -> C a
+
+we will not be able to use MkC in types, as we have no way of creating
+a type-level Show dictionary.
+
+However, we make an exception for equality types. Consider
+
+  data T1 a where
+    MkT1 :: T1 Bool
+
+  data T2 a where
+    MkT2 :: a ~ Bool => T2 a
+
+MkT1 has a constrained return type, while MkT2 uses an explicit equality
+constraint. These two types are often written interchangeably, with a
+reasonable expectation that they mean the same thing. For this to work --
+and for us to be able to promote GADTs -- we need to be able to instantiate
+equality constraints in types.
+
+One wrinkle is that the equality in MkT2 is *lifted*. But, for proper
+GADT equalities, GHC produces *unlifted* constraints. (This unlifting comes
+from DataCon.eqSpecPreds, which uses mkPrimEqPred.) And, perhaps a wily
+user will use (~~) for a heterogeneous equality. We thus must support
+all of (~), (~~), and (~#) in types. (See Note [The equality types story]
+in TysPrim for a primer on these equality types.)
+
+The get_eq_tys_maybe function recognizes these three forms of equality,
+returning a suitable type formation function and the two types related
+by the equality constraint. In the lifted case, it uses mkHEqBoxTy or
+mkEqBoxTy, which promote the datacons of the (~~) or (~) datatype,
+respectively.
+
+One might reasonably wonder who *unpacks* these boxes once they are
+made. After all, there is no type-level `case` construct. The surprising
+answer is that no one ever does. Instead, if a GADT constructor is used
+on the left-hand side of a type family equation, that occurrence forces
+GHC to unify the types in question. For example:
+
+  data G a where
+    MkG :: G Bool
+
+  type family F (x :: G a) :: a where
+    F MkG = False
+
+When checking the LHS `F MkG`, GHC sees the MkG constructor and then must
+unify F's implicit parameter `a` with Bool. This succeeds, making the equation
+
+    F Bool (MkG @Bool <Bool>) = False
+
+Note that we never need unpack the coercion. This is because type family
+equations are *not* parametric in their kind variables. That is, we could have
+just said
+
+  type family H (x :: G a) :: a where
+    H _ = False
+
+The presence of False on the RHS also forces `a` to become Bool, giving us
+
+    H Bool _ = False
+
+The fact that any of this works stems from the lack of phase separation between
+types and kinds (unlike the very present phase separation between terms and types).
+
+Once we have the ability to pattern-match on types below top-level, this will
+no longer cut it, but it seems fine for now.
+
 -}
 
 ---------------------------
 -- | This is used to instantiate binders when type-checking *types* only.
 -- The @VarEnv Kind@ gives some known instantiations.
 -- See also Note [Bidirectional type checking]
-tcInstBinders :: TCvSubst -> Maybe (VarEnv Kind)
-               -> [TyBinder] -> TcM (TCvSubst, [TcType])
-tcInstBinders subst mb_kind_info bndrs
-  = do { (subst, args) <- mapAccumLM (tcInstBinder mb_kind_info) subst bndrs
+tcInstTyBinders :: TCvSubst -> Maybe (VarEnv Kind)
+                -> [TyBinder] -> TcM (TCvSubst, [TcType])
+tcInstTyBinders subst mb_kind_info bndrs
+  = do { (subst, args) <- mapAccumLM (tcInstTyBinder mb_kind_info) subst bndrs
        ; traceTc "instantiating tybinders:"
            (vcat $ zipWith (\bndr arg -> ppr bndr <+> text ":=" <+> ppr arg)
                            bndrs args)
        ; return (subst, args) }
 
 -- | Used only in *types*
-tcInstBinder :: Maybe (VarEnv Kind)
-              -> TCvSubst -> TyBinder -> TcM (TCvSubst, TcType)
-tcInstBinder mb_kind_info subst (Named (TvBndr tv _))
+tcInstTyBinder :: Maybe (VarEnv Kind)
+               -> TCvSubst -> TyBinder -> TcM (TCvSubst, TcType)
+tcInstTyBinder mb_kind_info subst (Named (Bndr tv _))
   = case lookup_tv tv of
       Just ki -> return (extendTvSubstAndInScope subst tv ki, ki)
       Nothing -> do { (subst', tv') <- newMetaTyVarX subst tv
@@ -402,22 +509,16 @@ tcInstBinder mb_kind_info subst (Named (TvBndr tv _))
                       ; lookupVarEnv env tv }
 
 
-tcInstBinder _ subst (Anon ty)
+tcInstTyBinder _ subst (Anon ty)
      -- This is the *only* constraint currently handled in types.
-  | Just (mk, role, k1, k2) <- get_pred_tys_maybe substed_ty
-  = do { let origin = TypeEqOrigin { uo_actual   = k1
-                                   , uo_expected = k2
-                                   , uo_thing    = Nothing }
-       ; co <- case role of
-                 Nominal          -> unifyKind noThing k1 k2
-                 Representational -> emitWantedEq origin KindLevel role k1 k2
-                 Phantom          -> pprPanic "tcInstBinder Phantom" (ppr ty)
-       ; arg' <- mk co k1 k2
+  | Just (mk, k1, k2) <- get_eq_tys_maybe substed_ty
+  = do { co <- unifyKind Nothing k1 k2
+       ; arg' <- mk co
        ; return (subst, arg') }
 
   | isPredTy substed_ty
   = do { let (env, tidy_ty) = tidyOpenType emptyTidyEnv substed_ty
-       ; addErrTcM (env, text "Illegal constraint in a type:" <+> ppr tidy_ty)
+       ; addErrTcM (env, text "Illegal constraint in a kind:" <+> ppr tidy_ty)
 
          -- just invent a new variable so that we can continue
        ; u <- newUnique
@@ -432,22 +533,33 @@ tcInstBinder _ subst (Anon ty)
   where
     substed_ty = substTy subst ty
 
-      -- handle boxed equality constraints, because it's so easy
-    get_pred_tys_maybe ty
-      | Just (r, k1, k2) <- getEqPredTys_maybe ty
-      = Just (\co _ _ -> return $ mkCoercionTy co, r, k1, k2)
+      -- See Note [Constraints handled in types]
+    get_eq_tys_maybe :: Type
+                     -> Maybe ( Coercion -> TcM Type
+                                 -- given a coercion proving t1 ~# t2, produce the
+                                 -- right instantiation for the TyBinder at hand
+                              , Type  -- t1
+                              , Type  -- t2
+                              )
+    get_eq_tys_maybe ty
+        -- unlifted equality (~#)
+      | Just (Nominal, k1, k2) <- getEqPredTys_maybe ty
+      = Just (\co -> return $ mkCoercionTy co, k1, k2)
+
+        -- lifted heterogeneous equality (~~)
       | Just (tc, [_, _, k1, k2]) <- splitTyConApp_maybe ty
       = if | tc `hasKey` heqTyConKey
-             -> Just (mkHEqBoxTy, Nominal, k1, k2)
+             -> Just (\co -> mkHEqBoxTy co k1 k2, k1, k2)
            | otherwise
              -> Nothing
+
+        -- lifted homogeneous equality (~)
       | Just (tc, [_, k1, k2]) <- splitTyConApp_maybe ty
       = if | tc `hasKey` eqTyConKey
-             -> Just (mkEqBoxTy, Nominal, k1, k2)
-           | tc `hasKey` coercibleTyConKey
-             -> Just (mkCoercibleBoxTy, Representational, k1, k2)
+             -> Just (\co -> mkEqBoxTy co k1 k2, k1, k2)
            | otherwise
              -> Nothing
+
       | otherwise
       = Nothing
 
@@ -464,19 +576,8 @@ mkHEqBoxTy co ty1 ty2
 -- | This takes @a ~# b@ and returns @a ~ b@.
 mkEqBoxTy :: TcCoercion -> Type -> Type -> TcM Type
 mkEqBoxTy co ty1 ty2
-  = do { eq_tc <- tcLookupTyCon eqTyConName
-       ; let [datacon] = tyConDataCons eq_tc
-       ; hetero <- mkHEqBoxTy co ty1 ty2
-       ; return $ mkTyConApp (promoteDataCon datacon) [k, ty1, ty2, hetero] }
-  where k = typeKind ty1
-
--- | This takes @a ~R# b@ and returns @Coercible a b@.
-mkCoercibleBoxTy :: TcCoercion -> Type -> Type -> TcM Type
--- monadic just for convenience with mkEqBoxTy
-mkCoercibleBoxTy co ty1 ty2
-  = do { return $
-         mkTyConApp (promoteDataCon coercibleDataCon)
-                    [k, ty1, ty2, mkCoercionTy co] }
+  = return $
+    mkTyConApp (promoteDataCon eqDataCon) [k, ty1, ty2, mkCoercionTy co]
   where k = typeKind ty1
 
 {-
@@ -500,7 +601,7 @@ newOverloadedLit :: HsOverLit GhcRn
                  -> ExpRhoType
                  -> TcM (HsOverLit GhcTcId)
 newOverloadedLit
-  lit@(OverLit { ol_val = val, ol_rebindable = rebindable }) res_ty
+  lit@(OverLit { ol_val = val, ol_ext = rebindable }) res_ty
   | not rebindable
     -- all built-in overloaded lits are tau-types, so we can just
     -- tauify the ExpType
@@ -511,8 +612,8 @@ newOverloadedLit
         -- Reason: If we do, tcSimplify will call lookupInst, which
         --         will call tcSyntaxName, which does unification,
         --         which tcSimplify doesn't like
-           Just expr -> return (lit { ol_witness = expr, ol_type = res_ty
-                                    , ol_rebindable = False })
+           Just expr -> return (lit { ol_witness = expr
+                                    , ol_ext = OverLitTc False res_ty })
            Nothing   -> newNonTrivialOverloadedLit orig lit
                                                    (mkCheckExpType res_ty) }
 
@@ -520,6 +621,7 @@ newOverloadedLit
   = newNonTrivialOverloadedLit orig lit res_ty
   where
     orig = LiteralOrigin lit
+newOverloadedLit XOverLit{} _ = panic "newOverloadedLit"
 
 -- Does not handle things that 'shortCutLit' can handle. See also
 -- newOverloadedLit in TcUnify
@@ -528,8 +630,8 @@ newNonTrivialOverloadedLit :: CtOrigin
                            -> ExpRhoType
                            -> TcM (HsOverLit GhcTcId)
 newNonTrivialOverloadedLit orig
-  lit@(OverLit { ol_val = val, ol_witness = HsVar (L _ meth_name)
-               , ol_rebindable = rebindable }) res_ty
+  lit@(OverLit { ol_val = val, ol_witness = HsVar _ (L _ meth_name)
+               , ol_ext = rebindable }) res_ty
   = do  { hs_lit <- mkOverLit val
         ; let lit_ty = hsLitType hs_lit
         ; (_, fi') <- tcSyntaxOp orig (mkRnSyntaxExpr meth_name)
@@ -538,23 +640,22 @@ newNonTrivialOverloadedLit orig
         ; let L _ witness = nlHsSyntaxApps fi' [nlHsLit hs_lit]
         ; res_ty <- readExpType res_ty
         ; return (lit { ol_witness = witness
-                      , ol_type = res_ty
-                      , ol_rebindable = rebindable }) }
+                      , ol_ext = OverLitTc rebindable res_ty }) }
 newNonTrivialOverloadedLit _ lit _
   = pprPanic "newNonTrivialOverloadedLit" (ppr lit)
 
 ------------
-mkOverLit ::(HasDefaultX p, SourceTextX p) => OverLitVal -> TcM (HsLit p)
+mkOverLit ::OverLitVal -> TcM (HsLit GhcTc)
 mkOverLit (HsIntegral i)
   = do  { integer_ty <- tcMetaTy integerTyConName
-        ; return (HsInteger (setSourceText $ il_text i)
+        ; return (HsInteger (il_text i)
                             (il_value i) integer_ty) }
 
 mkOverLit (HsFractional r)
   = do  { rat_ty <- tcMetaTy rationalTyConName
-        ; return (HsRat def r rat_ty) }
+        ; return (HsRat noExt r rat_ty) }
 
-mkOverLit (HsIsString src s) = return (HsString (setSourceText src) s)
+mkOverLit (HsIsString src s) = return (HsString src s)
 
 {-
 ************************************************************************
@@ -596,7 +697,7 @@ tcSyntaxName :: CtOrigin
 -- USED ONLY FOR CmdTop (sigh) ***
 -- See Note [CmdSyntaxTable] in HsExpr
 
-tcSyntaxName orig ty (std_nm, HsVar (L _ user_nm))
+tcSyntaxName orig ty (std_nm, HsVar _ (L _ user_nm))
   | std_nm == user_nm
   = do rhs <- newMethodFromName orig std_nm ty
        return (std_nm, rhs)

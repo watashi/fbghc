@@ -16,7 +16,7 @@
 #include "Schedule.h"
 #include "Updates.h"
 #include "Prelude.h"
-#include "Stable.h"
+#include "StablePtr.h"
 #include "Printer.h"
 #include "Profiling.h"
 #include "Disassembler.h"
@@ -289,7 +289,7 @@ static StgWord app_ptrs_itbl[] = {
 };
 
 HsStablePtr rts_breakpoint_io_action; // points to the IO action which is executed on a breakpoint
-                                // it is set in main/GHC.hs:runStmt
+                                      // it is set in main/GHC.hs:runStmt
 
 Capability *
 interpretBCO (Capability* cap)
@@ -429,7 +429,9 @@ eval_obj:
             // https://ghc.haskell.org/trac/ghc/wiki/Commentary/Rts/HaskellExecution/PointerTagging
             tagged_obj =
                 newEmptyPAP(cap,
-                            arity <= TAG_MASK ? obj + arity : obj,
+                            arity <= TAG_MASK
+                              ? (StgClosure *) ((intptr_t) obj + arity)
+                              : obj,
                             arity);
         }
 #endif
@@ -1096,10 +1098,10 @@ run_BCO:
                   // Arrange the stack to call the breakpoint IO action, and
                   // continue execution of this BCO when the IO action returns.
                   //
-                  // ioAction :: Bool        -- exception?
+                  // ioAction :: Int#        -- the breakpoint index
+                  //          -> Int#        -- the module uniq
+                  //          -> Bool        -- exception?
                   //          -> HValue      -- the AP_STACK, or exception
-                  //          -> Int         -- the breakpoint index (arg2)
-                  //          -> Int         -- the module uniq (arg3)
                   //          -> IO ()
                   //
                   ioAction = (StgClosure *) deRefStablePtr (
@@ -1109,7 +1111,7 @@ run_BCO:
                   SpW(10) = (W_)obj;
                   SpW(9)  = (W_)&stg_apply_interp_info;
                   SpW(8)  = (W_)new_aps;
-                  SpW(7)  = (W_)False_closure;         // True <=> a breakpoint
+                  SpW(7)  = (W_)False_closure;         // True <=> an exception
                   SpW(6)  = (W_)&stg_ap_ppv_info;
                   SpW(5)  = (W_)BCO_LIT(arg3_module_uniq);
                   SpW(4)  = (W_)&stg_ap_n_info;
@@ -1176,6 +1178,48 @@ run_BCO:
             SpW(-2) = SpW(o2);
             SpW(-3) = SpW(o3);
             Sp_subW(3);
+            goto nextInsn;
+        }
+
+        case bci_PUSH8: {
+            int off = BCO_NEXT;
+            Sp_subB(1);
+            *(StgWord8*)Sp = *(StgWord8*)(Sp_plusB(off+1));
+            goto nextInsn;
+        }
+
+        case bci_PUSH16: {
+            int off = BCO_NEXT;
+            Sp_subB(2);
+            *(StgWord16*)Sp = *(StgWord16*)(Sp_plusB(off+2));
+            goto nextInsn;
+        }
+
+        case bci_PUSH32: {
+            int off = BCO_NEXT;
+            Sp_subB(4);
+            *(StgWord32*)Sp = *(StgWord32*)(Sp_plusB(off+4));
+            goto nextInsn;
+        }
+
+        case bci_PUSH8_W: {
+            int off = BCO_NEXT;
+            *(StgWord*)(Sp_minusW(1)) = *(StgWord8*)(Sp_plusB(off));
+            Sp_subW(1);
+            goto nextInsn;
+        }
+
+        case bci_PUSH16_W: {
+            int off = BCO_NEXT;
+            *(StgWord*)(Sp_minusW(1)) = *(StgWord16*)(Sp_plusB(off));
+            Sp_subW(1);
+            goto nextInsn;
+        }
+
+        case bci_PUSH32_W: {
+            int off = BCO_NEXT;
+            *(StgWord*)(Sp_minusW(1)) = *(StgWord32*)(Sp_plusB(off));
+            Sp_subW(1);
             goto nextInsn;
         }
 
@@ -1310,6 +1354,45 @@ run_BCO:
         case bci_PUSH_APPLY_PPPPPP:
             Sp_subW(1); SpW(0) = (W_)&stg_ap_pppppp_info;
             goto nextInsn;
+
+        case bci_PUSH_PAD8: {
+            Sp_subB(1);
+            *(StgWord8*)Sp = 0;
+            goto nextInsn;
+        }
+
+        case bci_PUSH_PAD16: {
+            Sp_subB(2);
+            *(StgWord16*)Sp = 0;
+            goto nextInsn;
+        }
+
+        case bci_PUSH_PAD32: {
+            Sp_subB(4);
+            *(StgWord32*)Sp = 0;
+            goto nextInsn;
+        }
+
+        case bci_PUSH_UBX8: {
+            int o_lit = BCO_GET_LARGE_ARG;
+            Sp_subB(1);
+            *(StgWord8*)Sp = *(StgWord8*)(literals+o_lit);
+            goto nextInsn;
+        }
+
+        case bci_PUSH_UBX16: {
+            int o_lit = BCO_GET_LARGE_ARG;
+            Sp_subB(2);
+            *(StgWord16*)Sp = *(StgWord16*)(literals+o_lit);
+            goto nextInsn;
+        }
+
+        case bci_PUSH_UBX32: {
+            int o_lit = BCO_GET_LARGE_ARG;
+            Sp_subB(4);
+            *(StgWord32*)Sp = *(StgWord32*)(literals+o_lit);
+            goto nextInsn;
+        }
 
         case bci_PUSH_UBX: {
             int i;

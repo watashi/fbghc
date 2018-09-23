@@ -14,10 +14,13 @@ module TcClassDcl ( tcClassSigs, tcClassDecl2,
                     tcClassMinimalDef,
                     HsSigFun, mkHsSigFun,
                     tcMkDeclCtxt, tcAddDeclCtxt, badMethodErr,
+                    instDeclCtxt1, instDeclCtxt2, instDeclCtxt3,
                     tcATDefault
                   ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import HsSyn
 import TcEnv
@@ -136,16 +139,20 @@ tcClassSigs clas sigs def_methods
        ; traceTc "tcClassSigs 2" (ppr clas)
        ; return op_info }
   where
-    vanilla_sigs = [L loc (nm,ty) | L loc (ClassOpSig False nm ty) <- sigs]
-    gen_sigs     = [L loc (nm,ty) | L loc (ClassOpSig True  nm ty) <- sigs]
+    vanilla_sigs = [L loc (nm,ty) | L loc (ClassOpSig _ False nm ty) <- sigs]
+    gen_sigs     = [L loc (nm,ty) | L loc (ClassOpSig _ True  nm ty) <- sigs]
     dm_bind_names :: [Name] -- These ones have a value binding in the class decl
     dm_bind_names = [op | L _ (FunBind {fun_id = L _ op}) <- bagToList def_methods]
+
+    skol_info = TyConSkol ClassFlavour clas
 
     tc_sig :: NameEnv (SrcSpan, Type) -> ([Located Name], LHsSigType GhcRn)
            -> TcM [TcMethInfo]
     tc_sig gen_dm_env (op_names, op_hs_ty)
       = do { traceTc "ClsSig 1" (ppr op_names)
-           ; op_ty <- tcClassSigType op_names op_hs_ty   -- Class tyvars already in scope
+           ; op_ty <- tcClassSigType skol_info op_names op_hs_ty
+                   -- Class tyvars already in scope
+
            ; traceTc "ClsSig 2" (ppr op_names)
            ; return [ (op_name, op_ty, f op_name) | L _ op_name <- op_names ] }
            where
@@ -154,7 +161,7 @@ tcClassSigs clas sigs def_methods
                   | otherwise                               = Nothing
 
     tc_gen_sig (op_names, gen_hs_ty)
-      = do { gen_op_ty <- tcClassSigType op_names gen_hs_ty
+      = do { gen_op_ty <- tcClassSigType skol_info op_names gen_hs_ty
            ; return [ (op_name, (loc, gen_op_ty)) | L loc op_name <- op_names ] }
 
 {-
@@ -191,6 +198,9 @@ tcClassDecl2 (L _ (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
 
         ; let tc_item = tcDefMeth clas clas_tyvars this_dict
                                   default_binds sig_fn prag_fn
+                   -- tcExtendTyVarEnv here (instead of scopeTyVars) is OK:
+                   -- the tcDefMeth calls checkConstraints to bump the TcLevel
+                   -- and make the implication constraint
         ; dm_binds <- tcExtendTyVarEnv clas_tyvars $
                       mapM tc_item op_items
 
@@ -273,19 +283,22 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
                                         , sig_loc   = getLoc (hsSigType hs_ty) }
 
        ; (ev_binds, (tc_bind, _))
-               <- checkConstraints (ClsSkol clas) tyvars [this_dict] $
+               <- checkConstraints (TyConSkol ClassFlavour (getName clas)) tyvars [this_dict] $
                   tcPolyCheck no_prag_fn local_dm_sig
                               (L bind_loc lm_bind)
 
-       ; let export = ABE { abe_poly   = global_dm_id
-                           , abe_mono  = local_dm_id
-                           , abe_wrap  = idHsWrapper
-                           , abe_prags = IsDefaultMethod }
-             full_bind = AbsBinds { abs_tvs      = tyvars
+       ; let export = ABE { abe_ext   = noExt
+                          , abe_poly  = global_dm_id
+                          , abe_mono  = local_dm_id
+                          , abe_wrap  = idHsWrapper
+                          , abe_prags = IsDefaultMethod }
+             full_bind = AbsBinds { abs_ext      = noExt
+                                  , abs_tvs      = tyvars
                                   , abs_ev_vars  = [this_dict]
                                   , abs_exports  = [export]
                                   , abs_ev_binds = [ev_binds]
-                                  , abs_binds    = tc_bind }
+                                  , abs_binds    = tc_bind
+                                  , abs_sig      = True }
 
        ; return (unitBag (L bind_loc full_bind)) }
 
@@ -347,8 +360,8 @@ mkHsSigFun sigs = lookupNameEnv env
     env = mkHsSigEnv get_classop_sig sigs
 
     get_classop_sig :: LSig GhcRn -> Maybe ([Located Name], LHsSigType GhcRn)
-    get_classop_sig  (L _ (ClassOpSig _ ns hs_ty)) = Just (ns, hs_ty)
-    get_classop_sig  _                             = Nothing
+    get_classop_sig  (L _ (ClassOpSig _ _ ns hs_ty)) = Just (ns, hs_ty)
+    get_classop_sig  _                               = Nothing
 
 ---------------------------
 findMethodBind  :: Name                 -- Selector
@@ -373,8 +386,8 @@ findMinimalDef :: [LSig GhcRn] -> Maybe ClassMinimalDef
 findMinimalDef = firstJusts . map toMinimalDef
   where
     toMinimalDef :: LSig GhcRn -> Maybe ClassMinimalDef
-    toMinimalDef (L _ (MinimalSig _ (L _ bf))) = Just (fmap unLoc bf)
-    toMinimalDef _                             = Nothing
+    toMinimalDef (L _ (MinimalSig _ _ (L _ bf))) = Just (fmap unLoc bf)
+    toMinimalDef _                               = Nothing
 
 {-
 Note [Polymorphic methods]
@@ -460,9 +473,25 @@ warningMinimalDefIncomplete mindef
          , nest 2 (pprBooleanFormulaNice mindef)
          , text "but there is no default implementation." ]
 
-tcATDefault :: Bool -- If a warning should be emitted when a default instance
-                    -- definition is not provided by the user
-            -> SrcSpan
+instDeclCtxt1 :: LHsSigType GhcRn -> SDoc
+instDeclCtxt1 hs_inst_ty
+  = inst_decl_ctxt (ppr (getLHsInstDeclHead hs_inst_ty))
+
+instDeclCtxt2 :: Type -> SDoc
+instDeclCtxt2 dfun_ty
+  = instDeclCtxt3 cls tys
+  where
+    (_,_,cls,tys) = tcSplitDFunTy dfun_ty
+
+instDeclCtxt3 :: Class -> [Type] -> SDoc
+instDeclCtxt3 cls cls_tys
+  = inst_decl_ctxt (ppr (mkClassPred cls cls_tys))
+
+inst_decl_ctxt :: SDoc -> SDoc
+inst_decl_ctxt doc = hang (text "In the instance declaration for")
+                        2 (quotes doc)
+
+tcATDefault :: SrcSpan
             -> TCvSubst
             -> NameSet
             -> ClassATItem
@@ -470,7 +499,7 @@ tcATDefault :: Bool -- If a warning should be emitted when a default instance
 -- ^ Construct default instances for any associated types that
 -- aren't given a user definition
 -- Returns [] or singleton
-tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
+tcATDefault loc inst_subst defined_ats (ATI fam_tc defs)
   -- User supplied instances ==> everything is OK
   | tyConName fam_tc `elemNameSet` defined_ats
   = return []
@@ -502,7 +531,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
 
    -- No defaults ==> generate a warning
   | otherwise  -- defs = Nothing
-  = do { when emit_warn $ warnMissingAT (tyConName fam_tc)
+  = do { warnMissingAT (tyConName fam_tc)
        ; return [] }
   where
     subst_tv subst tc_tv

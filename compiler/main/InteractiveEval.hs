@@ -30,6 +30,8 @@ module InteractiveEval (
         exprType,
         typeKind,
         parseName,
+        getDocs,
+        GetDocsFailure(..),
         showModule,
         moduleIsBootOrNotObjectLinkable,
         parseExpr, compileParsedExpr,
@@ -39,6 +41,8 @@ module InteractiveEval (
         ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import InteractiveEvalTypes
 
@@ -89,6 +93,8 @@ import Data.Dynamic
 import Data.Either
 import qualified Data.IntMap as IntMap
 import Data.List (find,intercalate)
+import Data.Map (Map)
+import qualified Data.Map as Map
 import StringBuffer (stringToStringBuffer)
 import Control.Monad
 import GHC.Exts
@@ -808,7 +814,7 @@ isDecl dflags stmt = do
   case parseThing Parser.parseDeclaration dflags stmt of
     Lexer.POk _ thing ->
       case unLoc thing of
-        SpliceD _ -> False
+        SpliceD _ _ -> False
         _ -> True
     Lexer.PFailed _ _ _ -> False
 
@@ -818,6 +824,70 @@ parseThing parser dflags stmt = do
       loc = mkRealSrcLoc (fsLit "<interactive>") 1 1
 
   Lexer.unP parser (Lexer.mkPState dflags buf loc)
+
+getDocs :: GhcMonad m
+        => Name
+        -> m (Either GetDocsFailure (Maybe HsDocString, Map Int HsDocString))
+           -- TODO: What about docs for constructors etc.?
+getDocs name =
+  withSession $ \hsc_env -> do
+     case nameModule_maybe name of
+       Nothing -> pure (Left (NameHasNoModule name))
+       Just mod -> do
+         if isInteractiveModule mod
+           then pure (Left InteractiveName)
+           else do
+             ModIface { mi_doc_hdr = mb_doc_hdr
+                      , mi_decl_docs = DeclDocMap dmap
+                      , mi_arg_docs = ArgDocMap amap
+                      } <- liftIO $ hscGetModuleInterface hsc_env mod
+             if isNothing mb_doc_hdr && Map.null dmap && Map.null amap
+               then pure (Left (NoDocsInIface mod compiled))
+               else pure (Right ( Map.lookup name dmap
+                                , Map.findWithDefault Map.empty name amap))
+  where
+    compiled =
+      -- TODO: Find a more direct indicator.
+      case nameSrcLoc name of
+        RealSrcLoc {} -> False
+        UnhelpfulLoc {} -> True
+
+-- | Failure modes for 'getDocs'.
+
+-- TODO: Find a way to differentiate between modules loaded without '-haddock'
+-- and modules that contain no docs.
+data GetDocsFailure
+
+    -- | 'nameModule_maybe' returned 'Nothing'.
+  = NameHasNoModule Name
+
+    -- | This is probably because the module was loaded without @-haddock@,
+    -- but it's also possible that the entire module contains no documentation.
+  | NoDocsInIface
+      Module
+      Bool -- ^ 'True': The module was compiled.
+           -- 'False': The module was :loaded.
+
+    -- | The 'Name' was defined interactively.
+  | InteractiveName
+
+instance Outputable GetDocsFailure where
+  ppr (NameHasNoModule name) =
+    quotes (ppr name) <+> text "has no module where we could look for docs."
+  ppr (NoDocsInIface mod compiled) = vcat
+    [ text "Can't find any documentation for" <+> ppr mod <> char '.'
+    , text "This is probably because the module was"
+        <+> text (if compiled then "compiled" else "loaded")
+        <+> text "without '-haddock',"
+    , text "but it's also possible that the module contains no documentation."
+    , text ""
+    , if compiled
+        then text "Try re-compiling with '-haddock'."
+        else text "Try running ':set -haddock' and :load the file again."
+        -- TODO: Figure out why :reload doesn't load the docs and maybe fix it.
+    ]
+  ppr InteractiveName =
+    text "Docs are unavailable for interactive declarations."
 
 -- -----------------------------------------------------------------------------
 -- Getting the type of an expression
@@ -838,7 +908,7 @@ typeKind normalise str = withSession $ \hsc_env -> do
    liftIO $ hscKcType hsc_env normalise str
 
 -----------------------------------------------------------------------------
--- Compile an expression, run it and deliver the result
+-- Compile an expression, run it, and deliver the result
 
 -- | Parse an expression, the parsed expression can be further processed and
 -- passed to compileParsedExpr.
@@ -846,19 +916,19 @@ parseExpr :: GhcMonad m => String -> m (LHsExpr GhcPs)
 parseExpr expr = withSession $ \hsc_env -> do
   liftIO $ runInteractiveHsc hsc_env $ hscParseExpr expr
 
--- | Compile an expression, run it and deliver the resulting HValue.
+-- | Compile an expression, run it, and deliver the resulting HValue.
 compileExpr :: GhcMonad m => String -> m HValue
 compileExpr expr = do
   parsed_expr <- parseExpr expr
   compileParsedExpr parsed_expr
 
--- | Compile an expression, run it and deliver the resulting HValue.
+-- | Compile an expression, run it, and deliver the resulting HValue.
 compileExprRemote :: GhcMonad m => String -> m ForeignHValue
 compileExprRemote expr = do
   parsed_expr <- parseExpr expr
   compileParsedExprRemote parsed_expr
 
--- | Compile an parsed expression (before renaming), run it and deliver
+-- | Compile a parsed expression (before renaming), run it, and deliver
 -- the resulting HValue.
 compileParsedExprRemote :: GhcMonad m => LHsExpr GhcPs -> m ForeignHValue
 compileParsedExprRemote expr@(L loc _) = withSession $ \hsc_env -> do
@@ -868,10 +938,15 @@ compileParsedExprRemote expr@(L loc _) = withSession $ \hsc_env -> do
   -- create a new binding.
   let expr_fs = fsLit "_compileParsedExpr"
       expr_name = mkInternalName (getUnique expr_fs) (mkTyVarOccFS expr_fs) loc
-      let_stmt = L loc . LetStmt . L loc . HsValBinds $
-        ValBindsIn (unitBag $ mkHsVarBind loc (getRdrName expr_name) expr) []
+      let_stmt = L loc . LetStmt noExt . L loc . (HsValBinds noExt) $
+        ValBinds noExt
+                     (unitBag $ mkHsVarBind loc (getRdrName expr_name) expr) []
 
-  Just ([_id], hvals_io, fix_env) <- liftIO $ hscParsedStmt hsc_env let_stmt
+  pstmt <- liftIO $ hscParsedStmt hsc_env let_stmt
+  let (hvals_io, fix_env) = case pstmt of
+        Just ([_id], hvals_io', fix_env') -> (hvals_io', fix_env')
+        _ -> panic "compileParsedExprRemote"
+
   updateFixityEnv fix_env
   status <- liftIO $ evalStmt hsc_env False (EvalThis hvals_io)
   case status of
@@ -892,7 +967,7 @@ dynCompileExpr expr = do
   parsed_expr <- parseExpr expr
   -- > Data.Dynamic.toDyn expr
   let loc = getLoc parsed_expr
-      to_dyn_expr = mkHsApp (L loc . HsVar . L loc $ getRdrName toDynName)
+      to_dyn_expr = mkHsApp (L loc . HsVar noExt . L loc $ getRdrName toDynName)
                             parsed_expr
   hval <- compileParsedExpr to_dyn_expr
   return (unsafeCoerce# hval :: Dynamic)
@@ -919,20 +994,22 @@ moduleIsBootOrNotObjectLinkable mod_summary = withSession $ \hsc_env ->
 -- RTTI primitives
 
 obtainTermFromVal :: HscEnv -> Int -> Bool -> Type -> a -> IO Term
-obtainTermFromVal hsc_env bound force ty x =
-              cvObtainTerm hsc_env bound force ty (unsafeCoerce# x)
+obtainTermFromVal hsc_env bound force ty x
+  | gopt Opt_ExternalInterpreter (hsc_dflags hsc_env)
+  = throwIO (InstallationError
+      "this operation requires -fno-external-interpreter")
+  | otherwise
+  = cvObtainTerm hsc_env bound force ty (unsafeCoerce# x)
 
 obtainTermFromId :: HscEnv -> Int -> Bool -> Id -> IO Term
 obtainTermFromId hsc_env bound force id =  do
-  let dflags = hsc_dflags hsc_env
-  hv <- Linker.getHValue hsc_env (varName id) >>= wormhole dflags
+  hv <- Linker.getHValue hsc_env (varName id)
   cvObtainTerm hsc_env bound force (idType id) hv
 
 -- Uses RTTI to reconstruct the type of an Id, making it less polymorphic
 reconstructType :: HscEnv -> Int -> Id -> IO (Maybe Type)
 reconstructType hsc_env bound id = do
-  let dflags = hsc_dflags hsc_env
-  hv <- Linker.getHValue hsc_env (varName id) >>= wormhole dflags
+  hv <- Linker.getHValue hsc_env (varName id)
   cvReconstructType hsc_env bound (idType id) hv
 
 mkRuntimeUnkTyVar :: Name -> Kind -> TyVar

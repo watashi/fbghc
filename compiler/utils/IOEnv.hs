@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 --
 -- (c) The University of Glasgow 2002-2006
 --
@@ -31,6 +29,8 @@ module IOEnv (
         atomicUpdMutVar, atomicUpdMutVar'
   ) where
 
+import GhcPrelude
+
 import DynFlags
 import Exception
 import Module
@@ -41,9 +41,7 @@ import Data.IORef       ( IORef, newIORef, readIORef, writeIORef, modifyIORef,
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import System.IO        ( fixIO )
 import Control.Monad
-#if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
-#endif
 import MonadUtils
 import Control.Applicative (Alternative(..))
 
@@ -60,13 +58,10 @@ unIOEnv (IOEnv m) = m
 instance Monad (IOEnv m) where
     (>>=)  = thenM
     (>>)   = (*>)
-    fail _ = failM -- Ignore the string
+    fail   = MonadFail.fail
 
-#if __GLASGOW_HASKELL__ > 710
 instance MonadFail.MonadFail (IOEnv m) where
     fail _ = failM -- Ignore the string
-#endif
-
 
 instance Applicative (IOEnv m) where
     pure = returnM
@@ -111,7 +106,7 @@ instance ExceptionMonad (IOEnv a) where
 
 instance ContainsDynFlags env => HasDynFlags (IOEnv env) where
     getDynFlags = do env <- getEnv
-                     return $ extractDynFlags env
+                     return $! extractDynFlags env
 
 instance ContainsModule env => HasModule (IOEnv env) where
     getModule = do env <- getEnv

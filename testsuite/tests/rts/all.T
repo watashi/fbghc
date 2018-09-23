@@ -35,12 +35,12 @@ test('derefnull',
       when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(139)]),
       when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(139)]),
       when(platform('powerpc-apple-darwin'), [ignore_stderr, exit_code(139)]),
-      when(opsys('mingw32'), [exit_code(1), normalise_fun(normalise_address)]),
+      when(opsys('mingw32'), [ignore_stderr, exit_code(11)]),
       # since these test are supposed to crash the
       # profile report will be empty always.
       # so disable the check for profiling
       when(opsys('mingw32'), omit_ways(prof_ways))],
-     compile_and_run, [''])
+     compile_and_run, ['-with-rtsopts="--generate-stack-traces=no"'])
 test('divbyzero',
      [# SIGFPE on Linux
       exit_code(136),
@@ -54,7 +54,7 @@ test('divbyzero',
       # C programs compiled with gcc exit normally, so do we.
       when(platform('powerpc64-unknown-linux'), [ignore_stdout, exit_code(0)]),
       when(platform('powerpc64le-unknown-linux'), [ignore_stdout, exit_code(0)]),
-      when(opsys('mingw32'), exit_code(1)),
+      when(opsys('mingw32'), [ignore_stderr, exit_code(8)]),
       # The output under OS X is too unstable to readily compare
       when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(136)]),
       when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(136)]),
@@ -63,7 +63,7 @@ test('divbyzero',
       # profile report will be empty always.
       # so disable the check for profiling
       when(opsys('mingw32'), omit_ways(prof_ways))],
-     compile_and_run, [''])
+     compile_and_run, ['-with-rtsopts="--generate-stack-traces=no"'])
 
 test('outofmem', when(opsys('darwin'), skip),
                  run_command, ['$MAKE -s --no-print-directory outofmem'])
@@ -74,7 +74,9 @@ test('T2047', [ignore_stdout, extra_run_opts('+RTS -c -RTS')],
 
 # Blackhole-detection test.
 # Skip GHCi due to #2786
-test('T2783', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
+test('T2783', [ omit_ways(['ghci']), exit_code(1)
+              , expect_broken_for(2783, ['threaded1'])
+	      ], compile_and_run, [''])
 
 # Test the work-stealing deque implementation.  We run this test in
 # both threaded1 (-threaded -debug) and threaded2 (-threaded) ways.
@@ -96,6 +98,11 @@ test('stack002', [extra_files(['stack001.hs']),
 test('stack003', [ omit_ways('ghci'), # uses unboxed tuples
                    extra_run_opts('500000 +RTS -kc1k -kb100 -K96m -RTS') ],
                  compile_and_run, [''])
+
+# Test that +RTS -K0 (e.g. no stack limit) parses correctly
+test('stack004', [ extra_run_opts('+RTS -K0 -RTS')
+		 , expect_broken_for(14913, ['ghci'])
+		 ], compile_and_run, [''])
 
 test('atomicinc', [ c_src, only_ways(['normal','threaded1', 'threaded2']) ], compile_and_run, [''])
 test('atomicxchg', [ c_src, only_ways(['threaded1', 'threaded2']) ],
@@ -128,9 +135,13 @@ test('T2615',
 
 # omit dyn and profiling ways, because we don't build dyn_l or p_l
 # variants of the RTS by default
-test('traceEvent', [ omit_ways(['dyn'] + prof_ways),
+test('traceEvent', [ omit_ways(['dyn', 'ghci'] + prof_ways),
                      extra_run_opts('+RTS -ls -RTS') ],
                    compile_and_run, ['-eventlog'])
+
+test('traceBinaryEvent', [ omit_ways(['dyn', 'ghci'] + prof_ways),
+                           extra_run_opts('+RTS -ls -RTS') ],
+                         compile_and_run, ['-eventlog'])
 
 test('T4059', [], run_command, ['$MAKE -s --no-print-directory T4059'])
 
@@ -167,30 +178,34 @@ def checkDynAsm(actual_file, normaliser):
     actual_raw = read_no_crs(actual_file)
     actual_str = normaliser(actual_raw)
     actual = actual_str.split()
-    if actual == ['initArray1', 'initArray2', 'ctors1', 'ctors2', 'success']:
-        return 1
-    elif actual == ['initArray1', 'initArray2', 'ctors2', 'ctors1', 'success']:
-        # gold seems to produce this ordering; this is slightly odd but if it's
-        # wrong it's not our fault. See #13883.
-        return 1
-    elif actual == ['ctors1', 'ctors2', 'initArray1', 'initArray2', 'success']:
-        if_verbose(1, 'T5435_dyn_asm detected old-style dlopen, see #8458')
-        return 1
+    if actual == ['initArray1', 'initArray2', 'success']:
+        return True
     elif opsys('darwin') and actual == ['modInitFunc1', 'modInitFunc2', 'success']:
-        return 1
+        return True
     elif opsys('mingw32') and actual == ['ctors1', 'ctors2', 'success']:
-        return 1
+        return True
     else:
         if_verbose(1, 'T5435_dyn_asm failed with %s, see all.T for details' % actual)
-        return 0
+        return False
 
+# T5435_v_asm got split into two tests because depending
+# on the linker, .init_array and .ctors sections are loaded
+# in a different order (but all entries within a section
+# do get loaded in a deterministic order). So we test each
+# separately now.
 # These should have extra_clean() arguments, but I need
 # to somehow extract out the name of DLLs to do that
-
-test('T5435_v_asm', [extra_files(['T5435.hs', 'T5435_asm.c']),
+test('T5435_v_asm_a', [extra_files(['T5435.hs', 'T5435_asm.c']),
                      when(arch('powerpc64') or arch('powerpc64le'),
                           expect_broken(11259))],
-     run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
+     run_command, ['$MAKE -s --no-print-directory T5435_v_asm_a'])
+# this one just needs to run on linux, as darwin/mingw32 are covered
+# by the _a test already.
+test('T5435_v_asm_b', [extra_files(['T5435.hs', 'T5435_asm.c']),
+                      when(arch('powerpc64') or arch('powerpc64le'),
+                          expect_broken(11259)),
+		      when(opsys('darwin') or opsys('mingw32'), skip)],
+     run_command, ['$MAKE -s --no-print-directory T5435_v_asm_b'])
 test('T5435_v_gcc', [extra_files(['T5435.hs', 'T5435_gcc.c']),
                      when(arch('powerpc64') or arch('powerpc64le'),
                           expect_broken(11259))],
@@ -293,7 +308,8 @@ test('ListStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
 
 # 251 = RTS exit code for "out of memory"
-test('overflow1', [ exit_code(251) ], compile_and_run, [''])
+test('overflow1', [ exit_code(251), when(wordsize(32), expect_broken(15255)) ],
+     compile_and_run, [''])
 test('overflow2', [ exit_code(251) ], compile_and_run, [''])
 test('overflow3', [ exit_code(251) ], compile_and_run, [''])
 
@@ -375,6 +391,43 @@ test('T12497', [ unless(opsys('mingw32'), skip)
                ],
                run_command, ['$MAKE -s --no-print-directory T12497'])
 
-test('T12903', [when(opsys('mingw32'), skip)], compile_and_run, [''])
+test('T13617', [ unless(opsys('mingw32'), skip)],
+               run_command, ['$MAKE -s --no-print-directory T13617'])
+
+# This test sometimes produces out of sequence samples in the profasm way, but
+# not reliably, so we just skip it. See ticket #15065.
+# Test is being skipped on darwin due to it's flakiness.
+test('T12903', [ when(opsys('mingw32'), skip)
+               , when(opsys('darwin'), skip)
+	           , omit_ways(['ghci', 'profasm'])]
+	       , compile_and_run, [''])
+
 test('T13832', exit_code(1), compile_and_run, ['-threaded'])
 test('T13894', normal, compile_and_run, [''])
+# this test fails with the profasm way on some machines but not others,
+# so we just skip it.
+test('T14497', [omit_ways(['profasm']), multi_cpu_race], compile_and_run, ['-O'])
+test('T14695', [normal, ignore_stderr]
+             , run_command, ['$MAKE -s --no-print-directory T14695'])
+test('T14702', [ ignore_stdout
+               , only_ways(['threaded1', 'threaded2'])
+               , extra_run_opts('+RTS -A32m -N8 -T -RTS')
+               ]
+               , compile_and_run, [''])
+
+test('T14900', normal, compile_and_run, ['-package ghc-compact'])
+test('InternalCounters', normal, run_command,
+  ['$MAKE -s --no-print-directory InternalCounters'])
+test('alloccounter1', normal, compile_and_run,
+  [
+    # avoid allocating stack chunks, which counts as
+    # allocation and messes up the results:
+    '-with-rtsopts=-k1m'
+  ])
+
+test('nursery-chunks1',
+  [ extra_run_opts('4 100 +RTS -n32k -A1m -RTS')
+  , only_ways(['threaded1','threaded2'])
+  ],
+  compile_and_run,
+  [''])

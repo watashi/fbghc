@@ -8,7 +8,7 @@
 {-# LANGUAGE CPP #-}
 
 module ListSetOps (
-        unionLists, minusList,
+        unionLists, minusList, deleteBys,
 
         -- Association lists
         Assoc, assoc, assocMaybe, assocUsing, assocDefault, assocDefaultUsing,
@@ -23,15 +23,24 @@ module ListSetOps (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Outputable
 import Util
 
 import Data.List
+import qualified Data.List.NonEmpty as NE
+import Data.List.NonEmpty (NonEmpty(..))
 import qualified Data.Set as S
 
 getNth :: Outputable a => [a] -> Int -> a
 getNth xs n = ASSERT2( xs `lengthExceeds` n, ppr n $$ ppr xs )
              xs !! n
+
+deleteBys :: (a -> a -> Bool) -> [a] -> [a] -> [a]
+-- (deleteBys eq xs ys) returns xs-ys, using the given equality function
+-- Just like 'Data.List.delete' but with an equality function
+deleteBys eq xs ys = foldl' (flip (deleteBy eq)) xs ys
 
 {-
 ************************************************************************
@@ -131,19 +140,19 @@ hasNoDups xs = f [] xs
 
 equivClasses :: (a -> a -> Ordering) -- Comparison
              -> [a]
-             -> [[a]]
+             -> [NonEmpty a]
 
-equivClasses _         []  = []
-equivClasses _   stuff@[_] = [stuff]
-equivClasses cmp items     = groupBy eq (sortBy cmp items)
+equivClasses _   []      = []
+equivClasses _   [stuff] = [stuff :| []]
+equivClasses cmp items   = NE.groupBy eq (sortBy cmp items)
   where
     eq a b = case cmp a b of { EQ -> True; _ -> False }
 
 removeDups :: (a -> a -> Ordering) -- Comparison function
            -> [a]
-           -> ([a],     -- List with no duplicates
-               [[a]])   -- List of duplicate groups.  One representative from
-                        -- each group appears in the first result
+           -> ([a],          -- List with no duplicates
+               [NonEmpty a]) -- List of duplicate groups.  One representative
+                             -- from each group appears in the first result
 
 removeDups _   []  = ([], [])
 removeDups _   [x] = ([x],[])
@@ -151,12 +160,12 @@ removeDups cmp xs
   = case (mapAccumR collect_dups [] (equivClasses cmp xs)) of { (dups, xs') ->
     (xs', dups) }
   where
-    collect_dups _           []         = panic "ListSetOps: removeDups"
-    collect_dups dups_so_far [x]        = (dups_so_far,      x)
-    collect_dups dups_so_far dups@(x:_) = (dups:dups_so_far, x)
+    collect_dups :: [NonEmpty a] -> NonEmpty a -> ([NonEmpty a], a)
+    collect_dups dups_so_far (x :| [])     = (dups_so_far,      x)
+    collect_dups dups_so_far dups@(x :| _) = (dups:dups_so_far, x)
 
-findDupsEq :: (a->a->Bool) -> [a] -> [[a]]
+findDupsEq :: (a->a->Bool) -> [a] -> [NonEmpty a]
 findDupsEq _  [] = []
 findDupsEq eq (x:xs) | null eq_xs  = findDupsEq eq xs
-                     | otherwise   = (x:eq_xs) : findDupsEq eq neq_xs
+                     | otherwise   = (x :| eq_xs) : findDupsEq eq neq_xs
     where (eq_xs, neq_xs) = partition (eq x) xs

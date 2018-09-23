@@ -5,12 +5,13 @@
 Functions for working with the typechecker environment (setters, getters...).
 -}
 
-{-# LANGUAGE CPP, ExplicitForAll, FlexibleInstances #-}
+{-# LANGUAGE CPP, ExplicitForAll, FlexibleInstances, BangPatterns #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module TcRnMonad(
   -- * Initalisation
-  initTc, initTcWithGbl, initTcInteractive, initTcForLookup, initTcRnIf,
+  initTc, initTcWithGbl, initTcInteractive, initTcRnIf,
 
   -- * Simple accessors
   discardResult,
@@ -19,7 +20,8 @@ module TcRnMonad(
   getEnvs, setEnvs,
   xoptM, doptM, goptM, woptM,
   setXOptM, unsetXOptM, unsetGOptM, unsetWOptM,
-  whenDOptM, whenGOptM, whenWOptM, whenXOptM,
+  whenDOptM, whenGOptM, whenWOptM,
+  whenXOptM, unlessXOptM,
   getGhcMode,
   withDoDynamicToo,
   getEpsVar,
@@ -84,19 +86,19 @@ module TcRnMonad(
   failIfTc, failIfTcM,
   warnIfFlag, warnIf, warnTc, warnTcM,
   addWarnTc, addWarnTcM, addWarn, addWarnAt, add_warn,
-  tcInitTidyEnv, tcInitOpenTidyEnv, mkErrInfo,
+  mkErrInfo,
 
   -- * Type constraints
-  newTcEvBinds,
+  newTcEvBinds, newNoTcEvBinds, cloneEvBindsVar,
   addTcEvBind,
-  getTcEvTyCoVars, getTcEvBindsMap,
+  getTcEvTyCoVars, getTcEvBindsMap, setTcEvBindsMap,
   chooseUniqueOccTc,
   getConstraintVar, setConstraintVar,
   emitConstraints, emitStaticConstraints, emitSimple, emitSimples,
   emitImplication, emitImplications, emitInsoluble,
   discardConstraints, captureConstraints, tryCaptureConstraints,
   pushLevelAndCaptureConstraints,
-  pushTcLevelM_, pushTcLevelM,
+  pushTcLevelM_, pushTcLevelM, pushTcLevelsM,
   getTcLevel, setTcLevel, isTouchableTcM,
   getLclTypeEnv, setLclTypeEnv,
   traceTcConstraints, emitWildCardHoleConstraints,
@@ -127,12 +129,17 @@ module TcRnMonad(
 
   withException,
 
+  -- * Stuff for cost centres.
+  ContainsCostCentreState(..), getCCIndexM,
+
   -- * Types etc.
   module TcRnTypes,
   module IOEnv
   ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import TcRnTypes        -- Re-export all
 import IOEnv            -- Re-export all
@@ -167,16 +174,18 @@ import Util
 import Annotations
 import BasicTypes( TopLevelFlag )
 import Maybes
+import CostCentreState
 
 import qualified GHC.LanguageExtensions as LangExt
 
-import Control.Exception
 import Data.IORef
 import Control.Monad
 import Data.Set ( Set )
 import qualified Data.Set as Set
 
 import {-# SOURCE #-} TcSplice ( runRemoteModFinalizers )
+import {-# SOURCE #-} TcEnv    ( tcInitTidyEnv )
+
 import qualified Data.Map as Map
 
 {-
@@ -212,10 +221,12 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
 
         dependent_files_var <- newIORef [] ;
         static_wc_var       <- newIORef emptyWC ;
+        cc_st_var           <- newIORef newCostCentreState ;
         th_topdecls_var      <- newIORef [] ;
         th_foreign_files_var <- newIORef [] ;
         th_topnames_var      <- newIORef emptyNameSet ;
         th_modfinalizers_var <- newIORef [] ;
+        th_coreplugins_var <- newIORef [] ;
         th_state_var         <- newIORef Map.empty ;
         th_remote_state_var  <- newIORef Nothing ;
         let {
@@ -223,22 +234,28 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
 
              maybe_rn_syntax :: forall a. a -> Maybe a ;
              maybe_rn_syntax empty_val
-                | keep_rn_syntax = Just empty_val
-                | otherwise      = Nothing ;
+                | dopt Opt_D_dump_rn_ast dflags = Just empty_val
+
+                  -- We want to serialize the documentation in the .hi-files,
+                  -- and need to extract it from the renamed syntax first.
+                  -- See 'ExtractDocs.extractDocs'.
+                | gopt Opt_Haddock dflags       = Just empty_val
+
+                | keep_rn_syntax                = Just empty_val
+                | otherwise                     = Nothing ;
 
              gbl_env = TcGblEnv {
                 tcg_th_topdecls      = th_topdecls_var,
                 tcg_th_foreign_files = th_foreign_files_var,
                 tcg_th_topnames      = th_topnames_var,
                 tcg_th_modfinalizers = th_modfinalizers_var,
+                tcg_th_coreplugins = th_coreplugins_var,
                 tcg_th_state         = th_state_var,
                 tcg_th_remote_state  = th_remote_state_var,
 
                 tcg_mod            = mod,
                 tcg_semantic_mod   =
-                    if thisPackage dflags == moduleUnitId mod
-                        then canonicalizeHomeModule dflags (moduleName mod)
-                        else mod,
+                    canonicalizeModuleIfHome dflags mod,
                 tcg_src            = hsc_src,
                 tcg_rdr_env        = emptyGlobalRdrEnv,
                 tcg_fix_env        = emptyNameEnv,
@@ -250,7 +267,6 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_type_env_var   = type_env_var,
                 tcg_inst_env       = emptyInstEnv,
                 tcg_fam_inst_env   = emptyFamInstEnv,
-                tcg_pending_fam_checks = emptyNameEnv,
                 tcg_ann_env        = emptyAnnEnv,
                 tcg_th_used        = th_var,
                 tcg_th_splice_used = th_splice_var,
@@ -281,7 +297,6 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_fam_insts      = [],
                 tcg_rules          = [],
                 tcg_fords          = [],
-                tcg_vects          = [],
                 tcg_patsyns        = [],
                 tcg_merged         = [],
                 tcg_dfun_n         = dfun_n_var,
@@ -295,7 +310,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_tc_plugins     = [],
                 tcg_top_loc        = loc,
                 tcg_static_wc      = static_wc_var,
-                tcg_complete_matches = []
+                tcg_complete_matches = [],
+                tcg_cc_st          = cc_st_var
              } ;
         } ;
 
@@ -323,7 +339,6 @@ initTcWithGbl hsc_env gbl_env loc do_this
                 tcl_arrow_ctxt = NoArrowCtxt,
                 tcl_env        = emptyNameEnv,
                 tcl_bndrs      = [],
-                tcl_tidy       = emptyTidyEnv,
                 tcl_tyvars     = tvs_var,
                 tcl_lie        = lie_var,
                 tcl_tclvl      = topTcLevel
@@ -363,15 +378,6 @@ initTcInteractive hsc_env thing_inside
            thing_inside
   where
     interactive_src_loc = mkRealSrcLoc (fsLit "<interactive>") 1 1
-
-initTcForLookup :: HscEnv -> TcM a -> IO a
--- The thing_inside is just going to look up something
--- in the environment, so we don't need much setup
-initTcForLookup hsc_env thing_inside
-  = do { (msgs, m) <- initTcInteractive hsc_env thing_inside
-       ; case m of
-             Nothing -> throwIO $ mkSrcErr $ snd msgs
-             Just x -> return x }
 
 {- Note [Default types]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -427,7 +433,7 @@ updTopEnv upd = updEnv (\ env@(Env { env_top = top }) ->
                           env { env_top = upd top })
 
 getGblEnv :: TcRnIf gbl lcl gbl
-getGblEnv = do { env <- getEnv; return (env_gbl env) }
+getGblEnv = do { Env{..} <- getEnv; return env_gbl }
 
 updGblEnv :: (gbl -> gbl) -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 updGblEnv upd = updEnv (\ env@(Env { env_gbl = gbl }) ->
@@ -437,7 +443,7 @@ setGblEnv :: gbl -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 setGblEnv gbl_env = updEnv (\ env -> env { env_gbl = gbl_env })
 
 getLclEnv :: TcRnIf gbl lcl lcl
-getLclEnv = do { env <- getEnv; return (env_lcl env) }
+getLclEnv = do { Env{..} <- getEnv; return env_lcl }
 
 updLclEnv :: (lcl -> lcl) -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 updLclEnv upd = updEnv (\ env@(Env { env_lcl = lcl }) ->
@@ -498,6 +504,10 @@ whenWOptM flag thing_inside = do b <- woptM flag
 whenXOptM :: LangExt.Extension -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
 whenXOptM flag thing_inside = do b <- xoptM flag
                                  when b thing_inside
+
+unlessXOptM :: LangExt.Extension -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
+unlessXOptM flag thing_inside = do b <- xoptM flag
+                                   unless b thing_inside
 
 getGhcMode :: TcRnIf gbl lcl GhcMode
 getGhcMode = do { env <- getTopEnv; return (ghcMode (hsc_dflags env)) }
@@ -1293,19 +1303,6 @@ add_warn_at reason loc msg extra_info
                                     msg extra_info } ;
          reportWarning reason warn }
 
-tcInitTidyEnv :: TcM TidyEnv
-tcInitTidyEnv
-  = do  { lcl_env <- getLclEnv
-        ; return (tcl_tidy lcl_env) }
-
--- | Get a 'TidyEnv' that includes mappings for all vars free in the given
--- type. Useful when tidying open types.
-tcInitOpenTidyEnv :: [TyCoVar] -> TcM TidyEnv
-tcInitOpenTidyEnv tvs
-  = do { env1 <- tcInitTidyEnv
-       ; let env2 = tidyFreeTyCoVars env1 tvs
-       ; return env2 }
-
 
 {-
 -----------------------------------
@@ -1367,13 +1364,47 @@ newTcEvBinds = do { binds_ref <- newTcRef emptyEvBindMap
                                        , ebv_tcvs = tcvs_ref
                                        , ebv_uniq = uniq }) }
 
+-- | Creates an EvBindsVar incapable of holding any bindings. It still
+-- tracks covar usages (see comments on ebv_tcvs in TcEvidence), thus
+-- must be made monadically
+newNoTcEvBinds :: TcM EvBindsVar
+newNoTcEvBinds
+  = do { tcvs_ref  <- newTcRef emptyVarSet
+       ; uniq <- newUnique
+       ; traceTc "newNoTcEvBinds" (text "unique =" <+> ppr uniq)
+       ; return (CoEvBindsVar { ebv_tcvs = tcvs_ref
+                              , ebv_uniq = uniq }) }
+
+cloneEvBindsVar :: EvBindsVar -> TcM EvBindsVar
+-- Clone the refs, so that any binding created when
+-- solving don't pollute the original
+cloneEvBindsVar ebv@(EvBindsVar {})
+  = do { binds_ref <- newTcRef emptyEvBindMap
+       ; tcvs_ref  <- newTcRef emptyVarSet
+       ; return (ebv { ebv_binds = binds_ref
+                     , ebv_tcvs = tcvs_ref }) }
+cloneEvBindsVar ebv@(CoEvBindsVar {})
+  = do { tcvs_ref  <- newTcRef emptyVarSet
+       ; return (ebv { ebv_tcvs = tcvs_ref }) }
+
 getTcEvTyCoVars :: EvBindsVar -> TcM TyCoVarSet
-getTcEvTyCoVars (EvBindsVar { ebv_tcvs = ev_ref })
-  = readTcRef ev_ref
+getTcEvTyCoVars ev_binds_var
+  = readTcRef (ebv_tcvs ev_binds_var)
 
 getTcEvBindsMap :: EvBindsVar -> TcM EvBindMap
 getTcEvBindsMap (EvBindsVar { ebv_binds = ev_ref })
   = readTcRef ev_ref
+getTcEvBindsMap (CoEvBindsVar {})
+  = return emptyEvBindMap
+
+setTcEvBindsMap :: EvBindsVar -> EvBindMap -> TcM ()
+setTcEvBindsMap (EvBindsVar { ebv_binds = ev_ref }) binds
+  = writeTcRef ev_ref binds
+setTcEvBindsMap v@(CoEvBindsVar {}) ev_binds
+  | isEmptyEvBindMap ev_binds
+  = return ()
+  | otherwise
+  = pprPanic "setTcEvBindsMap" (ppr v $$ ppr ev_binds)
 
 addTcEvBind :: EvBindsVar -> EvBind -> TcM ()
 -- Add a binding to the TcEvBinds by side effect
@@ -1382,6 +1413,8 @@ addTcEvBind (EvBindsVar { ebv_binds = ev_ref, ebv_uniq = u }) ev_bind
                                  ppr ev_bind
        ; bnds <- readTcRef ev_ref
        ; writeTcRef ev_ref (extendEvBinds bnds ev_bind) }
+addTcEvBind (CoEvBindsVar { ebv_uniq = u }) ev_bind
+  = pprPanic "addTcEvBind CoEvBindsVar" (ppr ev_bind $$ ppr u)
 
 chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
 chooseUniqueOccTc fn =
@@ -1478,6 +1511,7 @@ captureConstraints thing_inside
            Left _    -> do { emitConstraints lie; failM }
            Right res -> return (res, lie) }
 
+-- | The name says it all. The returned TcLevel is the *inner* TcLevel.
 pushLevelAndCaptureConstraints :: TcM a -> TcM (TcLevel, WantedConstraints, a)
 pushLevelAndCaptureConstraints thing_inside
   = do { env <- getLclEnv
@@ -1498,6 +1532,15 @@ pushTcLevelM thing_inside
                           thing_inside
        ; return (res, tclvl') }
 
+-- Returns pushed TcLevel
+pushTcLevelsM :: Int -> TcM a -> TcM (a, TcLevel)
+pushTcLevelsM num_levels thing_inside
+  = do { env <- getLclEnv
+       ; let tclvl' = nTimes num_levels pushTcLevel (tcl_tclvl env)
+       ; res <- setLclEnv (env { tcl_tclvl = tclvl' }) $
+                thing_inside
+       ; return (res, tclvl') }
+
 getTcLevel :: TcM TcLevel
 getTcLevel = do { env <- getLclEnv
                 ; return (tcl_tclvl env) }
@@ -1508,8 +1551,8 @@ setTcLevel tclvl thing_inside
 
 isTouchableTcM :: TcTyVar -> TcM Bool
 isTouchableTcM tv
-  = do { env <- getLclEnv
-       ; return (isTouchableMetaTyVar (tcl_tclvl env) tv) }
+  = do { lvl <- getTcLevel
+       ; return (isTouchableMetaTyVar lvl tv) }
 
 getLclTypeEnv :: TcM TcTypeEnv
 getLclTypeEnv = do { env <- getLclEnv; return (tcl_env env) }
@@ -1578,7 +1621,7 @@ looks :-).
 
 However suppose we throw an exception inside an invocation of
 captureConstraints, and discard all the constraints. Some of those
-contraints might be "variable out of scope" Hole constraints, and that
+constraints might be "variable out of scope" Hole constraints, and that
 might have been the actual original cause of the exception!  For
 example (Trac #12529):
    f = p @ Int
@@ -1590,6 +1633,17 @@ So we /retain the insoluble constraints/ if there is an exception.
 Hence:
   - insolublesOnly in tryCaptureConstraints
   - emitConstraints in the Left case of captureConstraints
+
+Hover note that fresly-generated constraints like (Int ~ Bool), or
+((a -> b) ~ Int) are all CNonCanonical, and hence won't be flagged as
+insoluble.  The constraint solver does that.  So they'll be discarded.
+That's probably ok; but see th/5358 as a not-so-good example:
+   t1 :: Int
+   t1 x = x   -- Manifestly wrong
+
+   foo = $(...raises exception...)
+We report the exception, but not the bug in t1.  Oh well.  Possible
+solution: make TcUnify.uType spot manifestly-insoluble constraints.
 
 
 ************************************************************************
@@ -1721,7 +1775,7 @@ initIfaceTcRn :: IfG a -> TcRn a
 initIfaceTcRn thing_inside
   = do  { tcg_env <- getGblEnv
         ; dflags <- getDynFlags
-        ; let mod = tcg_semantic_mod tcg_env
+        ; let !mod = tcg_semantic_mod tcg_env
               -- When we are instantiating a signature, we DEFINITELY
               -- do not want to knot tie.
               is_instantiate = unitIdIsDefinite (thisPackage dflags) &&
@@ -1860,3 +1914,24 @@ up as the value of the unsafeInterleaveIO thunk (see #8006 for a detailed
 discussion).  We don't currently know a general solution to this problem, but
 we can use uninterruptibleMask_ to avoid the situation.
 -}
+
+-- | Environments which track 'CostCentreState'
+class ContainsCostCentreState e where
+  extractCostCentreState :: e -> TcRef CostCentreState
+
+instance ContainsCostCentreState TcGblEnv where
+  extractCostCentreState = tcg_cc_st
+
+instance ContainsCostCentreState DsGblEnv where
+  extractCostCentreState = ds_cc_st
+
+-- | Get the next cost centre index associated with a given name.
+getCCIndexM :: (ContainsCostCentreState gbl)
+            => FastString -> TcRnIf gbl lcl CostCentreIndex
+getCCIndexM nm = do
+  env <- getGblEnv
+  let cc_st_ref = extractCostCentreState env
+  cc_st <- readTcRef cc_st_ref
+  let (idx, cc_st') = getCCIndex nm cc_st
+  writeTcRef cc_st_ref cc_st'
+  return idx

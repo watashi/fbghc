@@ -84,7 +84,7 @@ test('T3731', normal, compile_and_run, [''])
 test('T3731-short', normal, compile_and_run, [''])
 test('T3500a', normal, compile_and_run, [''])
 test('T3500b', normal, compile_and_run, [''])
-test('T4809', reqlib('mtl'), compile_and_run, [''])
+test('T4809', normal, compile_and_run, [''])
 test('T2722', normal, compile_and_run, [''])
 test('mc17', normal, compile_and_run, [''])
 test('T5759', normal, compile_and_run, [''])
@@ -114,12 +114,25 @@ test('TypeOf', normal, compile_and_run, [''])
 test('TypeRep', normal, compile_and_run, [''])
 test('T11120', normal, compile_and_run, [''])
 test('KindInvariant', normal, ghci_script, ['KindInvariant.script'])
-test('StrictPats', normal, compile_and_run, [''])
-test('T12809', normal, compile_and_run, [''])
-test('EtaExpandLevPoly', normal, compile_and_run, [''])
+
+# We omit the ghci way in these 3 tests because they use
+# unboxed sums and ghci does not support those yet.
+test('StrictPats', omit_ways(['ghci']), compile_and_run, [''])
+test('T12809', omit_ways(['ghci']), compile_and_run, [''])
+test('EtaExpandLevPoly', [ omit_ways(['ghci'])
+                         # triggers a core lint error in profiled ways
+			 , expect_broken_for(15066, ['profasm', 'profthreaded'])
+			 ], compile_and_run, [''])
+
 test('TestTypeableBinary', normal, compile_and_run, [''])
-test('Typeable1', normal, compile_fail, [''])
+test('Typeable1', normal, compile_fail, ['-Werror'])
 test('TypeableEq', normal, compile_and_run, [''])
 test('T13435', normal, compile_and_run, [''])
 test('T11715', exit_code(1), compile_and_run, [''])
 test('T13594a', normal, ghci_script, ['T13594a.script'])
+
+# GHCi exits with code zero due to deferred type errors
+test('T13838', [exit_code(1), omit_ways(['ghci'])], compile_and_run, ['-fdefer-type-errors'])
+test('T14218', normal, compile_and_run, [''])
+test('T14236', normal, compile_and_run, [''])
+test('T14925', normal, compile_and_run, [''])

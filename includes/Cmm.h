@@ -161,9 +161,11 @@
 
 /* TO_W_(n) converts n to W_ type from a smaller type */
 #if SIZEOF_W == 4
+#define TO_I64(x) %sx64(x)
 #define TO_W_(x) %sx32(x)
 #define HALF_W_(x) %lobits16(x)
 #elif SIZEOF_W == 8
+#define TO_I64(x) (x)
 #define TO_W_(x) %sx64(x)
 #define HALF_W_(x) %lobits32(x)
 #endif
@@ -209,7 +211,7 @@
         if (predicate) {                        \
             /*null*/;                           \
         } else {                                \
-            foreign "C" _assertFail(NULL, __LINE__) never returns; \
+            foreign "C" _assertFail(__FILE__, __LINE__) never returns; \
         }
 #else
 #define ASSERT(p) /* nothing */
@@ -615,10 +617,11 @@
 #define mutArrPtrsCardWords(n) ROUNDUP_BYTES_TO_WDS(mutArrPtrCardUp(n))
 
 #if defined(PROFILING) || (!defined(THREADED_RTS) && defined(DEBUG))
+#define OVERWRITING_CLOSURE_SIZE(c, size) foreign "C" overwritingClosureSize(c "ptr", size)
 #define OVERWRITING_CLOSURE(c) foreign "C" overwritingClosure(c "ptr")
-#define OVERWRITING_CLOSURE_OFS(c,n) \
-    foreign "C" overwritingClosureOfs(c "ptr", n)
+#define OVERWRITING_CLOSURE_OFS(c,n) foreign "C" overwritingClosureOfs(c "ptr", n)
 #else
+#define OVERWRITING_CLOSURE_SIZE(c, size) /* nothing */
 #define OVERWRITING_CLOSURE(c) /* nothing */
 #define OVERWRITING_CLOSURE_OFS(c,n) /* nothing */
 #endif
@@ -797,7 +800,6 @@
 #define NO_TREC                   stg_NO_TREC_closure
 #define END_TSO_QUEUE             stg_END_TSO_QUEUE_closure
 #define STM_AWOKEN                stg_STM_AWOKEN_closure
-#define END_INVARIANT_CHECK_QUEUE stg_END_INVARIANT_CHECK_QUEUE_closure
 
 #define recordMutableCap(p, gen)                                        \
   W_ __bd;                                                              \

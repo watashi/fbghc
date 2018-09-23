@@ -51,7 +51,6 @@ module Name (
         setNameLoc,
         tidyNameOcc,
         localiseName,
-        mkLocalisedOccName,
 
         nameSrcLoc, nameSrcSpan, pprNameDefnLoc, pprDefinedAt,
 
@@ -70,15 +69,16 @@ module Name (
         NamedThing(..),
         getSrcLoc, getSrcSpan, getOccString, getOccFS,
 
-        pprInfixName, pprPrefixName, pprModulePrefix,
+        pprInfixName, pprPrefixName, pprModulePrefix, pprNameUnqualified,
         nameStableString,
 
         -- Re-export the OccName stuff
         module OccName
     ) where
 
+import GhcPrelude
+
 import {-# SOURCE #-} TyCoRep( TyThing )
-import {-# SOURCE #-} PrelNames( starKindTyConKey, unicodeStarKindTyConKey )
 
 import OccName
 import Module
@@ -107,7 +107,7 @@ import Data.Data
 data Name = Name {
                 n_sort :: NameSort,     -- What sort of name it is
                 n_occ  :: !OccName,     -- Its occurrence name
-                n_uniq :: {-# UNPACK #-} !Int,
+                n_uniq :: {-# UNPACK #-} !Unique,
                 n_loc  :: !SrcSpan      -- Definition site
             }
 
@@ -115,6 +115,7 @@ data Name = Name {
 -- (and real!) space leaks, due to the fact that we don't look at
 -- the SrcLoc in a Name all that often.
 
+-- See Note [About the NameSorts]
 data NameSort
   = External Module
 
@@ -151,7 +152,7 @@ instance NFData NameSort where
 data BuiltInSyntax = BuiltInSyntax | UserSyntax
 
 {-
-Notes about the NameSorts:
+Note [About the NameSorts]
 
 1.  Initially, top-level Ids (including locally-defined ones) get External names,
     and all other local Ids get Internal names
@@ -192,11 +193,11 @@ instance HasOccName Name where
 
 nameUnique              :: Name -> Unique
 nameOccName             :: Name -> OccName
-nameModule              :: Name -> Module
+nameModule              :: HasDebugCallStack => Name -> Module
 nameSrcLoc              :: Name -> SrcLoc
 nameSrcSpan             :: Name -> SrcSpan
 
-nameUnique  name = mkUniqueGrimily (n_uniq name)
+nameUnique  name = n_uniq name
 nameOccName name = n_occ  name
 nameSrcLoc  name = srcSpanStart (n_loc name)
 nameSrcSpan name = n_loc  name
@@ -260,7 +261,7 @@ nameIsLocalOrFrom :: Module -> Name -> Bool
 --                 you can find details (type, fixity, instances) in the
 --                     TcGblEnv or TcLclEnv
 --
--- The isInteractiveModule part is because successive interactions of a GCHi session
+-- The isInteractiveModule part is because successive interactions of a GHCi session
 -- each give rise to a fresh module (Ghci1, Ghci2, etc), but they all come
 -- from the magic 'interactive' package; and all the details are kept in the
 -- TcLclEnv, TcGblEnv, NOT in the HPT or EPT.
@@ -293,7 +294,7 @@ nameIsHomePackageImport this_mod
     this_pkg = moduleUnitId this_mod
 
 -- | Returns True if the Name comes from some other package: neither this
--- pacakge nor the interactive package.
+-- package nor the interactive package.
 nameIsFromExternalPackage :: UnitId -> Name -> Bool
 nameIsFromExternalPackage this_pkg name
   | Just mod <- nameModule_maybe name
@@ -332,7 +333,7 @@ isSystemName _                        = False
 -- | Create a name which is (for now at least) local to the current module and hence
 -- does not need a 'Module' to disambiguate it from other 'Name's
 mkInternalName :: Unique -> OccName -> SrcSpan -> Name
-mkInternalName uniq occ loc = Name { n_uniq = getKey uniq
+mkInternalName uniq occ loc = Name { n_uniq = uniq
                                    , n_sort = Internal
                                    , n_occ = occ
                                    , n_loc = loc }
@@ -347,12 +348,12 @@ mkInternalName uniq occ loc = Name { n_uniq = getKey uniq
 
 mkClonedInternalName :: Unique -> Name -> Name
 mkClonedInternalName uniq (Name { n_occ = occ, n_loc = loc })
-  = Name { n_uniq = getKey uniq, n_sort = Internal
+  = Name { n_uniq = uniq, n_sort = Internal
          , n_occ = occ, n_loc = loc }
 
 mkDerivedInternalName :: (OccName -> OccName) -> Unique -> Name -> Name
 mkDerivedInternalName derive_occ uniq (Name { n_occ = occ, n_loc = loc })
-  = Name { n_uniq = getKey uniq, n_sort = Internal
+  = Name { n_uniq = uniq, n_sort = Internal
          , n_occ = derive_occ occ, n_loc = loc }
 
 -- | Create a name which definitely originates in the given module
@@ -361,13 +362,13 @@ mkExternalName :: Unique -> Module -> OccName -> SrcSpan -> Name
 -- (see Note [The Name Cache] in IfaceEnv), so don't just call mkExternalName
 -- with some fresh unique without populating the Name Cache
 mkExternalName uniq mod occ loc
-  = Name { n_uniq = getKey uniq, n_sort = External mod,
+  = Name { n_uniq = uniq, n_sort = External mod,
            n_occ = occ, n_loc = loc }
 
 -- | Create a name which is actually defined by the compiler itself
 mkWiredInName :: Module -> OccName -> Unique -> TyThing -> BuiltInSyntax -> Name
 mkWiredInName mod occ uniq thing built_in
-  = Name { n_uniq = getKey uniq,
+  = Name { n_uniq = uniq,
            n_sort = WiredIn mod thing built_in,
            n_occ = occ, n_loc = wiredInSrcSpan }
 
@@ -376,14 +377,14 @@ mkSystemName :: Unique -> OccName -> Name
 mkSystemName uniq occ = mkSystemNameAt uniq occ noSrcSpan
 
 mkSystemNameAt :: Unique -> OccName -> SrcSpan -> Name
-mkSystemNameAt uniq occ loc = Name { n_uniq = getKey uniq, n_sort = System
+mkSystemNameAt uniq occ loc = Name { n_uniq = uniq, n_sort = System
                                    , n_occ = occ, n_loc = loc }
 
 mkSystemVarName :: Unique -> FastString -> Name
 mkSystemVarName uniq fs = mkSystemName uniq (mkVarOccFS fs)
 
 mkSysTvName :: Unique -> FastString -> Name
-mkSysTvName uniq fs = mkSystemName uniq (mkOccNameFS tvName fs)
+mkSysTvName uniq fs = mkSystemName uniq (mkTyVarOccFS fs)
 
 -- | Make a name for a foreign call
 mkFCallName :: Unique -> String -> Name
@@ -394,7 +395,7 @@ mkFCallName uniq str = mkInternalName uniq (mkVarOcc str) noSrcSpan
 -- able to change a Name's Unique to match the cached
 -- one in the thing it's the name of.  If you know what I mean.
 setNameUnique :: Name -> Unique -> Name
-setNameUnique name uniq = name {n_uniq = getKey uniq}
+setNameUnique name uniq = name {n_uniq = uniq}
 
 -- This is used for hsigs: we want to use the name of the originally exported
 -- entity, but edit the location to refer to the reexport site
@@ -412,18 +413,6 @@ tidyNameOcc name                            occ = name { n_occ = occ }
 localiseName :: Name -> Name
 localiseName n = n { n_sort = Internal }
 
--- |Create a localised variant of a name.
---
--- If the name is external, encode the original's module name to disambiguate.
--- SPJ says: this looks like a rather odd-looking function; but it seems to
---           be used only during vectorisation, so I'm not going to worry
-mkLocalisedOccName :: Module -> (Maybe String -> OccName -> OccName) -> Name -> OccName
-mkLocalisedOccName this_mod mk_occ name = mk_occ origin (nameOccName name)
-  where
-    origin
-      | nameIsLocalOrFrom this_mod name = Nothing
-      | otherwise                       = Just (moduleNameColons . moduleName . nameModule $ name)
-
 {-
 ************************************************************************
 *                                                                      *
@@ -433,7 +422,7 @@ mkLocalisedOccName this_mod mk_occ name = mk_occ origin (nameOccName name)
 -}
 
 cmpName :: Name -> Name -> Ordering
-cmpName n1 n2 = n_uniq n1 `compare` n_uniq n2
+cmpName n1 n2 = n_uniq n1 `nonDetCmpUnique` n_uniq n2
 
 -- | Compare Names lexicographically
 -- This only works for Names that originate in the source code or have been
@@ -465,10 +454,18 @@ stableNameCmp (Name { n_sort = s1, n_occ = occ1 })
 ************************************************************************
 -}
 
+-- | The same comments as for `Name`'s `Ord` instance apply.
 instance Eq Name where
     a == b = case (a `compare` b) of { EQ -> True;  _ -> False }
     a /= b = case (a `compare` b) of { EQ -> False; _ -> True }
 
+-- | __Caution__: This instance is implemented via `nonDetCmpUnique`, which
+-- means that the ordering is not stable across deserialization or rebuilds.
+--
+-- See `nonDetCmpUnique` for further information, and trac #15240 for a bug
+-- caused by improper use of this instance.
+
+-- For a deterministic lexicographic ordering, use `stableNameCmp`.
 instance Ord Name where
     a <= b = case (a `compare` b) of { LT -> True;  EQ -> True;  GT -> False }
     a <  b = case (a `compare` b) of { LT -> True;  EQ -> False; GT -> False }
@@ -525,14 +522,17 @@ instance OutputableBndr Name where
     pprPrefixOcc = pprPrefixName
 
 pprName :: Name -> SDoc
-pprName (Name {n_sort = sort, n_uniq = u, n_occ = occ})
+pprName (Name {n_sort = sort, n_uniq = uniq, n_occ = occ})
   = getPprStyle $ \ sty ->
     case sort of
       WiredIn mod _ builtin   -> pprExternal sty uniq mod occ True  builtin
       External mod            -> pprExternal sty uniq mod occ False UserSyntax
       System                  -> pprSystem sty uniq occ
       Internal                -> pprInternal sty uniq occ
-  where uniq = mkUniqueGrimily u
+
+-- | Print the string of Name unqualifiedly directly.
+pprNameUnqualified :: Name -> SDoc
+pprNameUnqualified Name { n_occ = occ } = ppr_occ_name occ
 
 pprExternal :: PprStyle -> Unique -> Module -> OccName -> Bool -> BuiltInSyntax -> SDoc
 pprExternal sty uniq mod occ is_wired is_builtin
@@ -687,24 +687,6 @@ pprInfixName :: (Outputable a, NamedThing a) => a -> SDoc
 pprInfixName  n = pprInfixVar (isSymOcc (getOccName n)) (ppr n)
 
 pprPrefixName :: NamedThing a => a -> SDoc
-pprPrefixName thing
- | name `hasKey` starKindTyConKey || name `hasKey` unicodeStarKindTyConKey
- = ppr name   -- See Note [Special treatment for kind *]
- | otherwise
- = pprPrefixVar (isSymOcc (nameOccName name)) (ppr name)
+pprPrefixName thing = pprPrefixVar (isSymOcc (nameOccName name)) (ppr name)
  where
    name = getName thing
-
-{-
-Note [Special treatment for kind *]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Do not put parens around the kind '*'.  Even though it looks like
-an operator, it is really a special case.
-
-This pprPrefixName stuff is really only used when printing HsSyn,
-which has to be polymorphic in the name type, and hence has to go via
-the overloaded function pprPrefixOcc.  It's easier where we know the
-type being pretty printed; eg the pretty-printing code in TyCoRep.
-
-See Trac #7645, which led to this.
--}

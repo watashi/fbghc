@@ -1,5 +1,0 @@
-
-T7404.hs:4:32: error:
-    Type variable ‘x’ used in a kind.
-    Did you mean to use TypeInType?
-    the declaration for type family ‘Foo’

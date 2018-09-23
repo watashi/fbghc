@@ -1,4 +1,4 @@
-{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE Trustworthy, BangPatterns #-}
 {-# LANGUAGE CPP, NoImplicitPrelude #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
@@ -192,7 +192,8 @@ type CharBuffer = Buffer Word16
 type CharBuffer = Buffer Char
 #endif
 
-data BufferState = ReadBuffer | WriteBuffer deriving (Eq)
+data BufferState = ReadBuffer | WriteBuffer
+  deriving Eq -- ^ @since 4.2.0.0
 
 withBuffer :: Buffer e -> (Ptr e -> IO a) -> IO a
 withBuffer Buffer{ bufRaw=raw } f = withForeignPtr (castForeignPtr raw) f
@@ -264,7 +265,8 @@ foreign import ccall unsafe "memmove"
    memmove :: Ptr a -> Ptr a -> CSize -> IO (Ptr a)
 
 summaryBuffer :: Buffer a -> String
-summaryBuffer buf = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-" ++ show (bufR buf) ++ ")"
+summaryBuffer !buf  -- Strict => slightly better code
+   = "buf" ++ show (bufSize buf) ++ "(" ++ show (bufL buf) ++ "-" ++ show (bufR buf) ++ ")"
 
 -- INVARIANTS on Buffers:
 --   * r <= w

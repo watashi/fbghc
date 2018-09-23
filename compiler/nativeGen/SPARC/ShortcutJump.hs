@@ -8,6 +8,8 @@ module SPARC.ShortcutJump (
 
 where
 
+import GhcPrelude
+
 import SPARC.Instr
 import SPARC.Imm
 
@@ -16,8 +18,6 @@ import BlockId
 import Cmm
 
 import Panic
-import Unique
-
 
 
 data JumpDest
@@ -46,14 +46,14 @@ shortcutStatics fn (Statics lbl statics)
 
 shortcutLabel :: (BlockId -> Maybe JumpDest) -> CLabel -> CLabel
 shortcutLabel fn lab
-  | Just uq <- maybeAsmTemp lab = shortBlockId fn (mkBlockId uq)
-  | otherwise                   = lab
+  | Just blkId <- maybeLocalBlockLabel lab = shortBlockId fn blkId
+  | otherwise                              = lab
 
 shortcutStatic :: (BlockId -> Maybe JumpDest) -> CmmStatic -> CmmStatic
 shortcutStatic fn (CmmStaticLit (CmmLabel lab))
         = CmmStaticLit (CmmLabel (shortcutLabel fn lab))
-shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off))
-        = CmmStaticLit (CmmLabelDiffOff (shortcutLabel fn lbl1) lbl2 off)
+shortcutStatic fn (CmmStaticLit (CmmLabelDiffOff lbl1 lbl2 off w))
+        = CmmStaticLit (CmmLabelDiffOff (shortcutLabel fn lbl1) lbl2 off w)
 -- slightly dodgy, we're ignoring the second label, but this
 -- works with the way we use CmmLabelDiffOff for jump tables now.
 shortcutStatic _ other_static
@@ -63,7 +63,7 @@ shortcutStatic _ other_static
 shortBlockId :: (BlockId -> Maybe JumpDest) -> BlockId -> CLabel
 shortBlockId fn blockid =
    case fn blockid of
-      Nothing -> mkAsmTempLabel (getUnique blockid)
+      Nothing -> blockLbl blockid
       Just (DestBlockId blockid')  -> shortBlockId fn blockid'
       Just (DestImm (ImmCLbl lbl)) -> lbl
       _other -> panic "shortBlockId"

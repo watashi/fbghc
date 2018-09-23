@@ -1,13 +1,9 @@
-{-# LANGUAGE CPP, DeriveDataTypeable,
+{-# LANGUAGE DeriveDataTypeable,
              DeriveGeneric, FlexibleInstances, DefaultSignatures,
              RankNTypes, RoleAnnotations, ScopedTypeVariables,
              Trustworthy #-}
 
 {-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
-
-#if MIN_VERSION_base(4,9,0)
-# define HAS_MONADFAIL 1
-#endif
 
 -----------------------------------------------------------------------------
 -- |
@@ -34,6 +30,7 @@ import Data.Data hiding (Fixity(..))
 import Data.IORef
 import System.IO.Unsafe ( unsafePerformIO )
 import Control.Monad (liftM)
+import Control.Monad.IO.Class (MonadIO (..))
 import System.IO        ( hPutStrLn, stderr )
 import Data.Char        ( isAlpha, isAlphaNum, isUpper )
 import Data.Int
@@ -44,10 +41,9 @@ import GHC.Lexeme       ( startsVarSym, startsVarId )
 import GHC.ForeignSrcLang.Type
 import Language.Haskell.TH.LanguageExtensions
 import Numeric.Natural
+import Prelude
 
-#if HAS_MONADFAIL
 import qualified Control.Monad.Fail as Fail
-#endif
 
 -----------------------------------------------------
 --
@@ -55,11 +51,7 @@ import qualified Control.Monad.Fail as Fail
 --
 -----------------------------------------------------
 
-#if HAS_MONADFAIL
-class Fail.MonadFail m => Quasi m where
-#else
-class Monad m => Quasi m where
-#endif
+class (MonadIO m, Fail.MonadFail m) => Quasi m where
   qNewName :: String -> m Name
         -- ^ Fresh names
 
@@ -88,15 +80,20 @@ class Monad m => Quasi m where
   qLocation :: m Loc
 
   qRunIO :: IO a -> m a
+  qRunIO = liftIO
   -- ^ Input/output (dangerous)
 
   qAddDependentFile :: FilePath -> m ()
 
+  qAddTempFile :: String -> m FilePath
+
   qAddTopDecls :: [Dec] -> m ()
 
-  qAddForeignFile :: ForeignSrcLang -> String -> m ()
+  qAddForeignFilePath :: ForeignSrcLang -> String -> m ()
 
   qAddModFinalizer :: Q () -> m ()
+
+  qAddCorePlugin :: String -> m ()
 
   qGetQ :: Typeable a => m (Maybe a)
 
@@ -134,15 +131,15 @@ instance Quasi IO where
   qLocation             = badIO "currentLocation"
   qRecover _ _          = badIO "recover" -- Maybe we could fix this?
   qAddDependentFile _   = badIO "addDependentFile"
+  qAddTempFile _        = badIO "addTempFile"
   qAddTopDecls _        = badIO "addTopDecls"
-  qAddForeignFile _ _   = badIO "addForeignFile"
+  qAddForeignFilePath _ _ = badIO "addForeignFilePath"
   qAddModFinalizer _    = badIO "addModFinalizer"
+  qAddCorePlugin _      = badIO "addCorePlugin"
   qGetQ                 = badIO "getQ"
   qPutQ _               = badIO "putQ"
   qIsExtEnabled _       = badIO "isExtEnabled"
   qExtsEnabled          = badIO "extsEnabled"
-
-  qRunIO m = m
 
 badIO :: String -> IO a
 badIO op = do   { qReport True ("Can't do `" ++ op ++ "' in the IO monad")
@@ -179,14 +176,10 @@ runQ (Q m) = m
 instance Monad Q where
   Q m >>= k  = Q (m >>= \x -> unQ (k x))
   (>>) = (*>)
-#if !HAS_MONADFAIL
-  fail s     = report True s >> Q (fail "Q monad failure")
-#else
   fail       = Fail.fail
 
 instance Fail.MonadFail Q where
   fail s     = report True s >> Q (Fail.fail "Q monad failure")
-#endif
 
 instance Functor Q where
   fmap f (Q x) = Q (fmap f x)
@@ -456,10 +449,22 @@ runIO m = Q (qRunIO m)
 addDependentFile :: FilePath -> Q ()
 addDependentFile fp = Q (qAddDependentFile fp)
 
+-- | Obtain a temporary file path with the given suffix. The compiler will
+-- delete this file after compilation.
+addTempFile :: String -> Q FilePath
+addTempFile suffix = Q (qAddTempFile suffix)
+
 -- | Add additional top-level declarations. The added declarations will be type
 -- checked along with the current declaration group.
 addTopDecls :: [Dec] -> Q ()
 addTopDecls ds = Q (qAddTopDecls ds)
+
+-- |
+addForeignFile :: ForeignSrcLang -> String -> Q ()
+addForeignFile = addForeignSource
+{-# DEPRECATED addForeignFile
+               "Use 'Language.Haskell.TH.Syntax.addForeignSource' instead"
+  #-} -- deprecated in 8.6
 
 -- | Emit a foreign file which will be compiled and linked to the object for
 -- the current module. Currently only languages that can be compiled with
@@ -469,17 +474,35 @@ addTopDecls ds = Q (qAddTopDecls ds)
 -- Note that for non-C languages (for example C++) @extern "C"@ directives
 -- must be used to get symbols that we can access from Haskell.
 --
--- To get better errors, it is reccomended to use #line pragmas when
+-- To get better errors, it is recommended to use #line pragmas when
 -- emitting C files, e.g.
 --
 -- > {-# LANGUAGE CPP #-}
 -- > ...
--- > addForeignFile LangC $ unlines
+-- > addForeignSource LangC $ unlines
 -- >   [ "#line " ++ show (__LINE__ + 1) ++ " " ++ show __FILE__
 -- >   , ...
 -- >   ]
-addForeignFile :: ForeignSrcLang -> String -> Q ()
-addForeignFile lang str = Q (qAddForeignFile lang str)
+addForeignSource :: ForeignSrcLang -> String -> Q ()
+addForeignSource lang src = do
+  let suffix = case lang of
+                 LangC -> "c"
+                 LangCxx -> "cpp"
+                 LangObjc -> "m"
+                 LangObjcxx -> "mm"
+                 RawObject -> "a"
+  path <- addTempFile suffix
+  runIO $ writeFile path src
+  addForeignFilePath lang path
+
+-- | Same as 'addForeignSource', but expects to receive a path pointing to the
+-- foreign file instead of a 'String' of its contents. Consider using this in
+-- conjunction with 'addTempFile'.
+--
+-- This is a good alternative to 'addForeignSource' when you are trying to
+-- directly link in an object file.
+addForeignFilePath :: ForeignSrcLang -> FilePath -> Q ()
+addForeignFilePath lang fp = Q (qAddForeignFilePath lang fp)
 
 -- | Add a finalizer that will run in the Q monad after the current module has
 -- been type checked. This only makes sense when run within a top-level splice.
@@ -489,6 +512,16 @@ addForeignFile lang str = Q (qAddForeignFile lang str)
 -- finalizer.
 addModFinalizer :: Q () -> Q ()
 addModFinalizer act = Q (qAddModFinalizer (unQ act))
+
+-- | Adds a core plugin to the compilation pipeline.
+--
+-- @addCorePlugin m@ has almost the same effect as passing @-fplugin=m@ to ghc
+-- in the command line. The major difference is that the plugin module @m@
+-- must not belong to the current package. When TH executes, it is too late
+-- to tell the compiler that we needed to compile first a plugin module in the
+-- current package.
+addCorePlugin :: String -> Q ()
+addCorePlugin plugin = Q (qAddCorePlugin plugin)
 
 -- | Get state from the 'Q' monad. Note that the state is local to the
 -- Haskell module in which the Template Haskell expression is executed.
@@ -508,6 +541,9 @@ isExtEnabled ext = Q (qIsExtEnabled ext)
 extsEnabled :: Q [Extension]
 extsEnabled = Q qExtsEnabled
 
+instance MonadIO Q where
+  liftIO = runIO
+
 instance Quasi Q where
   qNewName            = newName
   qReport             = report
@@ -521,11 +557,12 @@ instance Quasi Q where
   qReifyConStrictness = reifyConStrictness
   qLookupName         = lookupName
   qLocation           = location
-  qRunIO              = runIO
   qAddDependentFile   = addDependentFile
+  qAddTempFile        = addTempFile
   qAddTopDecls        = addTopDecls
-  qAddForeignFile     = addForeignFile
+  qAddForeignFilePath = addForeignFilePath
   qAddModFinalizer    = addModFinalizer
+  qAddCorePlugin      = addCorePlugin
   qGetQ               = getQ
   qPutQ               = putQ
   qIsExtEnabled       = isExtEnabled
@@ -562,6 +599,9 @@ sequenceQ = sequence
 --
 -- Template Haskell has no way of knowing what value @x@ will take on at
 -- splice-time, so it requires the type of @x@ to be an instance of 'Lift'.
+--
+-- A 'Lift' instance must satisfy @$(lift x) ≡ x@ for all @x@, where @$(...)@
+-- is a Template Haskell splice.
 --
 -- 'Lift' instances can be derived automatically by use of the @-XDeriveLift@
 -- GHC language extension:
@@ -692,8 +732,8 @@ trueName  = mkNameG DataName "ghc-prim" "GHC.Types" "True"
 falseName = mkNameG DataName "ghc-prim" "GHC.Types" "False"
 
 nothingName, justName :: Name
-nothingName = mkNameG DataName "base" "GHC.Base" "Nothing"
-justName    = mkNameG DataName "base" "GHC.Base" "Just"
+nothingName = mkNameG DataName "base" "GHC.Maybe" "Nothing"
+justName    = mkNameG DataName "base" "GHC.Maybe" "Just"
 
 leftName, rightName :: Name
 leftName  = mkNameG DataName "base" "Data.Either" "Left"
@@ -1561,9 +1601,10 @@ data Exp
   | UnboxedSumE Exp SumAlt SumArity    -- ^ @{ (\#|e|\#) }@
   | CondE Exp Exp Exp                  -- ^ @{ if e1 then e2 else e3 }@
   | MultiIfE [(Guard, Exp)]            -- ^ @{ if | g1 -> e1 | g2 -> e2 }@
-  | LetE [Dec] Exp                     -- ^ @{ let x=e1;   y=e2 in e3 }@
+  | LetE [Dec] Exp                     -- ^ @{ let { x=e1; y=e2 } in e3 }@
   | CaseE Exp [Match]                  -- ^ @{ case e of m1; m2 }@
   | DoE [Stmt]                         -- ^ @{ do { p <- e1; e2 }  }@
+  | MDoE [Stmt]                        -- ^ @{ mdo { x <- e1 y; y <- e2 x; } }@
   | CompE [Stmt]                       -- ^ @{ [ (x,y) | x <- xs, y <- ys ] }@
       --
       -- The result expression of the comprehension is
@@ -1581,8 +1622,14 @@ data Exp
   | RecConE Name [FieldExp]            -- ^ @{ T { x = y, z = w } }@
   | RecUpdE Exp [FieldExp]             -- ^ @{ (f x) { z = w } }@
   | StaticE Exp                        -- ^ @{ static e }@
-  | UnboundVarE Name                   -- ^ @{ _x }@ (hole)
+  | UnboundVarE Name                   -- ^ @{ _x }@
+                                       --
+                                       -- This is used for holes or unresolved
+                                       -- identifiers in AST quotes. Note that
+                                       -- it could either have a variable name
+                                       -- or constructor name.
   | LabelE String                      -- ^ @{ #x }@ ( Overloaded label )
+  | ImplicitParamVarE String           -- ^ @{ ?x }@ ( Implicit parameter )
   deriving( Show, Eq, Ord, Data, Generic )
 
 type FieldExp = (Name,Exp)
@@ -1602,10 +1649,11 @@ data Guard
   deriving( Show, Eq, Ord, Data, Generic )
 
 data Stmt
-  = BindS Pat Exp
-  | LetS [ Dec ]
-  | NoBindS Exp
-  | ParS [[Stmt]]
+  = BindS Pat Exp -- ^ @p <- e@
+  | LetS [ Dec ]  -- ^ @{ let { x=e1; y=e2 } }@
+  | NoBindS Exp   -- ^ @e@
+  | ParS [[Stmt]] -- ^ @x <- e1 | s2, s3 | s4@ (in 'CompE')
+  | RecS [Stmt]   -- ^ @rec { s1; s2 }@
   deriving( Show, Eq, Ord, Data, Generic )
 
 data Range = FromR Exp | FromThenR Exp Exp
@@ -1684,6 +1732,12 @@ data Dec
       -- pattern synonyms are supported. See 'PatSynArgs' for details
 
   | PatSynSigD Name PatSynType  -- ^ A pattern synonym's type signature.
+
+  | ImplicitParamBindD String Exp
+      -- ^ @{ ?x = expr }@
+      --
+      -- Implicit parameter binding declaration. Can only be used in let
+      -- and where clauses which consist entirely of implicit bindings.
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | Varieties of allowed instance overlap.
@@ -1704,6 +1758,7 @@ data DerivClause = DerivClause (Maybe DerivStrategy) Cxt
 data DerivStrategy = StockStrategy    -- ^ A \"standard\" derived instance
                    | AnyclassStrategy -- ^ @-XDeriveAnyClass@
                    | NewtypeStrategy  -- ^ @-XGeneralizedNewtypeDeriving@
+                   | ViaStrategy Type -- ^ @-XDerivingVia@
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | A Pattern synonym's type. Note that a pattern synonym's *fully*
@@ -1769,9 +1824,6 @@ data TySynEqn = TySynEqn [Type] Type
   deriving( Show, Eq, Ord, Data, Generic )
 
 data FunDep = FunDep [Name] [Name]
-  deriving( Show, Eq, Ord, Data, Generic )
-
-data FamFlavour = TypeFam | DataFam
   deriving( Show, Eq, Ord, Data, Generic )
 
 data Foreign = ImportF Callconv Safety String Name Type
@@ -1845,6 +1897,35 @@ data DecidedStrictness = DecidedLazy
                        | DecidedUnpack
         deriving (Show, Eq, Ord, Data, Generic)
 
+-- | A single data constructor.
+--
+-- The constructors for 'Con' can roughly be divided up into two categories:
+-- those for constructors with \"vanilla\" syntax ('NormalC', 'RecC', and
+-- 'InfixC'), and those for constructors with GADT syntax ('GadtC' and
+-- 'RecGadtC'). The 'ForallC' constructor, which quantifies additional type
+-- variables and class contexts, can surround either variety of constructor.
+-- However, the type variables that it quantifies are different depending
+-- on what constructor syntax is used:
+--
+-- * If a 'ForallC' surrounds a constructor with vanilla syntax, then the
+--   'ForallC' will only quantify /existential/ type variables. For example:
+--
+--   @
+--   data Foo a = forall b. MkFoo a b
+--   @
+--
+--   In @MkFoo@, 'ForallC' will quantify @b@, but not @a@.
+--
+-- * If a 'ForallC' surrounds a constructor with GADT syntax, then the
+--   'ForallC' will quantify /all/ type variables used in the constructor.
+--   For example:
+--
+--   @
+--   data Bar a b where
+--     MkBar :: (a ~ b) => c -> MkBar a b
+--   @
+--
+--   In @MkBar@, 'ForallC' will quantify @a@, @b@, and @c@.
 data Con = NormalC Name [BangType]       -- ^ @C Int a@
          | RecC Name [VarBangType]       -- ^ @C { v :: Int, w :: a }@
          | InfixC BangType Name BangType -- ^ @Int :+ a@
@@ -1917,7 +1998,7 @@ data PatSynArgs
   | RecordPatSyn [Name]        -- ^ @pattern P { {x,y,z} } = p@
   deriving( Show, Eq, Ord, Data, Generic )
 
-data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<type\>@
+data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> => \<type\>@
           | AppT Type Type                -- ^ @T a b@
           | SigT Type Kind                -- ^ @t :: k@
           | VarT Name                     -- ^ @a@
@@ -1943,6 +2024,7 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<t
           | ConstraintT                   -- ^ @Constraint@
           | LitT TyLit                    -- ^ @0,1,2, etc.@
           | WildCardT                     -- ^ @_@
+          | ImplicitParamT String Type    -- ^ @?x :: t@
       deriving( Show, Eq, Ord, Data, Generic )
 
 data TyVarBndr = PlainTV  Name            -- ^ @a@

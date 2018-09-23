@@ -22,7 +22,7 @@
 #include "StgPrimFloat.h" // for __int_encodeFloat etc.
 #include "Proftimer.h"
 #include "GetEnv.h"
-#include "Stable.h"
+#include "StablePtr.h"
 #include "RtsSymbols.h"
 #include "RtsSymbolInfo.h"
 #include "Profiling.h"
@@ -48,6 +48,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
+#include <fs_rts.h>
 
 #if defined(HAVE_SYS_STAT_H)
 #include <sys/stat.h>
@@ -482,7 +483,7 @@ initLinker_ (int retain_cafs)
 #   endif /* RTLD_DEFAULT */
 
     compileResult = regcomp(&re_invalid,
-           "(([^ \t()])+\\.so([^ \t:()])*):([ \t])*(invalid ELF header|file too short)",
+           "(([^ \t()])+\\.so([^ \t:()])*):([ \t])*(invalid ELF header|file too short|invalid file format)",
            REG_EXTENDED);
     if (compileResult != 0) {
         barf("Compiling re_invalid failed");
@@ -515,6 +516,9 @@ initLinker_ (int retain_cafs)
 
 void
 exitLinker( void ) {
+#if defined(OBJFORMAT_PEi386)
+   exitLinker_PEi386();
+#endif
 #if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
    if (linker_init_done == 1) {
       regfree(&re_invalid);
@@ -711,7 +715,7 @@ addDLL( pathchar *dll_name )
       strncpy(line, (errmsg+(match[1].rm_so)),match_length);
       line[match_length] = '\0'; // make sure string is null-terminated
       IF_DEBUG(linker, debugBelch ("file name = '%s'\n", line));
-      if ((fp = fopen(line, "r")) == NULL) {
+      if ((fp = __rts_fopen(line, "r")) == NULL) {
          return errmsg; // return original error if open fails
       }
       // try to find a GROUP or INPUT ( ... ) command
@@ -979,6 +983,21 @@ void ghci_enquire(SymbolAddr* addr)
    }
 }
 #endif
+
+pathchar*
+resolveSymbolAddr (pathchar* buffer, int size,
+                   SymbolAddr* symbol, uintptr_t* top)
+{
+#if defined(OBJFORMAT_PEi386)
+  return resolveSymbolAddr_PEi386 (buffer, size, symbol, top);
+#else /* OBJFORMAT_PEi386 */
+  (void)buffer;
+  (void)size;
+  (void)symbol;
+  (void)top;
+  return NULL;
+#endif /* OBJFORMAT_PEi386 */
+}
 
 #if RTS_LINKER_USE_MMAP
 //
@@ -1367,18 +1386,7 @@ preloadObjectFile (pathchar *path)
        return NULL;
    }
 
-#  if defined(mingw32_HOST_OS)
-
-        // TODO: We would like to use allocateExec here, but allocateExec
-        //       cannot currently allocate blocks large enough.
-    image = allocateImageAndTrampolines(path, "itself", f, fileSize,
-                                        HS_BOOL_FALSE);
-    if (image == NULL) {
-        fclose(f);
-        return NULL;
-    }
-
-#   elif defined(darwin_HOST_OS)
+#  if defined(darwin_HOST_OS)
 
     // In a Mach-O .o file, all sections can and will be misaligned
     // if the total size of the headers is not a multiple of the
@@ -1393,7 +1401,7 @@ preloadObjectFile (pathchar *path)
    image = stgMallocBytes(fileSize + misalignment, "loadObj(image)");
    image += misalignment;
 
-# else /* !defined(mingw32_HOST_OS) */
+# else /* !defined(darwin_HOST_OS) */
 
    image = stgMallocBytes(fileSize, "loadObj(image)");
 
@@ -1489,6 +1497,34 @@ HsInt loadOc (ObjectCode* oc)
        return r;
    }
 
+   /* Note [loadOc orderings]
+      ocAllocateSymbolsExtras has only two pre-requisites, it must run after
+      preloadObjectFile and ocVerify.   Neither have changed.   On most targets
+      allocating the extras is independent on parsing the section data, so the
+      order between these two never mattered.
+
+      On Windows, when we have an import library we (for now, as we don't honor
+      the lazy loading semantics of the library and instead GHCi is already
+      lazy) don't use the library after ocGetNames as it just populates the
+      symbol table.  Allocating space for jump tables in ocAllocateSymbolExtras
+      would just be a waste then as we'll be stopping further processing of the
+      library in the next few steps.  */
+
+   /* build the symbol list for this image */
+#  if defined(OBJFORMAT_ELF)
+   r = ocGetNames_ELF ( oc );
+#  elif defined(OBJFORMAT_PEi386)
+   r = ocGetNames_PEi386 ( oc );
+#  elif defined(OBJFORMAT_MACHO)
+   r = ocGetNames_MachO ( oc );
+#  else
+   barf("loadObj: no getNames method");
+#  endif
+   if (!r) {
+       IF_DEBUG(linker, debugBelch("loadOc: ocGetNames_* failed\n"));
+       return r;
+   }
+
 #if defined(NEED_SYMBOL_EXTRAS)
 #  if defined(OBJFORMAT_MACHO)
    r = ocAllocateSymbolExtras_MachO ( oc );
@@ -1508,21 +1544,6 @@ HsInt loadOc (ObjectCode* oc)
    ocAllocateSymbolExtras_PEi386 ( oc );
 #  endif
 #endif
-
-   /* build the symbol list for this image */
-#  if defined(OBJFORMAT_ELF)
-   r = ocGetNames_ELF ( oc );
-#  elif defined(OBJFORMAT_PEi386)
-   r = ocGetNames_PEi386 ( oc );
-#  elif defined(OBJFORMAT_MACHO)
-   r = ocGetNames_MachO ( oc );
-#  else
-   barf("loadObj: no getNames method");
-#  endif
-   if (!r) {
-       IF_DEBUG(linker, debugBelch("loadOc: ocGetNames_* failed\n"));
-       return r;
-   }
 
    /* loaded, but not resolved yet, ensure the OC is in a consistent state */
    setOcInitialStatus( oc );
@@ -1708,6 +1729,30 @@ HsInt purgeObj (pathchar *path)
     return r;
 }
 
+static OStatus getObjectLoadStatus_ (pathchar *path)
+{
+    ObjectCode *o;
+    for (o = objects; o; o = o->next) {
+       if (0 == pathcmp(o->fileName, path)) {
+           return o->status;
+       }
+    }
+    for (o = unloaded_objects; o; o = o->next) {
+       if (0 == pathcmp(o->fileName, path)) {
+           return o->status;
+       }
+    }
+    return OBJECT_NOT_LOADED;
+}
+
+OStatus getObjectLoadStatus (pathchar *path)
+{
+    ACQUIRE_LOCK(&linker_mutex);
+    OStatus r = getObjectLoadStatus_(path);
+    RELEASE_LOCK(&linker_mutex);
+    return r;
+}
+
 /* -----------------------------------------------------------------------------
  * Sanity checking.  For each ObjectCode, maintain a list of address ranges
  * which may be prodded during relocation, and abort if we try and write
@@ -1769,7 +1814,9 @@ addSection (Section *s, SectionKind kind, SectionAlloc alloc,
    s->mapped_start = mapped_start; /* start of mmap() block */
    s->mapped_size  = mapped_size;  /* size of mmap() block */
 
-   s->info = (struct SectionFormatInfo*)stgCallocBytes(1, sizeof *s->info,
+   if (!s->info)
+     s->info
+       = (struct SectionFormatInfo*)stgCallocBytes(1, sizeof *s->info,
                                             "addSection(SectionFormatInfo)");
 
    IF_DEBUG(linker,

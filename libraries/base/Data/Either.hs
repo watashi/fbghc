@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -32,8 +33,6 @@ module Data.Either (
 import GHC.Base
 import GHC.Show
 import GHC.Read
-
-import Data.Type.Equality
 
 -- $setup
 -- Allow the use of some Prelude functions in doctests.
@@ -124,12 +123,27 @@ Left "parse error"
 
 -}
 data  Either a b  =  Left a | Right b
-  deriving (Eq, Ord, Read, Show)
+  deriving ( Eq   -- ^ @since 2.01
+           , Ord  -- ^ @since 2.01
+           , Read -- ^ @since 3.0
+           , Show -- ^ @since 3.0
+           )
 
 -- | @since 3.0
 instance Functor (Either a) where
     fmap _ (Left x) = Left x
     fmap f (Right y) = Right (f y)
+
+-- | @since 4.9.0.0
+instance Semigroup (Either a b) where
+    Left _ <> b = b
+    a      <> _ = a
+#if !defined(__HADDOCK_VERSION__)
+    -- workaround https://github.com/haskell/haddock/issues/680
+    stimes n x
+      | n <= 0 = errorWithoutStackTrace "stimes: positive multiplier expected"
+      | otherwise = x
+#endif
 
 -- | @since 3.0
 instance Applicative (Either e) where
@@ -150,7 +164,7 @@ instance Monad (Either e) where
 --
 -- We create two values of type @'Either' 'String' 'Int'@, one using the
 -- 'Left' constructor and another using the 'Right' constructor. Then
--- we apply \"either\" the 'length' function (if we have a 'String')
+-- we apply \"either\" the 'Prelude.length' function (if we have a 'String')
 -- or the \"times-two\" function (if we have an 'Int'):
 --
 -- >>> let s = Left "foo" :: Either String Int
@@ -318,13 +332,6 @@ fromRight :: b -> Either a b -> b
 fromRight _ (Right b) = b
 fromRight b _         = b
 
--- instance for the == Boolean type-level equality operator
-type family EqEither a b where
-  EqEither ('Left x)  ('Left y)  = x == y
-  EqEither ('Right x) ('Right y) = x == y
-  EqEither a          b          = 'False
-type instance a == b = EqEither a b
-
 {-
 {--------------------------------------------------------------------
   Testing
@@ -333,4 +340,3 @@ prop_partitionEithers :: [Either Int Int] -> Bool
 prop_partitionEithers x =
   partitionEithers x == (lefts x, rights x)
 -}
-

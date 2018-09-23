@@ -14,6 +14,9 @@
 #  CONFIG    -- use a different configuration file
 #  COMPILER  -- select a configuration file from config/
 #  THREADS   -- run n tests at once
+#  PLATFORM  -- if accepting a result, accept it for the current platform.
+#  OS        -- if accepting a result, accept it for all wordsizes of the
+#               current os.
 #
 # -----------------------------------------------------------------------------
 
@@ -73,20 +76,22 @@ else
 dllext = .so
 endif
 
-RUNTEST_OPTS += -e ghc_compiler_always_flags="'$(TEST_HC_OPTS)'"
+RUNTEST_OPTS += -e "ghc_compiler_always_flags='$(TEST_HC_OPTS)'"
 
 RUNTEST_OPTS += -e config.compiler_debugged=$(GhcDebugged)
 
 ifeq "$(GhcWithNativeCodeGen)" "YES"
-RUNTEST_OPTS += -e ghc_with_native_codegen=1
+RUNTEST_OPTS += -e ghc_with_native_codegen=True
 else
-RUNTEST_OPTS += -e ghc_with_native_codegen=0
+RUNTEST_OPTS += -e ghc_with_native_codegen=False
 endif
 
 GHC_PRIM_LIBDIR := $(subst library-dirs: ,,$(shell "$(GHC_PKG)" field ghc-prim library-dirs --simple-output))
 HAVE_VANILLA := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.hi ]; then echo YES; else echo NO; fi)
 HAVE_DYNAMIC := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.dyn_hi ]; then echo YES; else echo NO; fi)
 HAVE_PROFILING := $(shell if [ -f $(subst \,/,$(GHC_PRIM_LIBDIR))/GHC/PrimopWrappers.p_hi ]; then echo YES; else echo NO; fi)
+HAVE_GDB := $(shell if gdb --version > /dev/null 2> /dev/null; then echo YES; else echo NO; fi)
+HAVE_READELF := $(shell if readelf --version > /dev/null 2> /dev/null; then echo YES; else echo NO; fi)
 
 ifeq "$(HAVE_VANILLA)" "YES"
 RUNTEST_OPTS += -e config.have_vanilla=True
@@ -107,15 +112,15 @@ RUNTEST_OPTS += -e config.have_profiling=False
 endif
 
 ifeq "$(filter thr, $(GhcRTSWays))" "thr"
-RUNTEST_OPTS += -e ghc_with_threaded_rts=1
+RUNTEST_OPTS += -e ghc_with_threaded_rts=True
 else
-RUNTEST_OPTS += -e ghc_with_threaded_rts=0
+RUNTEST_OPTS += -e ghc_with_threaded_rts=False
 endif
 
 ifeq "$(filter dyn, $(GhcRTSWays))" "dyn"
-RUNTEST_OPTS += -e ghc_with_dynamic_rts=1
+RUNTEST_OPTS += -e ghc_with_dynamic_rts=True
 else
-RUNTEST_OPTS += -e ghc_with_dynamic_rts=0
+RUNTEST_OPTS += -e ghc_with_dynamic_rts=False
 endif
 
 ifeq "$(GhcWithInterpreter)" "NO"
@@ -130,6 +135,18 @@ ifeq "$(GhcUnregisterised)" "YES"
 RUNTEST_OPTS += -e config.unregisterised=True
 else
 RUNTEST_OPTS += -e config.unregisterised=False
+endif
+
+ifeq "$(HAVE_GDB)" "YES"
+RUNTEST_OPTS += -e config.have_gdb=True
+else
+RUNTEST_OPTS += -e config.have_gdb=False
+endif
+
+ifeq "$(HAVE_READELF)" "YES"
+RUNTEST_OPTS += -e config.have_readelf=True
+else
+RUNTEST_OPTS += -e config.have_readelf=False
 endif
 
 ifeq "$(GhcDynamicByDefault)" "YES"
@@ -149,20 +166,20 @@ CABAL_PLUGIN_BUILD = --enable-library-vanilla --disable-shared
 endif
 
 ifeq "$(GhcWithSMP)" "YES"
-RUNTEST_OPTS += -e ghc_with_smp=1
+RUNTEST_OPTS += -e ghc_with_smp=True
 else
-RUNTEST_OPTS += -e ghc_with_smp=0
+RUNTEST_OPTS += -e ghc_with_smp=False
 endif
 
 ifeq "$(LLC)" ""
-RUNTEST_OPTS += -e ghc_with_llvm=0
+RUNTEST_OPTS += -e ghc_with_llvm=False
 else ifeq "$(TargetARCH_CPP)" "powerpc"
-RUNTEST_OPTS += -e ghc_with_llvm=0
+RUNTEST_OPTS += -e ghc_with_llvm=False
 else ifneq "$(LLC)" "llc"
 # If we have a real detected value for LLVM, then it really ought to work
-RUNTEST_OPTS += -e ghc_with_llvm=1
+RUNTEST_OPTS += -e ghc_with_llvm=True
 else
-RUNTEST_OPTS += -e ghc_with_llvm=0
+RUNTEST_OPTS += -e ghc_with_llvm=False
 endif
 
 ifeq "$(WINDOWS)" "YES"
@@ -214,7 +231,7 @@ endif
 
 RUNTEST_OPTS +=  \
 	--rootdir=. \
-	--configfile=$(CONFIG) \
+	--config-file=$(CONFIG) \
 	-e 'config.confdir="$(CONFIGDIR)"' \
 	-e 'config.platform="$(TARGETPLATFORM)"' \
 	-e 'config.os="$(TargetOS_CPP)"' \
@@ -246,13 +263,17 @@ RUNTEST_OPTS +=  \
 
 RUNTEST_OPTS += -e "config.stage=$(GhcStage)"
 
+ifneq "$(JUNIT_FILE)" ""
+RUNTEST_OPTS +=  \
+  --junit "$(JUNIT_FILE)"
+endif
 ifneq "$(SUMMARY_FILE)" ""
 RUNTEST_OPTS +=  \
 	--summary-file "$(SUMMARY_FILE)"
 endif
 ifeq "$(NO_PRINT_SUMMARY)" "YES"
 RUNTEST_OPTS +=  \
-	--no-print-summary 1
+	--no-print-summary
 endif
 
 RUNTEST_OPTS +=  \
@@ -275,7 +296,16 @@ setspeed =
 endif
 
 ifeq "$(accept)" "YES"
-setaccept = -e config.accept=1
+setaccept = -e config.accept=True
+
+ifeq "$(PLATFORM)" "YES"
+setaccept += -e config.accept_platform=True
+endif
+
+ifeq "$(OS)" "YES"
+setaccept += -e config.accept_os=True
+endif
+
 else
 setaccept =
 endif

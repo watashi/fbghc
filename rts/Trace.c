@@ -130,6 +130,13 @@ void resetTracing (void)
     }
 }
 
+void flushTrace (void)
+{
+    if (eventlog_enabled) {
+        flushEventLog();
+    }
+}
+
 void tracingAddCapapilities (uint32_t from, uint32_t to)
 {
     if (eventlog_enabled) {
@@ -737,6 +744,17 @@ void traceUserMsg(Capability *cap, char *msg)
         }
     }
     dtraceUserMsg(cap->no, msg);
+}
+
+void traceUserBinaryMsg(Capability *cap, uint8_t *msg, size_t size)
+{
+    /* Note: normally we don't check the TRACE_* flags here as they're checked
+       by the wrappers in Trace.h. But traceUserMsg is special since it has no
+       wrapper (it's called from cmm code), so we check TRACE_user here
+     */
+    if (eventlog_enabled && TRACE_user) {
+        postUserBinaryEvent(cap, EVENT_USER_BINARY_MSG, msg, size);
+    }
 }
 
 void traceUserMarker(Capability *cap, char *markername)

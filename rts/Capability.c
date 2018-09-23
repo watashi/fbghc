@@ -10,7 +10,7 @@
  * STG execution, a pointer to the capabilitity is kept in a
  * register (BaseReg; actually it is a pointer to cap->r).
  *
- * Only in an THREADED_RTS build will there be multiple capabilities,
+ * Only in a THREADED_RTS build will there be multiple capabilities,
  * for non-threaded builds there is only one global capability, namely
  * MainCapability.
  *
@@ -298,7 +298,6 @@ initCapability (Capability *cap, uint32_t i)
     cap->weak_ptr_list_hd = NULL;
     cap->weak_ptr_list_tl = NULL;
     cap->free_tvar_watch_queues = END_STM_WATCH_QUEUE;
-    cap->free_invariant_check_queues = END_INVARIANT_CHECK_QUEUE;
     cap->free_trec_chunks = END_STM_CHUNK_LIST;
     cap->free_trec_headers = NO_TREC;
     cap->transaction_tokens = 0;
@@ -362,7 +361,7 @@ void initCapabilities (void)
         }
         n_numa_nodes = logical;
         if (logical == 0) {
-            barf("%s: available NUMA node set is empty");
+            barf("available NUMA node set is empty");
         }
     }
 
@@ -498,6 +497,9 @@ giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
  *
  * The current Task (cap->task) releases the Capability.  The Capability is
  * marked free, and if there is any work to do, an appropriate Task is woken up.
+ *
+ * N.B. May need to take all_tasks_mutex.
+ *
  * ------------------------------------------------------------------------- */
 
 #if defined(THREADED_RTS)

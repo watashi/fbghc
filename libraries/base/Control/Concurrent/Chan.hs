@@ -1,13 +1,12 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE CPP #-}
-{-# LANGUAGE StandaloneDeriving #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Control.Concurrent.Chan
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  experimental
 -- Portability :  non-portable (concurrency)
@@ -22,7 +21,7 @@
 -----------------------------------------------------------------------------
 
 module Control.Concurrent.Chan
-  ( 
+  (
           -- * The 'Chan' type
         Chan,                   -- abstract
 
@@ -31,8 +30,6 @@ module Control.Concurrent.Chan
         writeChan,
         readChan,
         dupChan,
-        unGetChan,
-        isEmptyChan,
 
           -- * Stream interface
         getChanContents,
@@ -53,7 +50,7 @@ import Control.Exception (mask_)
 data Chan a
  = Chan _UPK_(MVar (Stream a))
         _UPK_(MVar (Stream a)) -- Invariant: the Stream a is always an empty MVar
-   deriving (Eq)
+   deriving Eq -- ^ @since 4.4.0.0
 
 type Stream a = MVar (ChItem a)
 
@@ -105,24 +102,15 @@ writeChan (Chan _ writeVar) val = do
 -- guarantees of 'MVar's (e.g. threads blocked in this operation are woken up in
 -- FIFO order).
 --
--- Throws 'BlockedIndefinitelyOnMVar' when the channel is empty and no other
--- thread holds a reference to the channel.
+-- Throws 'Control.Exception.BlockedIndefinitelyOnMVar' when the channel is
+-- empty and no other thread holds a reference to the channel.
 readChan :: Chan a -> IO a
 readChan (Chan readVar _) = do
-  modifyMVarMasked readVar $ \read_end -> do -- Note [modifyMVarMasked]
+  modifyMVar readVar $ \read_end -> do
     (ChItem val new_read_end) <- readMVar read_end
         -- Use readMVar here, not takeMVar,
         -- else dupChan doesn't work
     return (new_read_end, val)
-
--- Note [modifyMVarMasked]
--- This prevents a theoretical deadlock if an asynchronous exception
--- happens during the readMVar while the MVar is empty.  In that case
--- the read_end MVar will be left empty, and subsequent readers will
--- deadlock.  Using modifyMVarMasked prevents this.  The deadlock can
--- be reproduced, but only by expanding readMVar and inserting an
--- artificial yield between its takeMVar and putMVar operations.
-
 
 -- |Duplicate a 'Chan': the duplicate channel begins empty, but data written to
 -- either channel from then on will be available from both.  Hence this creates
@@ -136,24 +124,6 @@ dupChan (Chan _ writeVar) = do
    hole       <- readMVar writeVar
    newReadVar <- newMVar hole
    return (Chan newReadVar writeVar)
-
--- |Put a data item back onto a channel, where it will be the next item read.
-unGetChan :: Chan a -> a -> IO ()
-unGetChan (Chan readVar _) val = do
-   new_read_end <- newEmptyMVar
-   modifyMVar_ readVar $ \read_end -> do
-     putMVar new_read_end (ChItem val read_end)
-     return new_read_end
-{-# DEPRECATED unGetChan "if you need this operation, use Control.Concurrent.STM.TChan instead.  See <http://ghc.haskell.org/trac/ghc/ticket/4154> for details" #-} -- deprecated in 7.0
-
--- |Returns 'True' if the supplied 'Chan' is empty.
-isEmptyChan :: Chan a -> IO Bool
-isEmptyChan (Chan readVar writeVar) = do
-   withMVar readVar $ \r -> do
-     w <- readMVar writeVar
-     let eq = r == w
-     eq `seq` return eq
-{-# DEPRECATED isEmptyChan "if you need this operation, use Control.Concurrent.STM.TChan instead.  See <http://ghc.haskell.org/trac/ghc/ticket/4154> for details" #-} -- deprecated in 7.0
 
 -- Operators for interfacing with functional streams.
 

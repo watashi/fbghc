@@ -2,7 +2,8 @@
 T12177.hs:3:19: error:
     • Found hole: _ :: t
       Where: ‘t’ is a rigid type variable bound by
-               the inferred type of bar :: p -> p1 -> t at T12177.hs:3:1-19
+               the inferred type of bar :: p -> p1 -> t
+               at T12177.hs:3:1-19
     • In the expression: _
       In the expression: \ x -> _
       In the expression: \ x -> \ x -> _

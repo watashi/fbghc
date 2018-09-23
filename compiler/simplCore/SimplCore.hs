@@ -10,12 +10,15 @@ module SimplCore ( core2core, simplifyExpr ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import DynFlags
 import CoreSyn
 import HscTypes
 import CSE              ( cseProgram )
 import Rules            ( mkRuleBase, unionRuleBase,
-                          extendRuleBaseList, ruleCheckProgram, addRuleInfo, )
+                          extendRuleBaseList, ruleCheckProgram, addRuleInfo,
+                          getRules )
 import PprCore          ( pprCoreBindings, pprCoreExpr )
 import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
@@ -24,7 +27,7 @@ import CoreUtils        ( mkTicks, stripTicksTop )
 import CoreLint         ( endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
 import Simplify         ( simplTopBinds, simplExpr, simplRules )
-import SimplUtils       ( simplEnvForGHCi, activeRule )
+import SimplUtils       ( simplEnvForGHCi, activeRule, activeUnfolding )
 import SimplEnv
 import SimplMonad
 import CoreMonad
@@ -34,7 +37,7 @@ import FloatOut         ( floatOutwards )
 import FamInstEnv
 import Id
 import ErrUtils         ( withTiming )
-import BasicTypes       ( CompilerPhase(..), isDefaultInlinePragma )
+import BasicTypes       ( CompilerPhase(..), isDefaultInlinePragma, defaultInlinePragma )
 import VarSet
 import VarEnv
 import LiberateCase     ( liberateCase )
@@ -43,26 +46,19 @@ import Specialise       ( specProgram)
 import SpecConstr       ( specConstrProgram)
 import DmdAnal          ( dmdAnalProgram )
 import CallArity        ( callArityAnalProgram )
+import Exitify          ( exitifyProgram )
 import WorkWrap         ( wwTopBinds )
-import Vectorise        ( vectorise )
 import SrcLoc
 import Util
 import Module
+import Plugins          ( withPlugins, installCoreToDos )
+import DynamicLoading  -- ( initializePlugins )
 
-import Maybes
 import UniqSupply       ( UniqSupply, mkSplitUniqSupply, splitUniqSupply )
 import UniqFM
 import Outputable
 import Control.Monad
 import qualified GHC.LanguageExtensions as LangExt
-
-#if defined(GHCI)
-import DynamicLoading   ( loadPlugins )
-import Plugins          ( installCoreToDos )
-#else
-import DynamicLoading   ( pluginError )
-#endif
-
 {-
 ************************************************************************
 *                                                                      *
@@ -84,7 +80,12 @@ core2core hsc_env guts@(ModGuts { mg_module  = mod
        ;
        ; (guts2, stats) <- runCoreM hsc_env hpt_rule_base us mod
                                     orph_mods print_unqual loc $
-                           do { all_passes <- addPluginPasses builtin_passes
+                           do { hsc_env' <- getHscEnv
+                              ; dflags' <- liftIO $ initializePlugins hsc_env'
+                                                      (hsc_dflags hsc_env')
+                              ; all_passes <- withPlugins dflags'
+                                                installCoreToDos
+                                                builtin_passes
                               ; runCorePasses all_passes guts }
 
        ; Err.dumpIfSet_dyn dflags Opt_D_dump_simpl_stats
@@ -120,6 +121,7 @@ getCoreToDo dflags
     max_iter      = maxSimplIterations dflags
     rule_check    = ruleCheck          dflags
     call_arity    = gopt Opt_CallArity                    dflags
+    exitification = gopt Opt_Exitification                dflags
     strictness    = gopt Opt_Strictness                   dflags
     full_laziness = gopt Opt_FullLaziness                 dflags
     do_specialise = gopt Opt_Specialise                   dflags
@@ -128,11 +130,11 @@ getCoreToDo dflags
     spec_constr   = gopt Opt_SpecConstr                   dflags
     liberate_case = gopt Opt_LiberateCase                 dflags
     late_dmd_anal = gopt Opt_LateDmdAnal                  dflags
+    late_specialise = gopt Opt_LateSpecialise             dflags
     static_args   = gopt Opt_StaticArgumentTransformation dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
-    vectorise_on  = gopt Opt_Vectorise                    dflags
     static_ptrs   = xopt LangExt.StaticPointers           dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
@@ -142,6 +144,7 @@ getCoreToDo dflags
 
     base_mode = SimplMode { sm_phase      = panic "base_mode"
                           , sm_names      = []
+                          , sm_dflags     = dflags
                           , sm_rules      = rules_on
                           , sm_eta_expand = eta_expand_on
                           , sm_inline     = True
@@ -156,30 +159,6 @@ getCoreToDo dflags
 
           , maybe_rule_check (Phase phase) ]
 
-          -- Vectorisation can introduce a fair few common sub expressions involving
-          --  DPH primitives. For example, see the Reverse test from dph-examples.
-          --  We need to eliminate these common sub expressions before their definitions
-          --  are inlined in phase 2. The CSE introduces lots of  v1 = v2 bindings,
-          --  so we also run simpl_gently to inline them.
-      ++  (if vectorise_on && phase == 3
-            then [CoreCSE, simpl_gently]
-            else [])
-
-    vectorisation
-      = runWhen vectorise_on $
-          CoreDoPasses [ simpl_gently, CoreDoVectorisation ]
-
-                -- By default, we have 2 phases before phase 0.
-
-                -- Want to run with inline phase 2 after the specialiser to give
-                -- maximum chance for fusion to work before we inline build/augment
-                -- in phase 1.  This made a difference in 'ansi' where an
-                -- overloaded function wasn't inlined till too late.
-
-                -- Need phase 1 so that build/augment get
-                -- inlined.  I found that spectral/hartel/genfft lost some useful
-                -- strictness in the function sumcode' if augment is not inlined
-                -- before strictness analysis runs
     simpl_phases = CoreDoPasses [ simpl_phase phase ["main"] max_iter
                                 | phase <- [phases, phases-1 .. 1] ]
 
@@ -189,7 +168,7 @@ getCoreToDo dflags
                        (base_mode { sm_phase = InitialPhase
                                   , sm_names = ["Gentle"]
                                   , sm_rules = rules_on   -- Note [RULEs enabled in SimplGently]
-                                  , sm_inline = not vectorise_on
+                                  , sm_inline = True
                                               -- See Note [Inline in InitialPhase]
                                   , sm_case_case = False })
                           -- Don't do case-of-case transformations.
@@ -222,8 +201,7 @@ getCoreToDo dflags
 
     core_todo =
      if opt_level == 0 then
-       [ vectorisation,
-         static_ptrs_float_outwards,
+       [ static_ptrs_float_outwards,
          CoreDoSimplify max_iter
              (base_mode { sm_phase = Phase 0
                         , sm_names = ["Non-opt simplification"] })
@@ -236,10 +214,6 @@ getCoreToDo dflags
     -- up the output of the transformation we need at do at least one simplify
     -- after this before anything else
         runWhen static_args (CoreDoPasses [ simpl_gently, CoreDoStaticArgs ]),
-
-        -- We run vectorisation here for now, but we might also try to run
-        -- it later
-        vectorisation,
 
         -- initial simplify: mk specialiser happy: minimum effort please
         simpl_gently,
@@ -305,6 +279,9 @@ getCoreToDo dflags
 
         runWhen strictness demand_analyser,
 
+        runWhen exitification CoreDoExitify,
+            -- See note [Placement of the exitification pass]
+
         runWhen full_laziness $
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas     = floatLamArgs dflags,
@@ -340,6 +317,16 @@ getCoreToDo dflags
 
         maybe_rule_check (Phase 0),
 
+        runWhen late_specialise
+          (CoreDoPasses [ CoreDoSpecialising
+                        , simpl_phase 0 ["post-late-spec"] max_iter]),
+
+        -- LiberateCase can yield new CSE opportunities because it peels
+        -- off one layer of a recursive function (concretely, I saw this
+        -- in wheel-sieve1), and I'm guessing that SpecConstr can too
+        -- And CSE is a very cheap pass. So it seems worth doing here.
+        runWhen ((liberate_case || spec_constr) && cse) CoreCSE,
+
         -- Final clean-up simplification:
         simpl_phase 0 ["final"] max_iter,
 
@@ -364,24 +351,6 @@ getCoreToDo dflags
     flatten_todos (CoreDoPasses passes : rest) =
       flatten_todos passes ++ flatten_todos rest
     flatten_todos (todo : rest) = todo : flatten_todos rest
-
--- Loading plugins
-
-addPluginPasses :: [CoreToDo] -> CoreM [CoreToDo]
-#if !defined(GHCI)
-addPluginPasses builtin_passes
-  = do { dflags <- getDynFlags
-       ; let pluginMods = pluginModNames dflags
-       ; unless (null pluginMods) (pluginError pluginMods)
-       ; return builtin_passes }
-#else
-addPluginPasses builtin_passes
-  = do { hsc_env <- getHscEnv
-       ; named_plugins <- liftIO (loadPlugins hsc_env)
-       ; foldM query_plug builtin_passes named_plugins }
-  where
-    query_plug todos (_, plug, options) = installCoreToDos plug options todos
-#endif
 
 {- Note [Inline in InitialPhase]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -473,6 +442,9 @@ doCorePass CoreDoStaticArgs          = {-# SCC "StaticArgs" #-}
 doCorePass CoreDoCallArity           = {-# SCC "CallArity" #-}
                                        doPassD callArityAnalProgram
 
+doCorePass CoreDoExitify             = {-# SCC "Exitify" #-}
+                                       doPass exitifyProgram
+
 doCorePass CoreDoStrictness          = {-# SCC "NewStranal" #-}
                                        doPassDFM dmdAnalProgram
 
@@ -485,9 +457,6 @@ doCorePass CoreDoSpecialising        = {-# SCC "Specialise" #-}
 doCorePass CoreDoSpecConstr          = {-# SCC "SpecConstr" #-}
                                        specConstrProgram
 
-doCorePass CoreDoVectorisation       = {-# SCC "Vectorise" #-}
-                                       vectorise
-
 doCorePass CoreDoPrintCore              = observe   printCore
 doCorePass (CoreDoRuleCheck phase pat)  = ruleCheckPass phase pat
 doCorePass CoreDoNothing                = return
@@ -495,9 +464,15 @@ doCorePass (CoreDoPasses passes)        = runCorePasses passes
 
 #if defined(GHCI)
 doCorePass (CoreDoPluginPass _ pass) = {-# SCC "Plugin" #-} pass
+#else
+doCorePass pass@CoreDoPluginPass {}  = pprPanic "doCorePass" (ppr pass)
 #endif
 
-doCorePass pass = pprPanic "doCorePass" (ppr pass)
+doCorePass pass@CoreDesugar          = pprPanic "doCorePass" (ppr pass)
+doCorePass pass@CoreDesugarOpt       = pprPanic "doCorePass" (ppr pass)
+doCorePass pass@CoreTidy             = pprPanic "doCorePass" (ppr pass)
+doCorePass pass@CorePrep             = pprPanic "doCorePass" (ppr pass)
+doCorePass pass@CoreOccurAnal        = pprPanic "doCorePass" (ppr pass)
 
 {-
 ************************************************************************
@@ -519,10 +494,12 @@ ruleCheckPass current_phase pat guts =
     { rb <- getRuleBase
     ; dflags <- getDynFlags
     ; vis_orphs <- getVisibleOrphanMods
+    ; let rule_fn fn = getRules (RuleEnv rb vis_orphs) fn
+                        ++ (mg_rules guts)
     ; liftIO $ putLogMsg dflags NoReason Err.SevDump noSrcSpan
                    (defaultDumpStyle dflags)
                    (ruleCheckProgram current_phase pat
-                      (RuleEnv rb vis_orphs) (mg_binds guts))
+                      rule_fn (mg_binds guts))
     ; return guts }
 
 doPassDUM :: (DynFlags -> UniqSupply -> CoreProgram -> IO CoreProgram) -> ModGuts -> CoreM ModGuts
@@ -619,7 +596,7 @@ simplExprGently :: SimplEnv -> CoreExpr -> SimplM CoreExpr
 --      (b) the LHS and RHS of a RULE
 --      (c) Template Haskell splices
 --
--- The name 'Gently' suggests that the SimplifierMode is SimplGently,
+-- The name 'Gently' suggests that the SimplMode is SimplGently,
 -- and in fact that is so.... but the 'Gently' in simplExprGently doesn't
 -- enforce that; it just simplifies the expression twice
 
@@ -679,7 +656,8 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
     dflags       = hsc_dflags hsc_env
     print_unqual = mkPrintUnqualified dflags rdr_env
     simpl_env    = mkSimplEnv mode
-    active_rule  = activeRule simpl_env
+    active_rule  = activeRule mode
+    active_unf   = activeUnfolding mode
 
     do_iteration :: UniqSupply
                  -> Int          -- Counts iterations
@@ -711,30 +689,9 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
       , () <- sz `seq` ()     -- Force it
       = do {
                 -- Occurrence analysis
-           let {   -- Note [Vectorisation declarations and occurrences]
-                   -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-                   -- During the 'InitialPhase' (i.e., before vectorisation), we need to make sure
-                   -- that the right-hand sides of vectorisation declarations are taken into
-                   -- account during occurrence analysis. After the 'InitialPhase', we need to ensure
-                   -- that the binders representing variable vectorisation declarations are kept alive.
-                   -- (In contrast to automatically vectorised variables, their unvectorised versions
-                   -- don't depend on them.)
-                 vectVars = mkVarSet $
-                              catMaybes [ fmap snd $ lookupDVarEnv (vectInfoVar (mg_vect_info guts)) bndr
-                                        | Vect bndr _ <- mg_vect_decls guts]
-                              ++
-                              catMaybes [ fmap snd $ lookupDVarEnv (vectInfoVar (mg_vect_info guts)) bndr
-                                        | bndr <- bindersOfBinds binds]
-                                        -- FIXME: This second comprehensions is only needed as long as we
-                                        --        have vectorised bindings where we get "Could NOT call
-                                        --        vectorised from original version".
-              ;  (maybeVects, maybeVectVars)
-                   = case sm_phase mode of
-                       InitialPhase -> (mg_vect_decls guts, vectVars)
-                       _            -> ([], vectVars)
-               ; tagged_binds = {-# SCC "OccAnal" #-}
-                     occurAnalysePgm this_mod active_rule rules
-                                     maybeVects maybeVectVars binds
+           let { tagged_binds = {-# SCC "OccAnal" #-}
+                     occurAnalysePgm this_mod active_unf active_rule rules
+                                     binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);
@@ -754,18 +711,19 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                 -- Simplify the program
            ((binds1, rules1), counts1) <-
              initSmpl dflags (mkRuleEnv rule_base2 vis_orphs) fam_envs us1 sz $
-               do { env1 <- {-# SCC "SimplTopBinds" #-}
-                            simplTopBinds simpl_env tagged_binds
+               do { (floats, env1) <- {-# SCC "SimplTopBinds" #-}
+                                      simplTopBinds simpl_env tagged_binds
 
                       -- Apply the substitution to rules defined in this module
                       -- for imported Ids.  Eg  RULE map my_f = blah
                       -- If we have a substitution my_f :-> other_f, we'd better
                       -- apply it to the rule to, or it'll never match
-                  ; rules1 <- simplRules env1 Nothing rules
+                  ; rules1 <- simplRules env1 Nothing rules Nothing
 
-                  ; return (getFloatBinds env1, rules1) } ;
+                  ; return (getTopFloatBinds floats, rules1) } ;
 
                 -- Stop if nothing happened; don't dump output
+                -- See Note [Which transformations are innocuous] in CoreMonad
            if isZeroSimplCount counts1 then
                 return ( "Simplifier reached fixed point", iteration_no
                        , totalise (counts1 : counts_so_far)  -- Include "free" ticks
@@ -837,16 +795,6 @@ Without this we never get rid of the x_exported = x_local thing.  This
 save a gratuitous jump (from \tr{x_exported} to \tr{x_local}), and
 makes strictness information propagate better.  This used to happen in
 the final phase, but it's tidier to do it here.
-
-Note [Transferring IdInfo]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
-We want to propagage any useful IdInfo on x_local to x_exported.
-
-STRICTNESS: if we have done strictness analysis, we want the strictness info on
-x_local to transfer to x_exported.  Hence the copyIdInfo call.
-
-RULES: we want to *add* any RULES for x_local to x_exported.
-
 
 Note [Messing up the exported Id's RULES]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -941,7 +889,6 @@ unfolding for something.
 
 Note [Indirection zapping and ticks]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 Unfortunately this is another place where we need a special case for
 ticks. The following happens quite regularly:
 
@@ -981,12 +928,18 @@ shortOutIndirections binds
     zap (Rec pairs)       = [Rec (concatMap zapPair pairs)]
 
     zapPair (bndr, rhs)
-        | bndr `elemVarSet` exp_id_set = []
+        | bndr `elemVarSet` exp_id_set
+        = []   -- Kill the exported-id binding
+
         | Just (exp_id, ticks) <- lookupVarEnv ind_env bndr
-                                       = [(transferIdInfo exp_id bndr,
-                                           mkTicks ticks rhs),
-                                          (bndr, Var exp_id)]
-        | otherwise                    = [(bndr,rhs)]
+        , (exp_id', lcl_id') <- transferIdInfo exp_id bndr
+        =      -- Turn a local-id binding into two bindings
+               --    exp_id = rhs; lcl_id = exp_id
+          [ (exp_id', mkTicks ticks rhs),
+            (lcl_id', Var exp_id') ]
+
+        | otherwise
+        = [(bndr,rhs)]
 
 makeIndEnv :: [CoreBind] -> IndEnv
 makeIndEnv binds
@@ -1039,16 +992,32 @@ hasShortableIdInfo id
      info = idInfo id
 
 -----------------
-transferIdInfo :: Id -> Id -> Id
+{- Note [Transferring IdInfo]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have
+     lcl_id = e; exp_id = lcl_id
+
+and lcl_id has useful IdInfo, we don't want to discard it by going
+     gbl_id = e; lcl_id = gbl_id
+
+Instead, transfer IdInfo from lcl_id to exp_id, specifically
+* (Stable) unfolding
+* Strictness
+* Rules
+* Inline pragma
+
+Overwriting, rather than merging, seems to work ok.
+
+We also zap the InlinePragma on the lcl_id. It might originally
+have had a NOINLINE, which we have now transferred; and we really
+want the lcl_id to inline now that its RHS is trivial!
+-}
+
+transferIdInfo :: Id -> Id -> (Id, Id)
 -- See Note [Transferring IdInfo]
--- If we have
---      lcl_id = e; exp_id = lcl_id
--- and lcl_id has useful IdInfo, we don't want to discard it by going
---      gbl_id = e; lcl_id = gbl_id
--- Instead, transfer IdInfo from lcl_id to exp_id
--- Overwriting, rather than merging, seems to work ok.
 transferIdInfo exported_id local_id
-  = modifyIdInfo transfer exported_id
+  = ( modifyIdInfo transfer exported_id
+    , local_id `setInlinePragma` defaultInlinePragma )
   where
     local_info = idInfo local_id
     transfer exp_info = exp_info `setStrictnessInfo`    strictnessInfo local_info

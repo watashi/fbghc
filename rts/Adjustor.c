@@ -40,7 +40,7 @@ Haskell side.
 #include "Rts.h"
 
 #include "RtsUtils.h"
-#include "Stable.h"
+#include "StablePtr.h"
 
 #if defined(USE_LIBFFI_FOR_ADJUSTORS)
 #include "ffi.h"
@@ -357,6 +357,7 @@ static int totalArgumentSize(char *typeString)
                     sz += 2;
                     break;
                 }
+                /* fall through */
                 // everything else is one word.
             default:
                 sz += 1;

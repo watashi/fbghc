@@ -33,6 +33,8 @@ module NameSet (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Name
 import UniqSet
 import Data.List (sortBy)
@@ -79,7 +81,7 @@ delFromNameSet    = delOneFromUniqSet
 filterNameSet     = filterUniqSet
 intersectNameSet  = intersectUniqSets
 
-delListFromNameSet set ns = foldl delFromNameSet set ns
+delListFromNameSet set ns = foldl' delFromNameSet set ns
 
 intersectsNameSet s1 s2 = not (isEmptyNameSet (s1 `intersectNameSet` s2))
 

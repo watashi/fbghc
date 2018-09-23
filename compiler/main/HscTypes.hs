@@ -44,7 +44,7 @@ module HscTypes (
         lookupHpt, eltsHpt, filterHpt, allHpt, mapHpt, delFromHpt,
         addToHpt, addListToHpt, lookupHptDirectly, listToHpt,
         hptCompleteSigs,
-        hptInstances, hptRules, hptVectInfo, pprHPT,
+        hptInstances, hptRules, pprHPT,
 
         -- * State relating to known packages
         ExternalPackageState(..), EpsStats(..), addEpsInStats,
@@ -106,7 +106,7 @@ module HscTypes (
         -- * Information on imports and exports
         WhetherHasOrphans, IsBootInterface, Usage(..),
         Dependencies(..), noDependencies,
-        updNameCacheIO,
+        updNameCache,
         IfaceExport,
 
         -- * Warnings
@@ -122,10 +122,6 @@ module HscTypes (
 
         -- * Breakpoints
         ModBreaks (..), emptyModBreaks,
-
-        -- * Vectorisation information
-        VectInfo(..), IfaceVectInfo(..), noVectInfo, plusVectInfo,
-        noIfaceVectInfo, isNoIfaceVectInfo,
 
         -- * Safe Haskell information
         IfaceTrustInfo, getSafeMode, setSafeMode, noIfaceTrustInfo,
@@ -146,6 +142,8 @@ module HscTypes (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import ByteCodeTypes
 import InteractiveEvalTypes ( Resume )
 import GHCi.Message         ( Pipe )
@@ -159,11 +157,9 @@ import Avail
 import Module
 import InstEnv          ( InstEnv, ClsInst, identicalClsInstHead )
 import FamInstEnv
-import CoreSyn          ( CoreProgram, RuleBase, CoreRule, CoreVect )
+import CoreSyn          ( CoreProgram, RuleBase, CoreRule )
 import Name
 import NameEnv
-import NameSet
-import VarEnv
 import VarSet
 import Var
 import Id
@@ -178,8 +174,7 @@ import CoAxiom
 import ConLike
 import DataCon
 import PatSyn
-import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule
-                        , eqTyConName )
+import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule )
 import TysWiredIn
 import Packages hiding  ( Version(..) )
 import CmdLineParser
@@ -208,7 +203,6 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Foreign
 import Control.Monad    ( guard, liftM, ap )
-import Data.Foldable    ( foldl' )
 import Data.IORef
 import Data.Time
 import Exception
@@ -663,13 +657,6 @@ hptInstances hsc_env want_this_module
                 return (md_insts details, md_fam_insts details)
     in (concat insts, concat famInsts)
 
--- | Get the combined VectInfo of all modules in the home package table. In
--- contrast to instances and rules, we don't care whether the modules are
--- "below" us in the dependency sense. The VectInfo of those modules not "below"
--- us does not affect the compilation of the current module.
-hptVectInfo :: HscEnv -> VectInfo
-hptVectInfo = concatVectInfo . hptAllThings ((: []) . md_vect_info . hm_details)
-
 -- | Get rules from modules "below" this one (in the dependency sense)
 hptRules :: HscEnv -> [(ModuleName, IsBootInterface)] -> [CoreRule]
 hptRules = hptSomeThingsBelowUs (md_rules . hm_details) False
@@ -828,6 +815,9 @@ data FindResult
       , fr_pkgs_hidden :: [UnitId]      -- Module is in these packages,
                                            --   but the *package* is hidden
 
+        -- Modules are in these packages, but it is unusable
+      , fr_unusables   :: [(UnitId, UnusablePackageReason)]
+
       , fr_suggestions :: [ModuleSuggestion] -- Possible mis-spelled modules
       }
 
@@ -855,7 +845,11 @@ data ModIface
         mi_iface_hash :: !Fingerprint,        -- ^ Hash of the whole interface
         mi_mod_hash   :: !Fingerprint,        -- ^ Hash of the ABI only
         mi_flag_hash  :: !Fingerprint,        -- ^ Hash of the important flags
-                                              -- used when compiling this module
+                                              -- used when compiling the module,
+                                              -- excluding optimisation flags
+        mi_opt_hash   :: !Fingerprint,        -- ^ Hash of optimisation flags
+        mi_hpc_hash   :: !Fingerprint,        -- ^ Hash of hpc flags
+        mi_plugin_hash :: !Fingerprint,       -- ^ Hash of plugins
 
         mi_orphan     :: !WhetherHasOrphans,  -- ^ Whether this module has orphans
         mi_finsts     :: !WhetherHasFamInst,
@@ -928,9 +922,7 @@ data ModIface
         mi_fam_insts   :: [IfaceFamInst],  -- ^ Sorted family instances
         mi_rules       :: [IfaceRule],     -- ^ Sorted rules
         mi_orphan_hash :: !Fingerprint,    -- ^ Hash for orphan rules, class and family
-                                           -- instances, and vectorise pragmas combined
-
-        mi_vect_info :: !IfaceVectInfo,    -- ^ Vectorisation information
+                                           -- instances combined
 
                 -- Cached environments for easy lookup
                 -- These are computed (lazily) from other fields
@@ -959,7 +951,16 @@ data ModIface
                 -- itself) but imports some trustworthy modules from its own
                 -- package (which does require its own package be trusted).
                 -- See Note [RnNames . Trust Own Package]
-        mi_complete_sigs :: [IfaceCompleteMatch]
+        mi_complete_sigs :: [IfaceCompleteMatch],
+
+        mi_doc_hdr :: Maybe HsDocString,
+                -- ^ Module header.
+
+        mi_decl_docs :: DeclDocMap,
+                -- ^ Docs on declarations.
+
+        mi_arg_docs :: ArgDocMap
+                -- ^ Docs on arguments.
      }
 
 -- | Old-style accessor for whether or not the ModIface came from an hs-boot
@@ -1016,6 +1017,9 @@ instance Binary ModIface where
                  mi_iface_hash= iface_hash,
                  mi_mod_hash  = mod_hash,
                  mi_flag_hash = flag_hash,
+                 mi_opt_hash  = opt_hash,
+                 mi_hpc_hash  = hpc_hash,
+                 mi_plugin_hash = plugin_hash,
                  mi_orphan    = orphan,
                  mi_finsts    = hasFamInsts,
                  mi_deps      = deps,
@@ -1031,17 +1035,22 @@ instance Binary ModIface where
                  mi_fam_insts = fam_insts,
                  mi_rules     = rules,
                  mi_orphan_hash = orphan_hash,
-                 mi_vect_info = vect_info,
                  mi_hpc       = hpc_info,
                  mi_trust     = trust,
                  mi_trust_pkg = trust_pkg,
-                 mi_complete_sigs = complete_sigs }) = do
+                 mi_complete_sigs = complete_sigs,
+                 mi_doc_hdr   = doc_hdr,
+                 mi_decl_docs = decl_docs,
+                 mi_arg_docs  = arg_docs }) = do
         put_ bh mod
         put_ bh sig_of
         put_ bh hsc_src
         put_ bh iface_hash
         put_ bh mod_hash
         put_ bh flag_hash
+        put_ bh opt_hash
+        put_ bh hpc_hash
+        put_ bh plugin_hash
         put_ bh orphan
         put_ bh hasFamInsts
         lazyPut bh deps
@@ -1057,11 +1066,13 @@ instance Binary ModIface where
         put_ bh fam_insts
         lazyPut bh rules
         put_ bh orphan_hash
-        put_ bh vect_info
         put_ bh hpc_info
         put_ bh trust
         put_ bh trust_pkg
         put_ bh complete_sigs
+        lazyPut bh doc_hdr
+        lazyPut bh decl_docs
+        lazyPut bh arg_docs
 
    get bh = do
         mod         <- get bh
@@ -1070,6 +1081,9 @@ instance Binary ModIface where
         iface_hash  <- get bh
         mod_hash    <- get bh
         flag_hash   <- get bh
+        opt_hash    <- get bh
+        hpc_hash    <- get bh
+        plugin_hash <- get bh
         orphan      <- get bh
         hasFamInsts <- get bh
         deps        <- lazyGet bh
@@ -1085,11 +1099,13 @@ instance Binary ModIface where
         fam_insts   <- {-# SCC "bin_fam_insts" #-} get bh
         rules       <- {-# SCC "bin_rules" #-} lazyGet bh
         orphan_hash <- get bh
-        vect_info   <- get bh
         hpc_info    <- get bh
         trust       <- get bh
         trust_pkg   <- get bh
         complete_sigs <- get bh
+        doc_hdr     <- lazyGet bh
+        decl_docs   <- lazyGet bh
+        arg_docs    <- lazyGet bh
         return (ModIface {
                  mi_module      = mod,
                  mi_sig_of      = sig_of,
@@ -1097,6 +1113,9 @@ instance Binary ModIface where
                  mi_iface_hash  = iface_hash,
                  mi_mod_hash    = mod_hash,
                  mi_flag_hash   = flag_hash,
+                 mi_opt_hash    = opt_hash,
+                 mi_hpc_hash    = hpc_hash,
+                 mi_plugin_hash = plugin_hash,
                  mi_orphan      = orphan,
                  mi_finsts      = hasFamInsts,
                  mi_deps        = deps,
@@ -1113,7 +1132,6 @@ instance Binary ModIface where
                  mi_fam_insts   = fam_insts,
                  mi_rules       = rules,
                  mi_orphan_hash = orphan_hash,
-                 mi_vect_info   = vect_info,
                  mi_hpc         = hpc_info,
                  mi_trust       = trust,
                  mi_trust_pkg   = trust_pkg,
@@ -1121,7 +1139,10 @@ instance Binary ModIface where
                  mi_warn_fn     = mkIfaceWarnCache warns,
                  mi_fix_fn      = mkIfaceFixCache fixities,
                  mi_hash_fn     = mkIfaceHashCache decls,
-                 mi_complete_sigs = complete_sigs })
+                 mi_complete_sigs = complete_sigs,
+                 mi_doc_hdr     = doc_hdr,
+                 mi_decl_docs   = decl_docs,
+                 mi_arg_docs    = arg_docs })
 
 -- | The original names declared of a certain module that are exported
 type IfaceExport = AvailInfo
@@ -1134,6 +1155,9 @@ emptyModIface mod
                mi_iface_hash  = fingerprint0,
                mi_mod_hash    = fingerprint0,
                mi_flag_hash   = fingerprint0,
+               mi_opt_hash    = fingerprint0,
+               mi_hpc_hash    = fingerprint0,
+               mi_plugin_hash = fingerprint0,
                mi_orphan      = False,
                mi_finsts      = False,
                mi_hsc_src     = HsSrcFile,
@@ -1151,14 +1175,16 @@ emptyModIface mod
                mi_decls       = [],
                mi_globals     = Nothing,
                mi_orphan_hash = fingerprint0,
-               mi_vect_info   = noIfaceVectInfo,
                mi_warn_fn     = emptyIfaceWarnCache,
                mi_fix_fn      = emptyIfaceFixCache,
                mi_hash_fn     = emptyIfaceHashCache,
                mi_hpc         = False,
                mi_trust       = noIfaceTrustInfo,
                mi_trust_pkg   = False,
-               mi_complete_sigs = [] }
+               mi_complete_sigs = [],
+               mi_doc_hdr     = Nothing,
+               mi_decl_docs   = emptyDeclDocMap,
+               mi_arg_docs    = emptyArgDocMap }
 
 
 -- | Constructs cache for the 'mi_hash_fn' field of a 'ModIface'
@@ -1190,7 +1216,6 @@ data ModDetails
         md_rules     :: ![CoreRule],    -- ^ Domain may include 'Id's from other modules
         md_anns      :: ![Annotation],  -- ^ Annotations present in this module: currently
                                         -- they only annotate things also declared in this module
-        md_vect_info :: !VectInfo,       -- ^ Module vectorisation information
         md_complete_sigs :: [CompleteMatch]
           -- ^ Complete match pragmas for this module
      }
@@ -1204,7 +1229,6 @@ emptyModDetails
                  md_rules     = [],
                  md_fam_insts = [],
                  md_anns      = [],
-                 md_vect_info = noVectInfo,
                  md_complete_sigs = [] }
 
 -- | Records the modules directly imported by a module for extracting e.g.
@@ -1229,7 +1253,8 @@ data ImportedModsVal
         imv_span :: SrcSpan,             -- ^ the source span of the whole import
         imv_is_safe :: IsSafeImport,     -- ^ whether this is a safe import
         imv_is_hiding :: Bool,           -- ^ whether this is an "hiding" import
-        imv_all_exports :: GlobalRdrEnv, -- ^ all the things the module could provide
+        imv_all_exports :: !GlobalRdrEnv, -- ^ all the things the module could provide
+          -- NB. BangPattern here: otherwise this leaks. (#15111)
         imv_qualified :: Bool            -- ^ whether this is a qualified import
         }
 
@@ -1263,16 +1288,13 @@ data ModGuts
                                          -- See Note [Overall plumbing for rules] in Rules.hs
         mg_binds     :: !CoreProgram,    -- ^ Bindings for this module
         mg_foreign   :: !ForeignStubs,   -- ^ Foreign exports declared in this module
-        mg_foreign_files :: ![(ForeignSrcLang, String)],
+        mg_foreign_files :: ![(ForeignSrcLang, FilePath)],
         -- ^ Files to be compiled with the C compiler
         mg_warns     :: !Warnings,       -- ^ Warnings declared in the module
         mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
         mg_complete_sigs :: [CompleteMatch], -- ^ Complete Matches
         mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
         mg_modBreaks :: !(Maybe ModBreaks), -- ^ Breakpoints for the module
-        mg_vect_decls:: ![CoreVect],     -- ^ Vectorisation declarations in this module
-                                         --   (produced by desugarer & consumed by vectoriser)
-        mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
 
                         -- The next two fields are unusual, because they give instance
                         -- environments for *all* modules in the home package, including
@@ -1287,9 +1309,13 @@ data ModGuts
                                                 -- one); c.f. 'tcg_fam_inst_env'
 
         mg_safe_haskell :: SafeHaskellMode,     -- ^ Safe Haskell mode
-        mg_trust_pkg    :: Bool                 -- ^ Do we need to trust our
+        mg_trust_pkg    :: Bool,                -- ^ Do we need to trust our
                                                 -- own package for Safe Haskell?
                                                 -- See Note [RnNames . Trust Own Package]
+
+        mg_doc_hdr       :: !(Maybe HsDocString), -- ^ Module header.
+        mg_decl_docs     :: !DeclDocMap,     -- ^ Docs on declarations.
+        mg_arg_docs      :: !ArgDocMap       -- ^ Docs on arguments.
     }
 
 -- The ModGuts takes on several slightly different forms:
@@ -1320,11 +1346,11 @@ data CgGuts
                 -- ^ The tidied main bindings, including
                 -- previously-implicit bindings for record and class
                 -- selectors, and data constructor wrappers.  But *not*
-                -- data constructor workers; reason: we we regard them
+                -- data constructor workers; reason: we regard them
                 -- as part of the code-gen of tycons
 
         cg_foreign   :: !ForeignStubs,   -- ^ Foreign export stubs
-        cg_foreign_files :: ![(ForeignSrcLang, String)],
+        cg_foreign_files :: ![(ForeignSrcLang, FilePath)],
         cg_dep_pkgs  :: ![InstalledUnitId], -- ^ Dependent packages, used to
                                             -- generate #includes for C code gen
         cg_hpc_info  :: !HpcInfo,           -- ^ Program coverage tick box information
@@ -1626,7 +1652,7 @@ extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
   = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
                             -- Always bump this; even instances should create
                             -- a new mod_index (Trac #9426)
-          , ic_tythings   = new_tythings ++ ic_tythings ictxt
+          , ic_tythings   = new_tythings ++ old_tythings
           , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings
           , ic_instances  = ( new_cls_insts ++ old_cls_insts
                             , new_fam_insts ++ fam_insts )
@@ -1636,6 +1662,8 @@ extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
           , ic_fix_env    = fix_env  -- See Note [Fixity declarations in GHCi]
           }
   where
+    new_ids = [id | AnId id <- new_tythings]
+    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
 
     -- Discard old instances that have been fully overridden
     -- See Note [Override identical instances in GHCi]
@@ -1647,10 +1675,17 @@ extendInteractiveContextWithIds :: InteractiveContext -> [Id] -> InteractiveCont
 extendInteractiveContextWithIds ictxt new_ids
   | null new_ids = ictxt
   | otherwise    = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
-                         , ic_tythings   = new_tythings ++ ic_tythings ictxt
+                         , ic_tythings   = new_tythings ++ old_tythings
                          , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings }
   where
     new_tythings = map AnId new_ids
+    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
+
+shadowed_by :: [Id] -> TyThing -> Bool
+shadowed_by ids = shadowed
+  where
+    shadowed id = getOccName id `elemOccSet` new_occs
+    new_occs = mkOccSet (map getOccName ids)
 
 setInteractivePackage :: HscEnv -> HscEnv
 -- Set the 'thisPackage' DynFlag to 'interactive'
@@ -1675,7 +1710,7 @@ icExtendGblRdrEnv env tythings
        | is_sub_bndr thing
        = env
        | otherwise
-       = foldl extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
+       = foldl' extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
        where
           env1  = shadowNames env (concatMap availNames avail)
           avail = tyThingAvailInfo thing
@@ -1696,8 +1731,13 @@ substInteractiveContext ictxt@InteractiveContext{ ic_tythings = tts } subst
   | isEmptyTCvSubst subst = ictxt
   | otherwise             = ictxt { ic_tythings = map subst_ty tts }
   where
-    subst_ty (AnId id) = AnId $ id `setIdType` substTyUnchecked subst (idType id)
-    subst_ty tt        = tt
+    subst_ty (AnId id)
+      = AnId $ id `setIdType` substTyAddInScope subst (idType id)
+      -- Variables in the interactive context *can* mention free type variables
+      -- because of the runtime debugger. Otherwise you'd expect all
+      -- variables bound in the interactive context to be closed.
+    subst_ty tt
+      = tt
 
 instance Outputable InteractiveImport where
   ppr (IIModule m) = char '*' <> ppr m
@@ -1795,8 +1835,7 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
 
         forceUnqualNames :: [Name]
         forceUnqualNames =
-          map tyConName [ constraintKindTyCon, heqTyCon, coercibleTyCon
-                        , starKindTyCon, unicodeStarKindTyCon ]
+          map tyConName [ constraintKindTyCon, heqTyCon, coercibleTyCon ]
           ++ [ eqTyConName ]
 
         right_name gre = nameModule_maybe (gre_name gre) == Just mod
@@ -2075,7 +2114,7 @@ extendTypeEnv :: TypeEnv -> TyThing -> TypeEnv
 extendTypeEnv env thing = extendNameEnv env (getName thing) thing
 
 extendTypeEnvList :: TypeEnv -> [TyThing] -> TypeEnv
-extendTypeEnvList env things = foldl extendTypeEnv env things
+extendTypeEnvList env things = foldl' extendTypeEnv env things
 
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
@@ -2287,7 +2326,6 @@ lookupFixity env n = case lookupNameEnv env n of
 -- * A transformation rule in a module other than the one defining
 --   the function in the head of the rule
 --
--- * A vectorisation pragma
 type WhetherHasOrphans   = Bool
 
 -- | Does this module define family instances?
@@ -2332,6 +2370,9 @@ data Dependencies
                         -- This is used by 'checkFamInstConsistency'.  This
                         -- does NOT include us, unlike 'imp_finsts'. See Note
                         -- [The type family instance consistency story].
+
+         , dep_plgins :: [ModuleName]
+                        -- ^ All the plugins used while compiling this module.
          }
   deriving( Eq )
         -- Equality used only for old/new comparison in MkIface.addFingerprints
@@ -2342,16 +2383,18 @@ instance Binary Dependencies where
                       put_ bh (dep_pkgs deps)
                       put_ bh (dep_orphs deps)
                       put_ bh (dep_finsts deps)
+                      put_ bh (dep_plgins deps)
 
     get bh = do ms <- get bh
                 ps <- get bh
                 os <- get bh
                 fis <- get bh
+                pl <- get bh
                 return (Deps { dep_mods = ms, dep_pkgs = ps, dep_orphs = os,
-                               dep_finsts = fis })
+                               dep_finsts = fis, dep_plgins = pl })
 
 noDependencies :: Dependencies
-noDependencies = Deps [] [] [] []
+noDependencies = Deps [] [] [] [] []
 
 -- | Records modules for which changes may force recompilation of this module
 -- See wiki: http://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
@@ -2481,7 +2524,6 @@ type PackageTypeEnv          = TypeEnv
 type PackageRuleBase         = RuleBase
 type PackageInstEnv          = InstEnv
 type PackageFamInstEnv       = FamInstEnv
-type PackageVectInfo         = VectInfo
 type PackageAnnEnv           = AnnEnv
 type PackageCompleteMatchMap = CompleteMatchMap
 
@@ -2543,8 +2585,6 @@ data ExternalPackageState
                                                -- from all the external-package modules
         eps_rule_base    :: !PackageRuleBase,  -- ^ The total 'RuleEnv' accumulated
                                                -- from all the external-package modules
-        eps_vect_info    :: !PackageVectInfo,  -- ^ The total 'VectInfo' accumulated
-                                               -- from all the external-package modules
         eps_ann_env      :: !PackageAnnEnv,    -- ^ The total 'AnnEnv' accumulated
                                                -- from all the external-package modules
         eps_complete_matches :: !PackageCompleteMatchMap,
@@ -2583,11 +2623,11 @@ interface file); so we give it 'noSrcLoc' then.  Later, when we find
 its binding site, we fix it up.
 -}
 
-updNameCacheIO :: HscEnv
-               -> (NameCache -> (NameCache, c))  -- The updating function
-               -> IO c
-updNameCacheIO hsc_env upd_fn
-  = atomicModifyIORef' (hsc_NC hsc_env) upd_fn
+updNameCache :: IORef NameCache
+             -> (NameCache -> (NameCache, c))  -- The updating function
+             -> IO c
+updNameCache ncRef upd_fn
+  = atomicModifyIORef' ncRef upd_fn
 
 mkSOName :: Platform -> FilePath -> FilePath
 mkSOName platform root
@@ -2602,7 +2642,6 @@ soExt :: Platform -> FilePath
 soExt platform
     = case platformOS platform of
       OSDarwin  -> "dylib"
-      OSiOS     -> "dylib"
       OSMinGW32 -> "dll"
       _         -> "so"
 
@@ -2844,119 +2883,6 @@ emptyHpcInfo = NoHpcInfo
 isHpcUsed :: HpcInfo -> AnyHpcUsage
 isHpcUsed (HpcInfo {})                   = True
 isHpcUsed (NoHpcInfo { hpcUsed = used }) = used
-
-{-
-************************************************************************
-*                                                                      *
-\subsection{Vectorisation Support}
-*                                                                      *
-************************************************************************
-
-The following information is generated and consumed by the vectorisation
-subsystem.  It communicates the vectorisation status of declarations from one
-module to another.
-
-Why do we need both f and f_v in the ModGuts/ModDetails/EPS version VectInfo
-below?  We need to know `f' when converting to IfaceVectInfo.  However, during
-vectorisation, we need to know `f_v', whose `Var' we cannot lookup based
-on just the OccName easily in a Core pass.
--}
-
--- |Vectorisation information for 'ModGuts', 'ModDetails' and 'ExternalPackageState'; see also
--- documentation at 'Vectorise.Env.GlobalEnv'.
---
--- NB: The following tables may also include 'Var's, 'TyCon's and 'DataCon's from imported modules,
---     which have been subsequently vectorised in the current module.
---
-data VectInfo
-  = VectInfo
-    { vectInfoVar            :: DVarEnv (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
-    , vectInfoTyCon          :: NameEnv (TyCon  , TyCon)    -- ^ @(T, T_v)@ keyed on @T@
-    , vectInfoDataCon        :: NameEnv (DataCon, DataCon)  -- ^ @(C, C_v)@ keyed on @C@
-    , vectInfoParallelVars   :: DVarSet                     -- ^ set of parallel variables
-    , vectInfoParallelTyCons :: NameSet                     -- ^ set of parallel type constructors
-    }
-
--- |Vectorisation information for 'ModIface'; i.e, the vectorisation information propagated
--- across module boundaries.
---
--- NB: The field 'ifaceVectInfoVar' explicitly contains the workers of data constructors as well as
---     class selectors — i.e., their mappings are /not/ implicitly generated from the data types.
---     Moreover, whether the worker of a data constructor is in 'ifaceVectInfoVar' determines
---     whether that data constructor was vectorised (or is part of an abstractly vectorised type
---     constructor).
---
-data IfaceVectInfo
-  = IfaceVectInfo
-    { ifaceVectInfoVar            :: [Name]  -- ^ All variables in here have a vectorised variant
-    , ifaceVectInfoTyCon          :: [Name]  -- ^ All 'TyCon's in here have a vectorised variant;
-                                             -- the name of the vectorised variant and those of its
-                                             -- data constructors are determined by
-                                             -- 'OccName.mkVectTyConOcc' and
-                                             -- 'OccName.mkVectDataConOcc'; the names of the
-                                             -- isomorphisms are determined by 'OccName.mkVectIsoOcc'
-    , ifaceVectInfoTyConReuse     :: [Name]  -- ^ The vectorised form of all the 'TyCon's in here
-                                             -- coincides with the unconverted form; the name of the
-                                             -- isomorphisms is determined by 'OccName.mkVectIsoOcc'
-    , ifaceVectInfoParallelVars   :: [Name]  -- iface version of 'vectInfoParallelVar'
-    , ifaceVectInfoParallelTyCons :: [Name]  -- iface version of 'vectInfoParallelTyCon'
-    }
-
-noVectInfo :: VectInfo
-noVectInfo
-  = VectInfo emptyDVarEnv emptyNameEnv emptyNameEnv emptyDVarSet emptyNameSet
-
-plusVectInfo :: VectInfo -> VectInfo -> VectInfo
-plusVectInfo vi1 vi2 =
-  VectInfo (vectInfoVar            vi1 `plusDVarEnv`   vectInfoVar            vi2)
-           (vectInfoTyCon          vi1 `plusNameEnv`   vectInfoTyCon          vi2)
-           (vectInfoDataCon        vi1 `plusNameEnv`   vectInfoDataCon        vi2)
-           (vectInfoParallelVars   vi1 `unionDVarSet`  vectInfoParallelVars   vi2)
-           (vectInfoParallelTyCons vi1 `unionNameSet` vectInfoParallelTyCons vi2)
-
-concatVectInfo :: [VectInfo] -> VectInfo
-concatVectInfo = foldr plusVectInfo noVectInfo
-
-noIfaceVectInfo :: IfaceVectInfo
-noIfaceVectInfo = IfaceVectInfo [] [] [] [] []
-
-isNoIfaceVectInfo :: IfaceVectInfo -> Bool
-isNoIfaceVectInfo (IfaceVectInfo l1 l2 l3 l4 l5)
-  = null l1 && null l2 && null l3 && null l4 && null l5
-
-instance Outputable VectInfo where
-  ppr info = vcat
-             [ text "variables       :" <+> ppr (vectInfoVar            info)
-             , text "tycons          :" <+> ppr (vectInfoTyCon          info)
-             , text "datacons        :" <+> ppr (vectInfoDataCon        info)
-             , text "parallel vars   :" <+> ppr (vectInfoParallelVars   info)
-             , text "parallel tycons :" <+> ppr (vectInfoParallelTyCons info)
-             ]
-
-instance Outputable IfaceVectInfo where
-  ppr info = vcat
-             [ text "variables       :" <+> ppr (ifaceVectInfoVar            info)
-             , text "tycons          :" <+> ppr (ifaceVectInfoTyCon          info)
-             , text "tycons reuse    :" <+> ppr (ifaceVectInfoTyConReuse     info)
-             , text "parallel vars   :" <+> ppr (ifaceVectInfoParallelVars   info)
-             , text "parallel tycons :" <+> ppr (ifaceVectInfoParallelTyCons info)
-             ]
-
-
-instance Binary IfaceVectInfo where
-    put_ bh (IfaceVectInfo a1 a2 a3 a4 a5) = do
-        put_ bh a1
-        put_ bh a2
-        put_ bh a3
-        put_ bh a4
-        put_ bh a5
-    get bh = do
-        a1 <- get bh
-        a2 <- get bh
-        a3 <- get bh
-        a4 <- get bh
-        a5 <- get bh
-        return (IfaceVectInfo a1 a2 a3 a4 a5)
 
 {-
 ************************************************************************

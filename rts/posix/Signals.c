@@ -15,7 +15,7 @@
 #include "RtsUtils.h"
 #include "Prelude.h"
 #include "Ticker.h"
-#include "Stable.h"
+#include "ThreadLabels.h"
 #include "Libdw.h"
 
 #if defined(alpha_HOST_ARCH)
@@ -471,29 +471,21 @@ startSignalHandlers(Capability *cap)
            // freed by runHandler
     memcpy(info, next_pending_handler, sizeof(siginfo_t));
 
-    scheduleThread(cap,
+    StgTSO *t =
         createIOThread(cap,
-          RtsFlags.GcFlags.initialStkSize,
-              rts_apply(cap,
-                  rts_apply(cap,
-                      &base_GHCziConcziSignal_runHandlersPtr_closure,
-                      rts_mkPtr(cap, info)),
-                  rts_mkInt(cap, info->si_signo))));
+                       RtsFlags.GcFlags.initialStkSize,
+                       rts_apply(cap,
+                                 rts_apply(cap,
+                                           &base_GHCziConcziSignal_runHandlersPtr_closure,
+                                           rts_mkPtr(cap, info)),
+                                 rts_mkInt(cap, info->si_signo)));
+    scheduleThread(cap, t);
+    labelThread(cap, t, "signal handler thread");
   }
 
   unblockUserSignals();
 }
 #endif
-
-/* ----------------------------------------------------------------------------
- * Mark signal handlers during GC.
- * -------------------------------------------------------------------------- */
-
-void
-markSignalHandlers (evac_fn evac STG_UNUSED, void *user STG_UNUSED)
-{
-    // nothing to do
-}
 
 #else /* !RTS_USER_SIGNALS */
 StgInt
@@ -528,10 +520,10 @@ shutdown_handler(int sig STG_UNUSED)
 }
 
 /* -----------------------------------------------------------------------------
- * SIGUSR2 handler.
+ * SIGQUIT handler.
  *
  * We try to give the user an indication of what we are currently doing
- * in response to SIGUSR2.
+ * in response to SIGQUIT.
  * -------------------------------------------------------------------------- */
 static void
 backtrace_handler(int sig STG_UNUSED)
@@ -539,6 +531,7 @@ backtrace_handler(int sig STG_UNUSED)
 #if USE_LIBDW
     LibdwSession *session = libdwInit();
     Backtrace *bt = libdwGetBacktrace(session);
+    fprintf(stderr, "\nCaught SIGQUIT; Backtrace:\n");
     libdwPrintBacktrace(session, stderr, bt);
     backtraceFree(bt);
     libdwFree(session);
@@ -720,12 +713,12 @@ initDefaultHandlers(void)
         sysErrorBelch("warning: failed to install SIGPIPE handler");
     }
 
-    // Print a backtrace on SIGUSR2
+    // Print a backtrace on SIGQUIT
     action.sa_handler = backtrace_handler;
     sigemptyset(&action.sa_mask);
     action.sa_flags = 0;
-    if (sigaction(SIGUSR2, &action, &oact) != 0) {
-        sysErrorBelch("warning: failed to install SIGUSR2 handler");
+    if (sigaction(SIGQUIT, &action, &oact) != 0) {
+        sysErrorBelch("warning: failed to install SIGQUIT handler");
     }
 
     set_sigtstp_action(true);

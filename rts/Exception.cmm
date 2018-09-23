@@ -110,6 +110,7 @@ INFO_TABLE_RET(stg_unmaskAsyncExceptionszh_ret, RET_SMALL, W_ info_ptr)
 INFO_TABLE_RET(stg_maskAsyncExceptionszh_ret, RET_SMALL, W_ info_ptr)
     return (P_ ret)
 {
+    unwind Sp = Sp + WDS(1);
     StgTSO_flags(CurrentTSO) =
        %lobits32(
          TO_W_(StgTSO_flags(CurrentTSO))
@@ -122,6 +123,7 @@ INFO_TABLE_RET(stg_maskAsyncExceptionszh_ret, RET_SMALL, W_ info_ptr)
 INFO_TABLE_RET(stg_maskUninterruptiblezh_ret, RET_SMALL, W_ info_ptr)
     return (P_ ret)
 {
+    unwind Sp = Sp + WDS(1);
     StgTSO_flags(CurrentTSO) =
        %lobits32(
         (TO_W_(StgTSO_flags(CurrentTSO))
@@ -430,6 +432,7 @@ section "data" {
 INFO_TABLE_RET(stg_raise_ret, RET_SMALL, W_ info_ptr, P_ exception)
     return (P_ ret)
 {
+    unwind Sp = Sp + WDS(2);
     W_[no_break_on_exception] = 1;
     jump stg_raisezh (exception);
 }
@@ -486,11 +489,6 @@ retry_pop_stack:
       ccall stmAbortTransaction(MyCapability() "ptr", trec "ptr");
       ccall stmFreeAbortedTRec(MyCapability() "ptr", trec "ptr");
 
-      if (outer != NO_TREC) {
-        ccall stmAbortTransaction(MyCapability() "ptr", outer "ptr");
-        ccall stmFreeAbortedTRec(MyCapability() "ptr", outer "ptr");
-      }
-
       StgTSO_trec(CurrentTSO) = NO_TREC;
       if (r != 0) {
         // Transaction was valid: continue searching for a catch frame
@@ -528,7 +526,7 @@ retry_pop_stack:
             Sp(8) = exception;
             Sp(7) = stg_raise_ret_info;
             Sp(6) = exception;
-            Sp(5) = ghczmprim_GHCziTypes_True_closure; // True <=> a breakpoint
+            Sp(5) = ghczmprim_GHCziTypes_True_closure; // True <=> an exception
             Sp(4) = stg_ap_ppv_info;
             Sp(3) = 0;
             Sp(2) = stg_ap_n_info;

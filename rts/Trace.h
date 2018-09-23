@@ -206,6 +206,11 @@ void traceUserMsg(Capability *cap, char *msg);
 void traceUserMarker(Capability *cap, char *msg);
 
 /*
+ * A binary message or event emitted by the program
+ */
+void traceUserBinaryMsg(Capability *cap, uint8_t *msg, size_t size);
+
+/*
  * An event to record a Haskell thread's label/name
  * Used by GHC.Conc.labelThread
  */
@@ -295,6 +300,8 @@ void traceHeapProfSampleCostCentre(StgWord8 profile_id,
                                    CostCentreStack *stack, StgWord residency);
 #endif /* PROFILING */
 
+void flushTrace(void);
+
 #else /* !TRACING */
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
@@ -330,6 +337,8 @@ void traceHeapProfSampleCostCentre(StgWord8 profile_id,
 #define traceHeapProfSampleBegin(era) /* nothing */
 #define traceHeapProfSampleCostCentre(profile_id, stack, residency) /* nothing */
 #define traceHeapProfSampleString(profile_id, label, residency) /* nothing */
+
+#define flushTrace() /* nothing */
 
 #endif /* TRACING */
 

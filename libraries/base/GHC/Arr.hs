@@ -1,5 +1,6 @@
 {-# LANGUAGE Unsafe #-}
 {-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples, RoleAnnotations #-}
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -239,6 +240,15 @@ instance  Ix Integer  where
     inRange (m,n) i     =  m <= i && i <= n
 
 ----------------------------------------------------------------------
+-- | @since 4.8.0.0
+instance Ix Natural where
+    range (m,n) = [m..n]
+    inRange (m,n) i = m <= i && i <= n
+    unsafeIndex (m,_) i = fromIntegral (i-m)
+    index b i | inRange b i = unsafeIndex b i
+              | otherwise   = indexError b i "Natural"
+
+----------------------------------------------------------------------
 -- | @since 2.01
 instance Ix Bool where -- as derived
     {-# INLINE range #-}
@@ -443,13 +453,13 @@ array :: Ix i
                         -- of the array.  These bounds are the lowest and
                         -- highest indices in the array, in that order.
                         -- For example, a one-origin vector of length
-                        -- '10' has bounds '(1,10)', and a one-origin '10'
-                        -- by '10' matrix has bounds '((1,1),(10,10))'.
+                        -- @10@ has bounds @(1,10)@, and a one-origin @10@
+                        -- by @10@ matrix has bounds @((1,1),(10,10))@.
         -> [(i, e)]     -- ^ a list of /associations/ of the form
                         -- (/index/, /value/).  Typically, this list will
                         -- be expressed as a comprehension.  An
-                        -- association '(i, x)' defines the value of
-                        -- the array at index 'i' to be 'x'.
+                        -- association @(i, x)@ defines the value of
+                        -- the array at index @i@ to be @x@.
         -> Array i e
 array (l,u) ies
     = let n = safeRangeSize (l,u)
@@ -505,7 +515,11 @@ listArray (l,u) es = runST (ST $ \s1# ->
 -- | The value at the given index in an array.
 {-# INLINE (!) #-}
 (!) :: Ix i => Array i e -> i -> e
-arr@(Array l u n _) ! i = unsafeAt arr $ safeIndex (l,u) n i
+(!) arr@(Array l u n _) i = unsafeAt arr $ safeIndex (l,u) n i
+
+{-# INLINE (!#) #-}
+(!#) :: Ix i => Array i e -> i -> (# e #)
+(!#) arr@(Array l u n _) i = unsafeAt# arr $ safeIndex (l,u) n i
 
 {-# INLINE safeRangeSize #-}
 safeRangeSize :: Ix i => (i, i) -> Int
@@ -550,6 +564,15 @@ unsafeAt :: Array i e -> Int -> e
 unsafeAt (Array _ _ _ arr#) (I# i#) =
     case indexArray# arr# i# of (# e #) -> e
 
+-- | Look up an element in an array without forcing it
+unsafeAt# :: Array i e -> Int -> (# e #)
+unsafeAt# (Array _ _ _ arr#) (I# i#) = indexArray# arr# i#
+
+-- | A convenient version of unsafeAt#
+unsafeAtA :: Applicative f
+          => Array i e -> Int -> f e
+unsafeAtA ary i = case unsafeAt# ary i of (# e #) -> pure e
+
 -- | The bounds with which an array was constructed.
 {-# INLINE bounds #-}
 bounds :: Array i e -> (i,i)
@@ -569,7 +592,7 @@ indices (Array l u _ _) = range (l,u)
 {-# INLINE elems #-}
 elems :: Array i e -> [e]
 elems arr@(Array _ _ n _) =
-    [unsafeAt arr i | i <- [0 .. n - 1]]
+    [e | i <- [0 .. n - 1], e <- unsafeAtA arr i]
 
 -- | A right fold over the elements
 {-# INLINABLE foldrElems #-}
@@ -577,7 +600,8 @@ foldrElems :: (a -> b -> b) -> b -> Array i a -> b
 foldrElems f b0 = \ arr@(Array _ _ n _) ->
   let
     go i | i == n    = b0
-         | otherwise = f (unsafeAt arr i) (go (i+1))
+         | (# e #) <- unsafeAt# arr i
+         = f e (go (i+1))
   in go 0
 
 -- | A left fold over the elements
@@ -586,7 +610,8 @@ foldlElems :: (b -> a -> b) -> b -> Array i a -> b
 foldlElems f b0 = \ arr@(Array _ _ n _) ->
   let
     go i | i == (-1) = b0
-         | otherwise = f (go (i-1)) (unsafeAt arr i)
+         | (# e #) <- unsafeAt# arr i
+         = f (go (i-1)) e
   in go (n-1)
 
 -- | A strict right fold over the elements
@@ -595,7 +620,8 @@ foldrElems' :: (a -> b -> b) -> b -> Array i a -> b
 foldrElems' f b0 = \ arr@(Array _ _ n _) ->
   let
     go i a | i == (-1) = a
-           | otherwise = go (i-1) (f (unsafeAt arr i) $! a)
+           | (# e #) <- unsafeAt# arr i
+           = go (i-1) (f e $! a)
   in go (n-1) b0
 
 -- | A strict left fold over the elements
@@ -604,7 +630,8 @@ foldlElems' :: (b -> a -> b) -> b -> Array i a -> b
 foldlElems' f b0 = \ arr@(Array _ _ n _) ->
   let
     go i a | i == n    = a
-           | otherwise = go (i+1) (a `seq` f a (unsafeAt arr i))
+           | (# e #) <- unsafeAt# arr i
+           = go (i+1) (a `seq` f a e)
   in go 0 b0
 
 -- | A left fold over the elements with no starting value
@@ -613,7 +640,8 @@ foldl1Elems :: (a -> a -> a) -> Array i a -> a
 foldl1Elems f = \ arr@(Array _ _ n _) ->
   let
     go i | i == 0    = unsafeAt arr 0
-         | otherwise = f (go (i-1)) (unsafeAt arr i)
+         | (# e #) <- unsafeAt# arr i
+         = f (go (i-1)) e
   in
     if n == 0 then errorWithoutStackTrace "foldl1: empty Array" else go (n-1)
 
@@ -623,7 +651,8 @@ foldr1Elems :: (a -> a -> a) -> Array i a -> a
 foldr1Elems f = \ arr@(Array _ _ n _) ->
   let
     go i | i == n-1  = unsafeAt arr i
-         | otherwise = f (unsafeAt arr i) (go (i + 1))
+         | (# e #) <- unsafeAt# arr i
+         = f e (go (i + 1))
   in
     if n == 0 then errorWithoutStackTrace "foldr1: empty Array" else go 0
 
@@ -631,11 +660,12 @@ foldr1Elems f = \ arr@(Array _ _ n _) ->
 {-# INLINE assocs #-}
 assocs :: Ix i => Array i e -> [(i, e)]
 assocs arr@(Array l u _ _) =
-    [(i, arr ! i) | i <- range (l,u)]
+    [(i, e) | i <- range (l,u), let !(# e #) = arr !# i]
 
 -- | The 'accumArray' function deals with repeated indices in the association
 -- list using an /accumulating function/ which combines the values of
 -- associations with the same index.
+--
 -- For example, given a list of values of some index type, @hist@
 -- produces a histogram of the number of occurrences of each index within
 -- a specified range:
@@ -643,10 +673,10 @@ assocs arr@(Array l u _ _) =
 -- > hist :: (Ix a, Num b) => (a,a) -> [a] -> Array a b
 -- > hist bnds is = accumArray (+) 0 bnds [(i, 1) | i<-is, inRange bnds i]
 --
--- If the accumulating function is strict, then 'accumArray' is strict in
--- the values, as well as the indices, in the association list.  Thus,
--- unlike ordinary arrays built with 'array', accumulated arrays should
--- not in general be recursive.
+-- @accumArray@ is strict in each result of applying the accumulating
+-- function, although it is lazy in the initial value. Thus, unlike
+-- arrays built with 'array', accumulated arrays should not in general
+-- be recursive.
 {-# INLINE accumArray #-}
 accumArray :: Ix i
         => (e -> a -> e)        -- ^ accumulating function
@@ -667,7 +697,7 @@ unsafeAccumArray f initial b ies = unsafeAccumArray' f initial b (rangeSize b) i
 unsafeAccumArray' :: (e -> a -> e) -> e -> (i,i) -> Int -> [(Int, a)] -> Array i e
 unsafeAccumArray' f initial (l,u) n@(I# n#) ies = runST (ST $ \s1# ->
     case newArray# n# initial s1#          of { (# s2#, marr# #) ->
-    foldr (adjust f marr#) (done l u n marr#) ies s2# })
+    foldr (adjust' f marr#) (done l u n marr#) ies s2# })
 
 {-# INLINE adjust #-}
 adjust :: (e -> a -> e) -> MutableArray# s e -> (Int, a) -> STRep s b -> STRep s b
@@ -677,6 +707,18 @@ adjust f marr# (I# i#, new) next
                 (# s2#, old #) ->
                     case writeArray# marr# i# (f old new) s2# of
                         s3# -> next s3#
+
+{-# INLINE adjust' #-}
+adjust' :: (e -> a -> e)
+        -> MutableArray# s e
+        -> (Int, a)
+        -> STRep s b -> STRep s b
+adjust' f marr# (I# i#, new) next
+  = \s1# -> case readArray# marr# i# s1# of
+                (# s2#, old #) ->
+                    let !combined = f old new
+                    in next (writeArray# marr# i# combined s2#)
+
 
 -- | Constructs an array identical to the first argument except that it has
 -- been updated by the associations in the right argument.
@@ -706,6 +748,8 @@ unsafeReplace arr ies = runST (do
 --
 -- > accumArray f z b = accum f (array b [(i, z) | i <- range b])
 --
+-- @accum@ is strict in all the results of applying the accumulation.
+-- However, it is lazy in the initial values of the array.
 {-# INLINE accum #-}
 accum :: Ix i => (e -> a -> e) -> Array i e -> [(i, a)] -> Array i e
 accum f arr@(Array l u n _) ies =
@@ -715,7 +759,7 @@ accum f arr@(Array l u n _) ies =
 unsafeAccum :: (e -> a -> e) -> Array i e -> [(Int, a)] -> Array i e
 unsafeAccum f arr ies = runST (do
     STArray l u n marr# <- thawSTArray arr
-    ST (foldr (adjust f marr#) (done l u n marr#) ies))
+    ST (foldr (adjust' f marr#) (done l u n marr#) ies))
 
 {-# INLINE [1] amap #-}  -- See Note [amap]
 amap :: (a -> b) -> Array i a -> Array i b
@@ -724,7 +768,8 @@ amap f arr@(Array l u n@(I# n#) _) = runST (ST $ \s1# ->
         (# s2#, marr# #) ->
           let go i s#
                 | i == n    = done l u n marr# s#
-                | otherwise = fill marr# (i, f (unsafeAt arr i)) (go (i+1)) s#
+                | (# e #) <- unsafeAt# arr i
+                = fill marr# (i, f e) (go (i+1)) s#
           in go 0 s2# )
 
 {- Note [amap]

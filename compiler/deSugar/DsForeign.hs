@@ -13,6 +13,8 @@ Desugaring foreign declarations (see also DsCCall).
 module DsForeign ( dsForeigns ) where
 
 #include "HsVersions.h"
+import GhcPrelude
+
 import TcRnMonad        -- temp
 
 import CoreSyn
@@ -97,17 +99,18 @@ dsForeigns' fos = do
   where
    do_ldecl (L loc decl) = putSrcSpanDs loc (do_decl decl)
 
-   do_decl (ForeignImport { fd_name = id, fd_co = co, fd_fi = spec }) = do
+   do_decl (ForeignImport { fd_name = id, fd_i_ext = co, fd_fi = spec }) = do
       traceIf (text "fi start" <+> ppr id)
       let id' = unLoc id
       (bs, h, c) <- dsFImport id' co spec
       traceIf (text "fi end" <+> ppr id)
       return (h, c, [], bs)
 
-   do_decl (ForeignExport { fd_name = L _ id, fd_co = co
+   do_decl (ForeignExport { fd_name = L _ id, fd_e_ext = co
                           , fd_fe = CExport (L _ (CExportStatic _ ext_nm cconv)) _ }) = do
       (h, c, _, _) <- dsFExport id co ext_nm cconv False
       return (h, c, [id], [])
+   do_decl (XForeignDecl _) = panic "dsForeigns'"
 
 {-
 ************************************************************************
@@ -200,7 +203,7 @@ dsFCall :: Id -> Coercion -> ForeignCall -> Maybe Header
 dsFCall fn_id co fcall mDeclHeader = do
     let
         ty                   = pFst $ coercionKind co
-        (tv_bndrs, rho)      = tcSplitForAllTyVarBndrs ty
+        (tv_bndrs, rho)      = tcSplitForAllVarBndrs ty
         (arg_tys, io_res_ty) = tcSplitFunTys rho
 
     args <- newSysLocalsDs arg_tys  -- no FFI levity-polymorphism
@@ -227,7 +230,8 @@ dsFCall fn_id co fcall mDeclHeader = do
                                       CApiConv safety)
                       c = includes
                        $$ fun_proto <+> braces (cRet <> semi)
-                      includes = vcat [ text "#include <" <> ftext h <> text ">"
+                      includes = vcat [ text "#include \"" <> ftext h
+                                        <> text "\""
                                       | Header _ h <- nub headers ]
                       fun_proto = cResType <+> pprCconv <+> ppr wrapperName <> parens argTypes
                       cRet
@@ -601,7 +605,7 @@ mkFExportCBits dflags c_nm maybe_target arg_htys res_hty is_IO_res_ty cc
 
   -- the expression we give to rts_evalIO
   expr_to_run
-     = foldl appArg the_cfun arg_info -- NOT aug_arg_info
+     = foldl' appArg the_cfun arg_info -- NOT aug_arg_info
        where
           appArg acc (arg_cname, _, arg_hty, _)
              = text "rts_apply"
@@ -715,6 +719,12 @@ toCType = f False
            -- through one layer of type synonym etc.
            | Just t' <- coreView t
               = f voidOK t'
+           -- This may be an 'UnliftedFFITypes'-style ByteArray# argument
+           -- (which is marshalled like a Ptr)
+           | Just byteArrayPrimTyCon        == tyConAppTyConPicky_maybe t
+              = (Nothing, text "const void*")
+           | Just mutableByteArrayPrimTyCon == tyConAppTyConPicky_maybe t
+              = (Nothing, text "void*")
            -- Otherwise we don't know the C type. If we are allowing
            -- void then return that; otherwise something has gone wrong.
            | voidOK = (Nothing, text "void")

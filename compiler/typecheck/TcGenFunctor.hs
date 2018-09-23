@@ -8,6 +8,8 @@ The deriving code for the Functor, Foldable, and Traversable classes
 
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE LambdaCase #-}
 
 module TcGenFunctor (
         FFoldType(..), functorLikeTraverse,
@@ -15,6 +17,8 @@ module TcGenFunctor (
 
         gen_Functor_binds, gen_Foldable_binds, gen_Traversable_binds
     ) where
+
+import GhcPrelude
 
 import Bag
 import DataCon
@@ -388,7 +392,7 @@ functorLikeTraverse var (FT { ft_triv = caseTrivial,     ft_var = caseVar
          -- variables in a unboxed tuple pattern match and expression as it
          -- actually needs. See Trac #12399
          (xrs,xcs) = unzip (map (go co) (dropRuntimeRepArgs args))
-    go co (ForAllTy (TvBndr v vis) x)
+    go co (ForAllTy (Bndr v vis) x)
        | isVisibleArgFlag vis = panic "unexpected visible binder"
        | v /= var && xc       = (caseForAll v xr,True)
        where (xr,xc) = go co x
@@ -432,20 +436,24 @@ foldDataConArgs ft con
 mkSimpleLam :: (LHsExpr GhcPs -> State [RdrName] (LHsExpr GhcPs))
             -> State [RdrName] (LHsExpr GhcPs)
 -- (mkSimpleLam fn) returns (\x. fn(x))
-mkSimpleLam lam = do
-    (n:names) <- get
-    put names
-    body <- lam (nlHsVar n)
-    return (mkHsLam [nlVarPat n] body)
+mkSimpleLam lam =
+    get >>= \case
+      n:names -> do
+        put names
+        body <- lam (nlHsVar n)
+        return (mkHsLam [nlVarPat n] body)
+      _ -> panic "mkSimpleLam"
 
 mkSimpleLam2 :: (LHsExpr GhcPs -> LHsExpr GhcPs
              -> State [RdrName] (LHsExpr GhcPs))
              -> State [RdrName] (LHsExpr GhcPs)
-mkSimpleLam2 lam = do
-    (n1:n2:names) <- get
-    put names
-    body <- lam (nlHsVar n1) (nlHsVar n2)
-    return (mkHsLam [nlVarPat n1,nlVarPat n2] body)
+mkSimpleLam2 lam =
+    get >>= \case
+      n1:n2:names -> do
+        put names
+        body <- lam (nlHsVar n1) (nlHsVar n2)
+        return (mkHsLam [nlVarPat n1,nlVarPat n2] body)
+      _ -> panic "mkSimpleLam2"
 
 -- "Con a1 a2 a3 -> fold [x1 a1, x2 a2, x3 a3]"
 --
@@ -932,7 +940,7 @@ gen_Traversable_binds loc tycon
         mkApCon con [] = nlHsApps pure_RDR [con]
         mkApCon con [x] = nlHsApps fmap_RDR [con,x]
         mkApCon con (x1:x2:xs) =
-            foldl appAp (nlHsApps liftA2_RDR [con,x1,x2]) xs
+            foldl' appAp (nlHsApps liftA2_RDR [con,x1,x2]) xs
           where appAp x y = nlHsApps ap_RDR [x,y]
 
 -----------------------------------------------------------------------

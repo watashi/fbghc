@@ -132,6 +132,12 @@ all_ghc_stage3 : $(GHC_STAGE3)
 $(INPLACE_LIB)/settings : settings
 	"$(CP)" $< $@
 
+$(INPLACE_LIB)/llvm-targets : llvm-targets
+	"$(CP)" $< $@
+
+$(INPLACE_LIB)/llvm-passes : llvm-passes
+	"$(CP)" $< $@
+
 $(INPLACE_LIB)/platformConstants: $(includes_GHCCONSTANTS_HASKELL_VALUE)
 	"$(CP)" $< $@
 
@@ -140,6 +146,8 @@ $(INPLACE_LIB)/platformConstants: $(includes_GHCCONSTANTS_HASKELL_VALUE)
 
 GHC_DEPENDENCIES += $$(unlit_INPLACE)
 GHC_DEPENDENCIES += $(INPLACE_LIB)/settings
+GHC_DEPENDENCIES += $(INPLACE_LIB)/llvm-targets
+GHC_DEPENDENCIES += $(INPLACE_LIB)/llvm-passes
 GHC_DEPENDENCIES += $(INPLACE_LIB)/platformConstants
 
 $(GHC_STAGE1) : | $(GHC_DEPENDENCIES)
@@ -167,11 +175,13 @@ $(GHC_STAGE2) : $(foreach w,$(GhcLibWays),libraries/base/dist-install/build/GHC/
 endif
 
 INSTALL_LIBS += settings
+INSTALL_LIBS += llvm-targets
+INSTALL_LIBS += llvm-passes
 
 ifeq "$(Windows_Host)" "NO"
 install: install_ghc_link
 .PHONY: install_ghc_link
-install_ghc_link: 
+install_ghc_link:
 	$(call removeFiles,"$(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc")
 	$(LN_S) $(CrossCompilePrefix)ghc-$(ProjectVersion) "$(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc"
 else
@@ -183,4 +193,3 @@ install_ghc_post: install_bins
 	$(call removeFiles,"$(DESTDIR)$(bindir)/ghc.exe")
 	"$(MV)" -f $(DESTDIR)$(bindir)/ghc-stage$(INSTALL_GHC_STAGE).exe $(DESTDIR)$(bindir)/$(CrossCompilePrefix)ghc.exe
 endif
-

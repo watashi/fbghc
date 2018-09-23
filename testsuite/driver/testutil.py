@@ -1,4 +1,3 @@
-import errno
 import os
 import platform
 import subprocess
@@ -11,8 +10,7 @@ def strip_quotes(s):
     return s.strip('\'"')
 
 def getStdout(cmd_and_args):
-    # Can't use subprocess.check_output as it's not available in Python 2.6;
-    # It's also not quite the same as check_output, since we also verify that
+    # Can't use subprocess.check_output, since we also verify that
     # no stderr was produced
     p = subprocess.Popen([strip_quotes(cmd_and_args[0])] + cmd_and_args[1:],
                          stdout=subprocess.PIPE,
@@ -23,16 +21,7 @@ def getStdout(cmd_and_args):
         raise Exception("Command failed: " + str(cmd_and_args))
     if stderr:
         raise Exception("stderr from command: %s\nOutput:\n%s\n" % (cmd_and_args, stderr))
-    return stdout
-
-def mkdirp(path):
-    try:
-        os.makedirs(path)
-    except OSError as e:
-        if e.errno == errno.EEXIST and os.path.isdir(path):
-            pass
-        else:
-            raise
+    return stdout.decode('utf-8')
 
 def lndir(srcdir, dstdir):
     # Create symlinks for all files in src directory.
@@ -60,10 +49,6 @@ else:
     link_or_copy_file = os.symlink
 
 class Watcher(object):
-    global pool
-    global evt
-    global sync_lock
-    
     def __init__(self, count):
         self.pool = count
         self.evt = threading.Event()

@@ -30,7 +30,7 @@ module TysPrim(
         tYPE, primRepToRuntimeRep,
 
         funTyCon, funTyConName,
-        primTyCons,
+        unexposedPrimTyCons, exposedPrimTyCons, primTyCons,
 
         charPrimTyCon,          charPrimTy, charPrimTyConName,
         intPrimTyCon,           intPrimTy, intPrimTyConName,
@@ -80,6 +80,8 @@ module TysPrim(
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} TysWiredIn
   ( runtimeRepTy, unboxedTupleKind, liftedTypeKind
   , vecRepDataConTyCon, tupleRepDataConTyCon
@@ -94,7 +96,7 @@ import {-# SOURCE #-} TysWiredIn
   , doubleElemRepDataConTy
   , mkPromotedListTy )
 
-import Var              ( TyVar, TyVarBndr(TvBndr), mkTyVar )
+import Var              ( TyVar, VarBndr(Bndr), mkTyVar )
 import Name
 import TyCon
 import SrcLoc
@@ -116,7 +118,22 @@ import Data.Char
 -}
 
 primTyCons :: [TyCon]
-primTyCons
+primTyCons = unexposedPrimTyCons ++ exposedPrimTyCons
+
+-- | Primitive 'TyCon's that are defined in "GHC.Prim" but not exposed.
+-- It's important to keep these separate as we don't want users to be able to
+-- write them (see Trac #15209) or see them in GHCi's @:browse@ output
+-- (see Trac #12023).
+unexposedPrimTyCons :: [TyCon]
+unexposedPrimTyCons
+  = [ eqPrimTyCon
+    , eqReprPrimTyCon
+    , eqPhantPrimTyCon
+    ]
+
+-- | Primitive 'TyCon's that are defined in, and exported from, "GHC.Prim".
+exposedPrimTyCons :: [TyCon]
+exposedPrimTyCons
   = [ addrPrimTyCon
     , arrayPrimTyCon
     , byteArrayPrimTyCon
@@ -148,9 +165,6 @@ primTyCons
     , wordPrimTyCon
     , word32PrimTyCon
     , word64PrimTyCon
-    , eqPrimTyCon
-    , eqReprPrimTyCon
-    , eqPhantPrimTyCon
 
     , tYPETyCon
 
@@ -326,7 +340,7 @@ openBetaTy  = mkTyVarTy openBetaTyVar
 -}
 
 funTyConName :: Name
-funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
+funTyConName = mkPrimTyConName (fsLit "->") funTyConKey funTyCon
 
 -- | The @(->)@ type constructor.
 --
@@ -337,8 +351,8 @@ funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
 funTyCon :: TyCon
 funTyCon = mkFunTyCon funTyConName tc_bndrs tc_rep_nm
   where
-    tc_bndrs = [ TvBndr runtimeRep1TyVar (NamedTCB Inferred)
-               , TvBndr runtimeRep2TyVar (NamedTCB Inferred)
+    tc_bndrs = [ Bndr runtimeRep1TyVar (NamedTCB Inferred)
+               , Bndr runtimeRep2TyVar (NamedTCB Inferred)
                ]
                ++ mkTemplateAnonTyConBinders [ tYPE runtimeRep1Ty
                                              , tYPE runtimeRep2Ty
@@ -580,18 +594,19 @@ Note [The equality types story]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 GHC sports a veritable menagerie of equality types:
 
-              Hetero?   Levity      Result       Role      Defining module
-              ------------------------------------------------------------
-  ~#          hetero    unlifted    #            nominal   GHC.Prim
-  ~~          hetero    lifted      Constraint   nominal   GHC.Types
-  ~           homo      lifted      Constraint   nominal   Data.Type.Equality
-  :~:         homo      lifted      *            nominal   Data.Type.Equality
+         Type or  Lifted?  Hetero?  Role      Built in         Defining module
+         class?    L/U                        TyCon
+-----------------------------------------------------------------------------------------
+~#         T        U      hetero   nominal   eqPrimTyCon      GHC.Prim
+~~         C        L      hetero   nominal   heqTyCon         GHC.Types
+~          C        L      homo     nominal   eqTyCon          GHC.Types
+:~:        T        L      homo     nominal   (not built-in)   Data.Type.Equality
+:~~:       T        L      hetero   nominal   (not built-in)   Data.Type.Equality
 
-  ~R#         hetero    unlifted    #            repr      GHC.Prim
-  Coercible   homo      lifted      Constraint   repr      GHC.Types
-  Coercion    homo      lifted      *            repr      Data.Type.Coercion
-
-  ~P#         hetero    unlifted                 phantom   GHC.Prim
+~R#        T        U      hetero   repr      eqReprPrimTy     GHC.Prim
+Coercible  C        L      homo     repr      coercibleTyCon   GHC.Types
+Coercion   T        L      homo     repr      (not built-in)   Data.Type.Coercion
+~P#        T        U      hetero   phantom   eqPhantPrimTyCon GHC.Prim
 
 Recall that "hetero" means the equality can related types of different
 kinds. Knowing that (t1 ~# t2) or (t1 ~R# t2) or even that (t1 ~P# t2)
@@ -627,6 +642,7 @@ This is (almost) an ordinary class, defined as if by
   class a ~# b => a ~~ b
   instance a ~# b => a ~~ b
 Here's what's unusual about it:
+
  * We can't actually declare it that way because we don't have syntax for ~#.
    And ~# isn't a constraint, so even if we could write it, it wouldn't kind
    check.
@@ -636,8 +652,8 @@ Here's what's unusual about it:
  * It is "naturally coherent". This means that the solver won't hesitate to
    solve a goal of type (a ~~ b) even if there is, say (Int ~~ c) in the
    context. (Normally, it waits to learn more, just in case the given
-   influences what happens next.) This is quite like having
-   IncoherentInstances enabled.
+   influences what happens next.) See Note [Naturally coherent classes]
+   in TcInteract.
 
  * It always terminates. That is, in the UndecidableInstances checks, we
    don't worry if a (~~) constraint is too big, as we know that solving
@@ -656,28 +672,31 @@ Within GHC, ~~ is called heqTyCon, and it is defined in TysWiredIn.
     --------------------------
     (~) :: forall k. k -> k -> Constraint
     --------------------------
-This is defined in Data.Type.Equality:
-  class a ~~ b => (a :: k) ~ (b :: k)
-  instance a ~~ b => a ~ b
-This is even more so an ordinary class than (~~), with the following exceptions:
- * Users cannot write instances of it.
+This is /exactly/ like (~~), except with a homogeneous kind.
+It is an almost-ordinary class defined as if by
+  class a ~# b => (a :: k) ~ (b :: k)
+  instance a ~# b => a ~ b
 
- * It is "naturally coherent". (See (~~).)
+ * All the bullets for (~~) apply
 
- * (~) is magical syntax, as ~ is a reserved symbol. It cannot be exported
-   or imported.
+ * In addition (~) is magical syntax, as ~ is a reserved symbol.
+   It cannot be exported or imported.
 
- * It always terminates.
+Within GHC, ~ is called eqTyCon, and it is defined in TysWiredIn.
 
-Within GHC, ~ is called eqTyCon, and it is defined in PrelNames. Note that
-it is *not* wired in.
+Historical note: prior to July 18 (~) was defined as a
+  more-ordinary class with (~~) as a superclass.  But that made it
+  special in different ways; and the extra superclass selections to
+  get from (~) to (~#) via (~~) were tiresome.  Now it's defined
+  uniformly with (~~) and Coercible; much nicer.)
 
 
     --------------------------
     (:~:) :: forall k. k -> k -> *
+    (:~~:) :: forall k1 k2. k1 -> k2 -> *
     --------------------------
-This is a perfectly ordinary GADT, wrapping (~). It is not defined within
-GHC at all.
+These are perfectly ordinary GADTs, wrapping (~) and (~~) resp.
+They are not defined within GHC at all.
 
 
     --------------------------

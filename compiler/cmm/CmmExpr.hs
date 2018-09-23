@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
@@ -10,7 +9,10 @@ module CmmExpr
     , CmmReg(..), cmmRegType
     , CmmLit(..), cmmLitType
     , LocalReg(..), localRegType
-    , GlobalReg(..), isArgReg, globalRegType, spReg, hpReg, spLimReg, nodeReg, node, baseReg
+    , GlobalReg(..), isArgReg, globalRegType
+    , spReg, hpReg, spLimReg, hpLimReg, nodeReg
+    , currentTSOReg, currentNurseryReg, hpAllocReg, cccsReg
+    , node, baseReg
     , VGcPtr(..)
 
     , DefinerOfRegs, UserOfRegs
@@ -28,6 +30,8 @@ module CmmExpr
     )
 where
 
+import GhcPrelude
+
 import BlockId
 import CLabel
 import CmmMachOp
@@ -37,7 +41,6 @@ import Outputable (panic)
 import Unique
 
 import Data.Set (Set)
-import Data.List
 import qualified Data.Set as Set
 
 -----------------------------------------------------------------------------
@@ -184,7 +187,14 @@ data CmmLit
         -- Don't use it at all unless tablesNextToCode.
         -- It is also used inside the NCG during when generating
         -- position-independent code.
-  | CmmLabelDiffOff CLabel CLabel Int   -- label1 - label2 + offset
+  | CmmLabelDiffOff CLabel CLabel Int Width -- label1 - label2 + offset
+        -- In an expression, the width just has the effect of MO_SS_Conv
+        -- from wordWidth to the desired width.
+        --
+        -- In a static literal, the supported Widths depend on the
+        -- architecture: wordWidth is supported on all
+        -- architectures. Additionally W32 is supported on x86_64 when
+        -- using the small memory model.
 
   | CmmBlock {-# UNPACK #-} !BlockId     -- Code label
         -- Invariant: must be a continuation BlockId
@@ -217,7 +227,7 @@ cmmLitType cflags (CmmVec (l:ls))      = let ty = cmmLitType cflags l
                                             else panic "cmmLitType: CmmVec"
 cmmLitType dflags (CmmLabel lbl)       = cmmLabelType dflags lbl
 cmmLitType dflags (CmmLabelOff lbl _)  = cmmLabelType dflags lbl
-cmmLitType dflags (CmmLabelDiffOff {}) = bWord dflags
+cmmLitType _      (CmmLabelDiffOff _ _ _ width) = cmmBits width
 cmmLitType dflags (CmmBlock _)         = bWord dflags
 cmmLitType dflags (CmmHighStackMark)   = bWord dflags
 
@@ -549,12 +559,18 @@ instance Ord GlobalReg where
    compare _ EagerBlackholeInfo = GT
 
 -- convenient aliases
-baseReg, spReg, hpReg, spLimReg, nodeReg :: CmmReg
+baseReg, spReg, hpReg, spLimReg, hpLimReg, nodeReg,
+  currentTSOReg, currentNurseryReg, hpAllocReg, cccsReg  :: CmmReg
 baseReg = CmmGlobal BaseReg
 spReg = CmmGlobal Sp
 hpReg = CmmGlobal Hp
+hpLimReg = CmmGlobal HpLim
 spLimReg = CmmGlobal SpLim
 nodeReg = CmmGlobal node
+currentTSOReg = CmmGlobal CurrentTSO
+currentNurseryReg = CmmGlobal CurrentNursery
+hpAllocReg = CmmGlobal HpAlloc
+cccsReg = CmmGlobal CCCS
 
 node :: GlobalReg
 node = VanillaReg 1 VGcPtr

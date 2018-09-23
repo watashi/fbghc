@@ -7,6 +7,8 @@ module CmmPipeline (
   cmmPipeline
 ) where
 
+import GhcPrelude
+
 import Cmm
 import CmmLint
 import CmmBuildInfoTables
@@ -30,21 +32,22 @@ import Platform
 -- | Top level driver for C-- pipeline
 -----------------------------------------------------------------------------
 
-cmmPipeline  :: HscEnv -- Compilation env including
-                       -- dynamic flags: -dcmm-lint -ddump-cmm-cps
-             -> TopSRT     -- SRT table and accumulating list of compiled procs
-             -> CmmGroup             -- Input C-- with Procedures
-             -> IO (TopSRT, CmmGroup) -- Output CPS transformed C--
+cmmPipeline
+ :: HscEnv -- Compilation env including
+           -- dynamic flags: -dcmm-lint -ddump-cmm-cps
+ -> ModuleSRTInfo        -- Info about SRTs generated so far
+ -> CmmGroup             -- Input C-- with Procedures
+ -> IO (ModuleSRTInfo, CmmGroup) -- Output CPS transformed C--
 
-cmmPipeline hsc_env topSRT prog =
+cmmPipeline hsc_env srtInfo prog =
   do let dflags = hsc_dflags hsc_env
 
      tops <- {-# SCC "tops" #-} mapM (cpsTop hsc_env) prog
 
-     (topSRT, cmms) <- {-# SCC "doSRTs" #-} doSRTs dflags topSRT tops
+     (srtInfo, cmms) <- {-# SCC "doSRTs" #-} doSRTs dflags srtInfo tops
      dumpWith dflags Opt_D_dump_cmm_cps "Post CPS Cmm" (ppr cmms)
 
-     return (topSRT, cmms)
+     return (srtInfo, cmms)
 
 
 cpsTop :: HscEnv -> CmmDecl -> IO (CAFEnv, [CmmDecl])
@@ -103,7 +106,7 @@ cpsTop hsc_env proc =
                      Opt_D_dump_cmm_sink "Sink assignments"
 
        ------------- CAF analysis ----------------------------------------------
-       let cafEnv = {-# SCC "cafAnal" #-} cafAnal g
+       let cafEnv = {-# SCC "cafAnal" #-} cafAnal call_pps l g
        dumpWith dflags Opt_D_dump_cmm_caf "CAFEnv" (ppr cafEnv)
 
        g <- if splitting_proc_points
@@ -163,7 +166,7 @@ cpsTop hsc_env proc =
                              || -- Note [inconsistent-pic-reg]
                                 usingInconsistentPicReg
         usingInconsistentPicReg
-           = case (platformArch platform, platformOS platform, gopt Opt_PIC dflags)
+           = case (platformArch platform, platformOS platform, positionIndependent dflags)
              of   (ArchX86, OSDarwin, pic) -> pic
                   (ArchPPC, OSDarwin, pic) -> pic
                   _                        -> False

@@ -8,11 +8,11 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE PolyKinds #-}
-{-# LANGUAGE TypeInType #-}
 {-# LANGUAGE TypeFamilyDependencies #-}
 
 
-module T12135 where
+
+module T13135 where
 
 
 import Data.Kind (Type)
@@ -62,7 +62,7 @@ arrLen = smartSym sym where
 
 
 
-{- The original bug was a familure to subsitute
+{- The original bug was a failure to substitute
    properly during type-function improvement.
 
 --------------------------------------

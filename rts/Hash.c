@@ -13,6 +13,7 @@
 
 #include "Hash.h"
 #include "RtsUtils.h"
+#include "xxhash.h"
 
 #include <string.h>
 
@@ -76,20 +77,17 @@ hashWord(const HashTable *table, StgWord key)
 }
 
 int
-hashStr(const HashTable *table, char *key)
+hashStr(const HashTable *table, StgWord w)
 {
-    int h, bucket;
-    char *s;
-
-    s = key;
-    for (h=0; *s; s++) {
-        h *= 128;
-        h += *s;
-        h = h % 1048583;        /* some random large prime */
-    }
+    const char *key = (char*) w;
+#ifdef x86_64_HOST_ARCH
+    StgWord h = XXH64 (key, strlen(key), 1048583);
+#else
+    StgWord h = XXH32 (key, strlen(key), 1048583);
+#endif
 
     /* Mod the size of the hash table (a power of 2) */
-    bucket = h & table->mask1;
+    int bucket = h & table->mask1;
 
     if (bucket < table->split) {
         /* Mod the size of the expanded hash table (also a power of 2) */
@@ -443,8 +441,7 @@ allocHashTable(void)
 HashTable *
 allocStrHashTable(void)
 {
-    return allocHashTable_((HashFunction *)hashStr,
-                           (CompareFunction *)compareStr);
+    return allocHashTable_(hashStr, compareStr);
 }
 
 void

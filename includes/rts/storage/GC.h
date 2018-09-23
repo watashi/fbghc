@@ -109,7 +109,12 @@ typedef struct generation_ {
     memcount       n_compact_blocks_in_import; // no. of blocks used by compacts
                                                // being imported
 
-    memcount       max_blocks;          // max blocks
+    // Max blocks to allocate in this generation before collecting it. Collect
+    // this generation when
+    //
+    //     n_blocks + n_large_blocks + n_compact_blocks > max_blocks
+    //
+    memcount       max_blocks;
 
     StgTSO *       threads;             // threads in this gen
                                         // linked via global_link
@@ -120,7 +125,7 @@ typedef struct generation_ {
     // stats information
     uint32_t collections;
     uint32_t par_collections;
-    uint32_t failed_promotions;
+    uint32_t failed_promotions;         // Currently unused
 
     // ------------------------------------
     // Fields below are used during GC only
@@ -184,8 +189,9 @@ extern generation * oldest_gen;
 
    -------------------------------------------------------------------------- */
 
-StgPtr  allocate        ( Capability *cap, W_ n );
-StgPtr  allocatePinned  ( Capability *cap, W_ n );
+StgPtr  allocate          ( Capability *cap, W_ n );
+StgPtr  allocateMightFail ( Capability *cap, W_ n );
+StgPtr  allocatePinned    ( Capability *cap, W_ n );
 
 /* memory allocator for executable memory */
 typedef void* AdjustorWritable;

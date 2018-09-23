@@ -17,6 +17,24 @@
 #endif
 #endif
 
+-- The SIMPLE_WIN_GETLIBDIR macro will only be set when
+-- building on windows.
+--
+-- Its purpose is to let us know whether the Windows implementation of
+-- 'getExecutablePath' follows symlinks or not (it does follow them in
+-- base >= 4.11). If it does, the implementation of getLibDir is straightforward
+-- but if it does not follow symlinks, we need to follow them ourselves here.
+-- Once we do not have to support building ghc-pkg with base < 4.11 anymore,
+-- we can keep only the simple, straightforward implementation that just uses
+-- 'getExecutablePath'.
+#if defined(mingw32_HOST_OS)
+#if MIN_VERSION_base(4,11,0)
+#define SIMPLE_WIN_GETLIBDIR 1
+#else
+#define SIMPLE_WIN_GETLIBDIR 0
+#endif
+#endif
+
 -----------------------------------------------------------------------------
 --
 -- (c) The University of Glasgow 2004-2009.
@@ -30,6 +48,7 @@ module Main (main) where
 import Version ( version, targetOS, targetARCH )
 import qualified GHC.PackageDb as GhcPkg
 import GHC.PackageDb (BinaryStringRep(..))
+import GHC.HandleEncoding
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import qualified Data.Graph as Graph
 import qualified Distribution.ModuleName as ModuleName
@@ -44,7 +63,7 @@ import Distribution.Backpack
 import Distribution.Types.UnqualComponentName
 import Distribution.Types.MungedPackageName
 import Distribution.Types.MungedPackageId
-import Distribution.Simple.Utils (fromUTF8, toUTF8, writeUTF8File, readUTF8File)
+import Distribution.Simple.Utils (fromUTF8BS, toUTF8BS, writeUTF8File, readUTF8File)
 import qualified Data.Version as Version
 import System.FilePath as FilePath
 import qualified System.FilePath.Posix as FilePath.Posix
@@ -65,6 +84,9 @@ import System.Directory ( doesDirectoryExist, getDirectoryContents,
                           getCurrentDirectory )
 import System.Exit ( exitWith, ExitCode(..) )
 import System.Environment ( getArgs, getProgName, getEnv )
+#if defined(darwin_HOST_OS) || defined(linux_HOST_OS) || SIMPLE_WIN_GETLIBDIR
+import System.Environment ( getExecutablePath )
+#endif
 import System.IO
 import System.IO.Error
 import GHC.IO.Exception (IOErrorType(InappropriateType))
@@ -75,13 +97,13 @@ import qualified Data.Traversable as F
 import qualified Data.Set as Set
 import qualified Data.Map as Map
 
-import qualified Data.ByteString.Char8 as BS
-
 #if defined(mingw32_HOST_OS)
--- mingw32 needs these for getExecDir
+#if !SIMPLE_WIN_GETLIBDIR
+-- mingw32 needs these for getExecDir when base < 4.11
 import Foreign
 import Foreign.C
 import System.Directory ( canonicalizePath )
+#endif
 import GHC.ConsoleHandler
 #else
 import System.Posix hiding (fdToHandle)
@@ -119,6 +141,7 @@ anyM p (x:xs) = do
 
 main :: IO ()
 main = do
+  configureHandleEncoding
   args <- getArgs
 
   case getOpt Permute (flags ++ deprecFlags) args of
@@ -270,8 +293,8 @@ usageHeader prog = substProg prog $
   "\n" ++
   "  $p dot\n" ++
   "    Generate a graph of the package dependencies in a form suitable\n" ++
-  "    for input for the graphviz tools.  For example, to generate a PDF" ++
-  "    of the dependency graph: ghc-pkg dot | tred | dot -Tpdf >pkgs.pdf" ++
+  "    for input for the graphviz tools.  For example, to generate a PDF\n" ++
+  "    of the dependency graph: ghc-pkg dot | tred | dot -Tpdf >pkgs.pdf\n" ++
   "\n" ++
   "  $p find-module {module}\n" ++
   "    List registered packages exposing module {module} in the global\n" ++
@@ -573,6 +596,15 @@ data DbModifySelector = TopOne | ContainsPkg PackageArg
 
 allPackagesInStack :: PackageDBStack -> [InstalledPackageInfo]
 allPackagesInStack = concatMap packages
+
+-- | Retain only the part of the stack up to and including the given package
+-- DB (where the global package DB is the bottom of the stack). The resulting
+-- package DB stack contains exactly the packages that packages from the
+-- specified package DB can depend on, since dependencies can only extend
+-- down the stack, not up (e.g. global packages cannot depend on user
+-- packages).
+stackUpTo :: FilePath -> PackageDBStack -> PackageDBStack
+stackUpTo to_modify = dropWhile ((/= to_modify) . location)
 
 getPkgDatabases :: Verbosity
                 -> GhcPkg.DbOpenMode mode DbModifySelector
@@ -1074,6 +1106,10 @@ initPackageDB filename verbosity _flags = do
       packageDbLock = GhcPkg.DbOpenReadWrite lock,
       packages = []
     }
+    -- We can get away with passing an empty stack here, because the new DB is
+    -- going to be initially empty, so no dependencies are going to be actually
+    -- looked up.
+    []
 
 -- -----------------------------------------------------------------------------
 -- Registering
@@ -1123,7 +1159,7 @@ registerPackage input verbosity my_flags multi_instance
   let top_dir = takeDirectory (location (last db_stack))
       pkg_expanded = mungePackagePaths top_dir pkgroot pkg
 
-  let truncated_stack = dropWhile ((/= to_modify).location) db_stack
+  let truncated_stack = stackUpTo to_modify db_stack
   -- truncate the stack for validation, because we don't allow
   -- packages lower in the stack to refer to those higher up.
   validatePackageConfig pkg_expanded verbosity truncated_stack
@@ -1141,7 +1177,7 @@ registerPackage input verbosity my_flags multi_instance
                  -- Only remove things that were instantiated the same way!
                  instantiatedWith p == instantiatedWith pkg ]
   --
-  changeDB verbosity (removes ++ [AddPackage pkg]) db_to_operate_on
+  changeDB verbosity (removes ++ [AddPackage pkg]) db_to_operate_on db_stack
 
 parsePackageInfo
         :: String
@@ -1166,12 +1202,16 @@ data DBOp = RemovePackage InstalledPackageInfo
           | AddPackage    InstalledPackageInfo
           | ModifyPackage InstalledPackageInfo
 
-changeDB :: Verbosity -> [DBOp] -> PackageDB 'GhcPkg.DbReadWrite -> IO ()
-changeDB verbosity cmds db = do
+changeDB :: Verbosity
+         -> [DBOp]
+         -> PackageDB 'GhcPkg.DbReadWrite
+         -> PackageDBStack
+         -> IO ()
+changeDB verbosity cmds db db_stack = do
   let db' = updateInternalDB db cmds
   db'' <- adjustOldFileStylePackageDB db'
   createDirectoryIfMissing True (location db'')
-  changeDBDir verbosity cmds db''
+  changeDBDir verbosity cmds db'' db_stack
 
 updateInternalDB :: PackageDB 'GhcPkg.DbReadWrite
                  -> [DBOp] -> PackageDB 'GhcPkg.DbReadWrite
@@ -1184,10 +1224,14 @@ updateInternalDB db cmds = db{ packages = foldl do_cmd (packages db) cmds }
     do_cmd (do_cmd pkgs (RemovePackage p)) (AddPackage p)
 
 
-changeDBDir :: Verbosity -> [DBOp] -> PackageDB 'GhcPkg.DbReadWrite -> IO ()
-changeDBDir verbosity cmds db = do
+changeDBDir :: Verbosity
+            -> [DBOp]
+            -> PackageDB 'GhcPkg.DbReadWrite
+            -> PackageDBStack
+            -> IO ()
+changeDBDir verbosity cmds db db_stack = do
   mapM_ do_cmd cmds
-  updateDBCache verbosity db
+  updateDBCache verbosity db db_stack
  where
   do_cmd (RemovePackage p) = do
     let file = location db </> display (installedUnitId p) <.> "conf"
@@ -1200,20 +1244,63 @@ changeDBDir verbosity cmds db = do
   do_cmd (ModifyPackage p) =
     do_cmd (AddPackage p)
 
-updateDBCache :: Verbosity -> PackageDB 'GhcPkg.DbReadWrite -> IO ()
-updateDBCache verbosity db = do
+updateDBCache :: Verbosity
+              -> PackageDB 'GhcPkg.DbReadWrite
+              -> PackageDBStack
+              -> IO ()
+updateDBCache verbosity db db_stack = do
   let filename = location db </> cachefilename
+      db_stack_below = stackUpTo (location db) db_stack
 
       pkgsCabalFormat :: [InstalledPackageInfo]
       pkgsCabalFormat = packages db
 
-      pkgsGhcCacheFormat :: [PackageCacheFormat]
-      pkgsGhcCacheFormat = map convertPackageInfoToCacheFormat pkgsCabalFormat
+      -- | All the packages we can legally depend on in this step.
+      dependablePkgsCabalFormat :: [InstalledPackageInfo]
+      dependablePkgsCabalFormat = allPackagesInStack db_stack_below
+
+      pkgsGhcCacheFormat :: [(PackageCacheFormat, Bool)]
+      pkgsGhcCacheFormat
+        -- See Note [Recompute abi-depends]
+        = map (recomputeValidAbiDeps dependablePkgsCabalFormat)
+        $ map convertPackageInfoToCacheFormat
+          pkgsCabalFormat
+
+      hasAnyAbiDepends :: InstalledPackageInfo -> Bool
+      hasAnyAbiDepends x = length (abiDepends x) > 0
+
+  -- warn when we find any (possibly-)bogus abi-depends fields;
+  -- Note [Recompute abi-depends]
+  when (verbosity >= Normal) $ do
+    let definitelyBrokenPackages =
+          nub
+            . sort
+            . map (unPackageName . GhcPkg.packageName . fst)
+            . filter snd
+            $ pkgsGhcCacheFormat
+    when (definitelyBrokenPackages /= []) $ do
+      warn "the following packages have broken abi-depends fields:"
+      forM_ definitelyBrokenPackages $ \pkg ->
+        warn $ "    " ++ pkg
+    when (verbosity > Normal) $ do
+      let possiblyBrokenPackages =
+            nub
+              . sort
+              . filter (not . (`elem` definitelyBrokenPackages))
+              . map (unPackageName . pkgName . packageId)
+              . filter hasAnyAbiDepends
+              $ pkgsCabalFormat
+      when (possiblyBrokenPackages /= []) $ do
+          warn $
+            "the following packages have correct abi-depends, " ++
+            "but may break in the future:"
+          forM_ possiblyBrokenPackages $ \pkg ->
+            warn $ "    " ++ pkg
 
   when (verbosity > Normal) $
       infoLn ("writing cache " ++ filename)
 
-  GhcPkg.writePackageDb filename pkgsGhcCacheFormat pkgsCabalFormat
+  GhcPkg.writePackageDb filename (map fst pkgsGhcCacheFormat) pkgsCabalFormat
     `catchIO` \e ->
       if isPermissionError e
       then die $ filename ++ ": you don't have permission to modify this file"
@@ -1230,6 +1317,54 @@ type PackageCacheFormat = GhcPkg.InstalledPackageInfo
                             OpenUnitId
                             ModuleName
                             OpenModule
+
+{- Note [Recompute abi-depends]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Like most fields, `ghc-pkg` relies on who-ever is performing package
+registration to fill in fields; this includes the `abi-depends` field present
+for the package.
+
+However, this was likely a mistake, and is not very robust; in certain cases,
+versions of Cabal may use bogus abi-depends fields for a package when doing
+builds. Why? Because package database information is aggressively cached; it is
+possible to work Cabal into a situation where it uses a cached version of
+`abi-depends`, rather than the one in the actual database after it has been
+recomputed.
+
+However, there is an easy fix: ghc-pkg /already/ knows the `abi-depends` of a
+package, because they are the ABIs of the packages pointed at by the `depends`
+field. So it can simply look up the abi from the dependencies in the original
+database, and ignore whatever the system registering gave it.
+
+So, instead, we do two things here:
+
+  - We throw away the information for a registered package's `abi-depends` field.
+
+  - We recompute it: we simply look up the unit ID of the package in the original
+    database, and use *its* abi-depends.
+
+See Trac #14381, and Cabal issue #4728.
+
+Additionally, because we are throwing away the original (declared) ABI deps, we
+return a boolean that indicates whether any abi-depends were actually
+overridden.
+
+-}
+
+recomputeValidAbiDeps :: [InstalledPackageInfo]
+                      -> PackageCacheFormat
+                      -> (PackageCacheFormat, Bool)
+recomputeValidAbiDeps db pkg =
+  (pkg { GhcPkg.abiDepends = newAbiDeps }, abiDepsUpdated)
+  where
+    newAbiDeps =
+      catMaybes . flip map (GhcPkg.abiDepends pkg) $ \(k, _) ->
+        case filter (\d -> installedUnitId d == k) db of
+          [x] -> Just (k, unAbiHash (abiHash x))
+          _   -> Nothing
+    abiDepsUpdated =
+      GhcPkg.abiDepends pkg /= newAbiDeps
 
 convertPackageInfoToCacheFormat :: InstalledPackageInfo -> PackageCacheFormat
 convertPackageInfoToCacheFormat pkg =
@@ -1286,8 +1421,8 @@ instance GhcPkg.BinaryStringRep ModuleName where
   toStringRep   = toStringRep . display
 
 instance GhcPkg.BinaryStringRep String where
-  fromStringRep = fromUTF8 . BS.unpack
-  toStringRep   = BS.pack . toUTF8
+  fromStringRep = fromUTF8BS
+  toStringRep   = toUTF8BS
 
 instance GhcPkg.BinaryStringRep UnitId where
   fromStringRep = mkUnitId . fromStringRep
@@ -1368,14 +1503,14 @@ modifyPackage fn pkgarg verbosity my_flags force = do
       dieOrForceAll force ("unregistering would break the following packages: "
               ++ unwords (map displayQualPkgId newly_broken))
 
-  changeDB verbosity cmds db
+  changeDB verbosity cmds db db_stack
 
 recache :: Verbosity -> [Flag] -> IO ()
 recache verbosity my_flags = do
   (_db_stack, GhcPkg.DbOpenReadWrite db_to_operate_on, _flag_dbs) <-
     getPkgDatabases verbosity (GhcPkg.DbOpenReadWrite TopOne)
       True{-use user-} False{-no cache-} False{-expand vars-} my_flags
-  changeDB verbosity [] db_to_operate_on
+  changeDB verbosity [] db_to_operate_on _db_stack
 
 -- -----------------------------------------------------------------------------
 -- Listing packages
@@ -2078,14 +2213,15 @@ dieForcible s = die (s ++ " (use --force to override)")
 -----------------------------------------
 -- Cut and pasted from ghc/compiler/main/SysTools
 
-#if defined(mingw32_HOST_OS)
+getLibDir :: IO (Maybe String)
+
+#if defined(mingw32_HOST_OS) && !SIMPLE_WIN_GETLIBDIR
 subst :: Char -> Char -> String -> String
 subst a b ls = map (\ x -> if x == a then b else x) ls
 
 unDosifyPath :: FilePath -> FilePath
 unDosifyPath xs = subst '\\' '/' xs
 
-getLibDir :: IO (Maybe String)
 getLibDir = do base   <- getExecDir "/ghc-pkg.exe"
                case base of
                  Nothing    -> return Nothing
@@ -2118,8 +2254,9 @@ getExecPath = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
 
 foreign import WINDOWS_CCONV unsafe "windows.h GetModuleFileNameW"
   c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
+#elif SIMPLE_WIN_GETLIBDIR || defined(darwin_HOST_OS) || defined(linux_HOST_OS)
+getLibDir = Just . (\p -> p </> "lib") . takeDirectory . takeDirectory <$> getExecutablePath
 #else
-getLibDir :: IO (Maybe String)
 getLibDir = return Nothing
 #endif
 

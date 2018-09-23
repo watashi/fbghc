@@ -1,5 +1,5 @@
 /* ----------------------------------------------------------------------------
- * 
+ *
  * (c) The GHC Team, 1998-2005
  *
  * Closure Type Constants: out here because the native code generator
@@ -9,11 +9,13 @@
 
 #pragma once
 
-/* 
+/*
  * WARNING WARNING WARNING
  *
- * If you add or delete any closure types, don't forget to update
- * the closure flags table in rts/ClosureFlags.c.
+ * If you add or delete any closure types, don't forget to update the following,
+ *   - the closure flags table in rts/ClosureFlags.c
+ *   - isRetainer in rts/RetainerProfile.c
+ *   - the closure_type_names list in rts/Printer.c
  */
 
 /* Object tag 0 raises an internal error */
@@ -62,8 +64,8 @@
 #define ARR_WORDS                     42
 #define MUT_ARR_PTRS_CLEAN            43
 #define MUT_ARR_PTRS_DIRTY            44
-#define MUT_ARR_PTRS_FROZEN0          45
-#define MUT_ARR_PTRS_FROZEN           46
+#define MUT_ARR_PTRS_FROZEN_DIRTY     45
+#define MUT_ARR_PTRS_FROZEN_CLEAN     46
 #define MUT_VAR_CLEAN                 47
 #define MUT_VAR_DIRTY                 48
 #define WEAK                          49
@@ -78,7 +80,7 @@
 #define WHITEHOLE                     58
 #define SMALL_MUT_ARR_PTRS_CLEAN      59
 #define SMALL_MUT_ARR_PTRS_DIRTY      60
-#define SMALL_MUT_ARR_PTRS_FROZEN0    61
-#define SMALL_MUT_ARR_PTRS_FROZEN     62
+#define SMALL_MUT_ARR_PTRS_FROZEN_DIRTY 61
+#define SMALL_MUT_ARR_PTRS_FROZEN_CLEAN 62
 #define COMPACT_NFDATA                63
 #define N_CLOSURE_TYPES               64

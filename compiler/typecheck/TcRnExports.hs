@@ -5,12 +5,13 @@
 {-# LANGUAGE TypeFamilies #-}
 module TcRnExports (tcRnExports, exports_from_avail) where
 
+import GhcPrelude
+
 import HsSyn
 import PrelNames
 import RdrName
 import TcRnMonad
 import TcEnv
-import TcMType
 import TcType
 import RnNames
 import RnEnv
@@ -30,7 +31,6 @@ import Outputable
 import ConLike
 import DataCon
 import PatSyn
-import FastString
 import Maybes
 import Util (capitalise)
 
@@ -91,13 +91,13 @@ You just have to use an explicit export list:
 data ExportAccum        -- The type of the accumulating parameter of
                         -- the main worker function in rnExports
      = ExportAccum
-        [LIE GhcRn]            --  Export items with Names
+        [(LIE GhcRn, Avails)] -- Export items with names and
+                                   -- their exported stuff
+                                   --   Not nub'd!
         ExportOccMap           --  Tracks exported occurrence names
-        [AvailInfo]            --  The accumulated exported stuff
-                               --   Not nub'd!
 
 emptyExportAccum :: ExportAccum
-emptyExportAccum = ExportAccum [] emptyOccEnv []
+emptyExportAccum = ExportAccum [] emptyOccEnv
 
 type ExportOccMap = OccEnv (Name, IE GhcPs)
         -- Tracks what a particular exported OccName
@@ -135,8 +135,8 @@ tcRnExports explicit_mod exports
                  | explicit_mod = exports
                  | ghcLink dflags == LinkInMemory = Nothing
                  | otherwise
-                          = Just (noLoc [noLoc
-                              (IEVar (noLoc (IEName $ noLoc main_RDR_Unqual)))])
+                          = Just (noLoc [noLoc (IEVar noExt
+                                     (noLoc (IEName $ noLoc main_RDR_Unqual)))])
                         -- ToDo: the 'noLoc' here is unhelpful if 'main'
                         --       turns out to be out of scope
 
@@ -170,16 +170,25 @@ exports_from_avail :: Maybe (Located [LIE GhcPs])
                          -- 'module Foo' export is valid (it's not valid
                          -- if we didn't import Foo!)
                    -> Module
-                   -> RnM (Maybe [LIE GhcRn], [AvailInfo])
+                   -> RnM (Maybe [(LIE GhcRn, Avails)], Avails)
+                         -- (Nothing, _) <=> no explicit export list
+                         -- if explicit export list is present it contains
+                         -- each renamed export item together with its exported
+                         -- names.
 
 exports_from_avail Nothing rdr_env _imports _this_mod
    -- The same as (module M) where M is the current module name,
    -- so that's how we handle it, except we also export the data family
    -- when a data instance is exported.
-  = let avails =
-          map fix_faminst . gresToAvailInfo
-            . filter isLocalGRE . globalRdrEnvElts $ rdr_env
-    in return (Nothing, avails)
+  = do {
+    ; warnMissingExportList <- woptM Opt_WarnMissingExportList
+    ; warnIfFlag Opt_WarnMissingExportList
+        warnMissingExportList
+        (missingModuleExportWarn $ moduleName _this_mod)
+    ; let avails =
+            map fix_faminst . gresToAvailInfo
+              . filter isLocalGRE . globalRdrEnvElts $ rdr_env
+    ; return (Nothing, avails) }
   where
     -- #11164: when we define a data instance
     -- but not data family, re-export the family
@@ -197,10 +206,10 @@ exports_from_avail Nothing rdr_env _imports _this_mod
 
 
 exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
-  = do ExportAccum ie_names _ exports
+  = do ExportAccum ie_avails _
         <-  foldAndRecoverM do_litem emptyExportAccum rdr_items
-       let final_exports = nubAvails exports -- Combine families
-       return (Just ie_names, final_exports)
+       let final_exports = nubAvails (concat (map snd ie_avails)) -- Combine families
+       return (Just ie_avails, final_exports)
   where
     do_litem :: ExportAccum -> LIE GhcPs -> RnM ExportAccum
     do_litem acc lie = setSrcSpan (getLoc lie) (exports_from_item acc lie)
@@ -215,10 +224,11 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
                        , imv <- importedByUser xs ]
 
     exports_from_item :: ExportAccum -> LIE GhcPs -> RnM ExportAccum
-    exports_from_item acc@(ExportAccum ie_names occs exports)
-                      (L loc (IEModuleContents (L lm mod)))
-        | let earlier_mods = [ mod
-                             | (L _ (IEModuleContents (L _ mod))) <- ie_names ]
+    exports_from_item acc@(ExportAccum ie_avails occs)
+                      (L loc ie@(IEModuleContents _ (L lm mod)))
+        | let earlier_mods
+                = [ mod
+                  | ((L _ (IEModuleContents _ (L _ mod))), _) <- ie_avails ]
         , mod `elem` earlier_mods    -- Duplicate export of M
         = do { warnIfFlag Opt_WarnDuplicateExports True
                           (dupModuleExport mod) ;
@@ -229,9 +239,8 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
                                 || (moduleName this_mod == mod)
                    ; gre_prs     = pickGREsModExp mod (globalRdrEnvElts rdr_env)
                    ; new_exports = map (availFromGRE . fst) gre_prs
-                   ; names       = map (gre_name     . fst) gre_prs
                    ; all_gres    = foldr (\(gre1,gre2) gres -> gre1 : gre2 : gres) [] gre_prs
-               }
+                   }
 
              ; checkErr exportValid (moduleNotImported mod)
              ; warnIfFlag Opt_WarnDodgyExports
@@ -241,7 +250,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
              ; traceRn "efa" (ppr mod $$ ppr all_gres)
              ; addUsedGREs all_gres
 
-             ; occs' <- check_occs (IEModuleContents (noLoc mod)) occs names
+             ; occs' <- check_occs ie occs new_exports
                       -- This check_occs not only finds conflicts
                       -- between this item and others, but also
                       -- internally within this item.  That is, if
@@ -251,14 +260,14 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
              ; traceRn "export_mod"
                        (vcat [ ppr mod
                              , ppr new_exports ])
-             ; return (ExportAccum (L loc (IEModuleContents (L lm mod)) : ie_names)
-                                   occs'
-                                   (new_exports ++ exports)) }
 
-    exports_from_item acc@(ExportAccum lie_names occs exports) (L loc ie)
+             ; return (ExportAccum (((L loc (IEModuleContents noExt (L lm mod)))
+                                    , new_exports) : ie_avails) occs') }
+
+    exports_from_item acc@(ExportAccum lie_avails occs) (L loc ie)
         | isDoc ie
         = do new_ie <- lookup_doc_ie ie
-             return (ExportAccum (L loc new_ie : lie_names) occs exports)
+             return (ExportAccum ((L loc new_ie, []) : lie_avails) occs)
 
         | otherwise
         = do (new_ie, avail) <-
@@ -267,29 +276,30 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
                   then return acc    -- Avoid error cascade
                   else do
 
-                    occs' <- check_occs ie occs (availNames avail)
+                    occs' <- check_occs ie occs [avail]
 
-                    return (ExportAccum (L loc new_ie : lie_names) occs' (avail : exports))
+                    return (ExportAccum ((L loc new_ie, [avail]) : lie_avails) occs')
 
     -------------
     lookup_ie :: IE GhcPs -> RnM (IE GhcRn, AvailInfo)
-    lookup_ie (IEVar (L l rdr))
+    lookup_ie (IEVar _ (L l rdr))
         = do (name, avail) <- lookupGreAvailRn $ ieWrappedName rdr
-             return (IEVar (L l (replaceWrappedName rdr name)), avail)
+             return (IEVar noExt (L l (replaceWrappedName rdr name)), avail)
 
-    lookup_ie (IEThingAbs (L l rdr))
+    lookup_ie (IEThingAbs _ (L l rdr))
         = do (name, avail) <- lookupGreAvailRn $ ieWrappedName rdr
-             return (IEThingAbs (L l (replaceWrappedName rdr name)), avail)
+             return (IEThingAbs noExt (L l (replaceWrappedName rdr name))
+                    , avail)
 
-    lookup_ie ie@(IEThingAll n')
+    lookup_ie ie@(IEThingAll _ n')
         = do
             (n, avail, flds) <- lookup_ie_all ie n'
             let name = unLoc n
-            return (IEThingAll (replaceLWrappedName n' (unLoc n))
+            return (IEThingAll noExt (replaceLWrappedName n' (unLoc n))
                    , AvailTC name (name:avail) flds)
 
 
-    lookup_ie ie@(IEThingWith l wc sub_rdrs _)
+    lookup_ie ie@(IEThingWith _ l wc sub_rdrs _)
         = do
             (lname, subs, avails, flds)
               <- addExportErrCtxt ie $ lookup_ie_with l sub_rdrs
@@ -298,28 +308,27 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
                 NoIEWildcard -> return (lname, [], [])
                 IEWildcard _ -> lookup_ie_all ie l
             let name = unLoc lname
-                subs' = map (replaceLWrappedName l . unLoc) subs
-            return (IEThingWith (replaceLWrappedName l name) wc subs'
-                                (map noLoc (flds ++ all_flds)),
+            return (IEThingWith noExt (replaceLWrappedName l name) wc subs
+                                (flds ++ (map noLoc all_flds)),
                     AvailTC name (name : avails ++ all_avail)
-                                 (flds ++ all_flds))
-
-
+                                 (map unLoc flds ++ all_flds))
 
 
     lookup_ie _ = panic "lookup_ie"    -- Other cases covered earlier
 
+
     lookup_ie_with :: LIEWrappedName RdrName -> [LIEWrappedName RdrName]
-                   -> RnM (Located Name, [Located Name], [Name], [FieldLabel])
+                   -> RnM (Located Name, [LIEWrappedName Name], [Name],
+                           [Located FieldLabel])
     lookup_ie_with (L l rdr) sub_rdrs
         = do name <- lookupGlobalOccRn $ ieWrappedName rdr
-             (non_flds, flds) <- lookupChildrenExport name
-                                                  (map ieLWrappedName sub_rdrs)
+             (non_flds, flds) <- lookupChildrenExport name sub_rdrs
              if isUnboundName name
                 then return (L l name, [], [name], [])
                 else return (L l name, non_flds
-                            , map unLoc non_flds
-                            , map unLoc flds)
+                            , map (ieWrappedName . unLoc) non_flds
+                            , flds)
+
     lookup_ie_all :: IE GhcPs -> LIEWrappedName RdrName
                   -> RnM (Located Name, [Name], [FieldLabel])
     lookup_ie_all ie (L l rdr) =
@@ -340,11 +349,11 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
 
     -------------
     lookup_doc_ie :: IE GhcPs -> RnM (IE GhcRn)
-    lookup_doc_ie (IEGroup lev doc) = do rn_doc <- rnHsDoc doc
-                                         return (IEGroup lev rn_doc)
-    lookup_doc_ie (IEDoc doc)       = do rn_doc <- rnHsDoc doc
-                                         return (IEDoc rn_doc)
-    lookup_doc_ie (IEDocNamed str)  = return (IEDocNamed str)
+    lookup_doc_ie (IEGroup _ lev doc) = do rn_doc <- rnHsDoc doc
+                                           return (IEGroup noExt lev rn_doc)
+    lookup_doc_ie (IEDoc _ doc)       = do rn_doc <- rnHsDoc doc
+                                           return (IEDoc noExt rn_doc)
+    lookup_doc_ie (IEDocNamed _ str)  = return (IEDocNamed noExt str)
     lookup_doc_ie _ = panic "lookup_doc_ie"    -- Other cases covered earlier
 
     -- In an export item M.T(A,B,C), we want to treat the uses of
@@ -365,9 +374,9 @@ classifyGRE gre = case gre_par gre of
     n = gre_name gre
 
 isDoc :: IE GhcPs -> Bool
-isDoc (IEDoc _)      = True
-isDoc (IEDocNamed _) = True
-isDoc (IEGroup _ _)  = True
+isDoc (IEDoc {})      = True
+isDoc (IEDocNamed {}) = True
+isDoc (IEGroup {})    = True
 isDoc _ = False
 
 -- Renaming and typechecking of exports happens after everything else has
@@ -400,9 +409,9 @@ isDoc _ = False
 
 
 
-lookupChildrenExport :: Name -> [Located RdrName]
-                     -> RnM ([Located Name], [Located FieldLabel])
-lookupChildrenExport parent rdr_items =
+lookupChildrenExport :: Name -> [LIEWrappedName RdrName]
+                     -> RnM ([LIEWrappedName Name], [Located FieldLabel])
+lookupChildrenExport spec_parent rdr_items =
   do
     xs <- mapAndReportM doOne rdr_items
     return $ partitionEithers xs
@@ -416,16 +425,16 @@ lookupChildrenExport parent rdr_items =
           | ns == tcName  = [dataName, tcName]
           | otherwise = [ns]
         -- Process an individual child
-        doOne :: Located RdrName
-              -> RnM (Either (Located Name) (Located FieldLabel))
+        doOne :: LIEWrappedName RdrName
+              -> RnM (Either (LIEWrappedName Name) (Located FieldLabel))
         doOne n = do
 
-          let bareName = unLoc n
+          let bareName = (ieWrappedName . unLoc) n
               lkup v = lookupSubBndrOcc_helper False True
-                        parent (setRdrNameSpace bareName v)
+                        spec_parent (setRdrNameSpace bareName v)
 
-          name <-  combineChildLookupResult . map lkup $
-                    choosePossibleNamespaces (rdrNameSpace bareName)
+          name <-  combineChildLookupResult $ map lkup $
+                   choosePossibleNamespaces (rdrNameSpace bareName)
           traceRn "lookupChildrenExport" (ppr name)
           -- Default to data constructors for slightly better error
           -- messages
@@ -434,30 +443,16 @@ lookupChildrenExport parent rdr_items =
                                 then bareName
                                 else setRdrNameSpace bareName dataName
 
-          -- Might need to check here for FLs as well
-          name' <- case name of
-                     FoundName NoParent n -> checkPatSynParent parent n
-                     _ -> return name
-
-          traceRn "lookupChildrenExport" (ppr name')
-
-          case name' of
-            NameNotFound -> Left . L (getLoc n) <$> reportUnboundName unboundName
+          case name of
+            NameNotFound -> do { ub <- reportUnboundName unboundName
+                               ; let l = getLoc n
+                               ; return (Left (L l (IEName (L l ub))))}
             FoundFL fls -> return $ Right (L (getLoc n) fls)
-            FoundName _p name -> return $ Left (L (getLoc n) name)
-            NameErr err_msg -> reportError err_msg >> failM
-            IncorrectParent p g td gs -> do
-              mkDcErrMsg p g td gs >>= reportError
-              failM
+            FoundName par name -> do { checkPatSynParent spec_parent par name
+                                     ; return $ Left (replaceLWrappedName n name) }
+            IncorrectParent p g td gs -> failWithDcErr p g td gs
 
 
--- | Also captures the current context
-mkNameErr :: SDoc -> TcM ChildLookupResult
-mkNameErr errMsg = NameErr <$> mkErrTc errMsg
-
-
-
---
 -- Note: [Typing Pattern Synonym Exports]
 -- It proved quite a challenge to precisely specify which pattern synonyms
 -- should be allowed to be bundled with which type constructors.
@@ -514,58 +509,68 @@ mkNameErr errMsg = NameErr <$> mkErrTc errMsg
 -- whether we are allowed to export the child with the parent.
 -- Invariant: gre_par == NoParent
 -- See note [Typing Pattern Synonym Exports]
-checkPatSynParent    :: Name   -- ^ Type constructor
-                     -> Name   -- ^ Either a
-                               --   a) Pattern Synonym Constructor
-                               --   b) A pattern synonym selector
-               -> TcM ChildLookupResult
-checkPatSynParent parent mpat_syn
+checkPatSynParent :: Name    -- ^ Alleged parent type constructor
+                             -- User wrote T( P, Q )
+                  -> Parent  -- The parent of P we discovered
+                  -> Name    -- ^ Either a
+                             --   a) Pattern Synonym Constructor
+                             --   b) A pattern synonym selector
+                  -> TcM ()  -- Fails if wrong parent
+checkPatSynParent _ (ParentIs {}) _
+  = return ()
+
+checkPatSynParent _ (FldParent {}) _
+  = return ()
+
+checkPatSynParent parent NoParent mpat_syn
   | isUnboundName parent -- Avoid an error cascade
-  = return (FoundName NoParent mpat_syn)
-  | otherwise = do
-  parent_ty_con <- tcLookupTyCon parent
-  mpat_syn_thing <- tcLookupGlobal mpat_syn
-  let expected_res_ty =
-          mkTyConApp parent_ty_con (mkTyVarTys (tyConTyVars parent_ty_con))
+  = return ()
 
-      handlePatSyn errCtxt =
-        addErrCtxt errCtxt
-        . tc_one_ps_export_with expected_res_ty parent_ty_con
-  -- 1. Check that the Id was actually from a thing associated with patsyns
-  case mpat_syn_thing of
-      AnId i
-        | isId i               ->
-        case idDetails i of
-          RecSelId { sel_tycon = RecSelPatSyn p } -> handlePatSyn (selErr i) p
-          _ -> NameErr <$> mkDcErrMsg parent mpat_syn (ppr mpat_syn) []
-      AConLike (PatSynCon p)    ->  handlePatSyn (psErr p) p
-      _ -> NameErr <$> mkDcErrMsg parent mpat_syn (ppr mpat_syn) []
+  | otherwise
+  = do { parent_ty_con <- tcLookupTyCon parent
+       ; mpat_syn_thing <- tcLookupGlobal mpat_syn
+
+        -- 1. Check that the Id was actually from a thing associated with patsyns
+       ; case mpat_syn_thing of
+            AnId i | isId i
+                   , RecSelId { sel_tycon = RecSelPatSyn p } <- idDetails i
+                   -> handle_pat_syn (selErr i) parent_ty_con p
+
+            AConLike (PatSynCon p) -> handle_pat_syn (psErr p) parent_ty_con p
+
+            _ -> failWithDcErr parent mpat_syn (ppr mpat_syn) [] }
   where
-
-    psErr = exportErrCtxt "pattern synonym"
+    psErr  = exportErrCtxt "pattern synonym"
     selErr = exportErrCtxt "pattern synonym record selector"
 
     assocClassErr :: SDoc
-    assocClassErr =
-      text "Pattern synonyms can be bundled only with datatypes."
+    assocClassErr = text "Pattern synonyms can be bundled only with datatypes."
 
-    tc_one_ps_export_with :: TcTauType -- ^ TyCon type
-                       -> TyCon       -- ^ Parent TyCon
-                       -> PatSyn   -- ^ Corresponding bundled PatSyn
-                                           -- and pretty printed origin
-                       -> TcM ChildLookupResult
-    tc_one_ps_export_with expected_res_ty ty_con pat_syn
+    handle_pat_syn :: SDoc
+                   -> TyCon      -- ^ Parent TyCon
+                   -> PatSyn     -- ^ Corresponding bundled PatSyn
+                                 --   and pretty printed origin
+                   -> TcM ()
+    handle_pat_syn doc ty_con pat_syn
 
       -- 2. See note [Types of TyCon]
-      | not $ isTyConWithSrcDataCons ty_con = mkNameErr assocClassErr
+      | not $ isTyConWithSrcDataCons ty_con
+      = addErrCtxt doc $ failWithTc assocClassErr
+
       -- 3. Is the head a type variable?
-      | Nothing <- mtycon = return (FoundName (ParentIs parent) mpat_syn)
+      | Nothing <- mtycon
+      = return ()
       -- 4. Ok. Check they are actually the same type constructor.
-      | Just p_ty_con <- mtycon, p_ty_con /= ty_con = mkNameErr typeMismatchError
+
+      | Just p_ty_con <- mtycon, p_ty_con /= ty_con
+      = addErrCtxt doc $ failWithTc typeMismatchError
+
       -- 5. We passed!
-      | otherwise = return (FoundName (ParentIs parent) mpat_syn)
+      | otherwise
+      = return ()
 
       where
+        expected_res_ty = mkTyConApp ty_con (mkTyVarTys (tyConTyVars ty_con))
         (_, _, _, _, _, res_ty) = patSynSig pat_syn
         mtycon = fst <$> tcSplitTyConApp_maybe res_ty
         typeMismatchError :: SDoc
@@ -577,16 +582,22 @@ checkPatSynParent parent mpat_syn
               <+> quotes (ppr res_ty)
 
 
-
-
 {-===========================================================================-}
-
-
-check_occs :: IE GhcPs -> ExportOccMap -> [Name] -> RnM ExportOccMap
-check_occs ie occs names  -- 'names' are the entities specifed by 'ie'
-  = foldlM check occs names
+check_occs :: IE GhcPs -> ExportOccMap -> [AvailInfo]
+           -> RnM ExportOccMap
+check_occs ie occs avails
+  -- 'names' and 'fls' are the entities specified by 'ie'
+  = foldlM check occs names_with_occs
   where
-    check occs name
+    -- Each Name specified by 'ie', paired with the OccName used to
+    -- refer to it in the GlobalRdrEnv
+    -- (see Note [Representing fields in AvailInfo] in Avail).
+    --
+    -- We check for export clashes using the selector Name, but need
+    -- the field label OccName for presenting error messages.
+    names_with_occs = availsNamesWithOccs avails
+
+    check occs (name, occ)
       = case lookupOccEnv occs name_occ of
           Nothing -> return (extendOccEnv occs name_occ (name, ie))
 
@@ -596,12 +607,12 @@ check_occs ie occs names  -- 'names' are the entities specifed by 'ie'
             -- by two different module exports. See ticket #4478.
             -> do { warnIfFlag Opt_WarnDuplicateExports
                                (not (dupExport_ok name ie ie'))
-                               (dupExportWarn name_occ ie ie')
+                               (dupExportWarn occ ie ie')
                   ; return occs }
 
             | otherwise    -- Same occ name but different names: an error
             ->  do { global_env <- getGlobalRdrEnv ;
-                     addErr (exportClashErr global_env name' name ie' ie) ;
+                     addErr (exportClashErr global_env occ name' name ie' ie) ;
                      return occs }
       where
         name_occ = nameOccName name
@@ -638,8 +649,8 @@ dupExport_ok n ie1 ie2
   = not (  single ie1 || single ie2
         || (explicit_in ie1 && explicit_in ie2) )
   where
-    explicit_in (IEModuleContents _) = False                   -- module M
-    explicit_in (IEThingAll r)
+    explicit_in (IEModuleContents {}) = False                   -- module M
+    explicit_in (IEThingAll _ r)
       = nameOccName n == rdrNameOcc (ieWrappedName $ unLoc r)  -- T(..)
     explicit_in _              = True
 
@@ -656,12 +667,21 @@ dupModuleExport mod
 
 moduleNotImported :: ModuleName -> SDoc
 moduleNotImported mod
-  = text "The export item `module" <+> ppr mod <>
-    text "' is not imported"
+  = hsep [text "The export item",
+          quotes (text "module" <+> ppr mod),
+          text "is not imported"]
 
 nullModuleExport :: ModuleName -> SDoc
 nullModuleExport mod
-  = text "The export item `module" <+> ppr mod <> ptext (sLit "' exports nothing")
+  = hsep [text "The export item",
+          quotes (text "module" <+> ppr mod),
+          text "exports nothing"]
+
+missingModuleExportWarn :: ModuleName -> SDoc
+missingModuleExportWarn mod
+  = hsep [text "The export item",
+          quotes (text "module" <+> ppr mod),
+          text "is missing an export list"]
 
 
 dodgyExportWarn :: Name -> SDoc
@@ -673,7 +693,8 @@ exportErrCtxt herald exp =
   text "In the" <+> text (herald ++ ":") <+> ppr exp
 
 
-addExportErrCtxt :: (OutputableBndrId s) => IE s -> TcM a -> TcM a
+addExportErrCtxt :: (OutputableBndrId (GhcPass p))
+                 => IE (GhcPass p) -> TcM a -> TcM a
 addExportErrCtxt ie = addErrCtxt exportCtxt
   where
     exportCtxt = text "In the export:" <+> ppr ie
@@ -702,11 +723,11 @@ dcErrMsg ty_con what_is thing parents =
                       [_] -> text "Parent:"
                       _  -> text "Parents:") <+> fsep (punctuate comma parents)
 
-mkDcErrMsg :: Name -> Name -> SDoc -> [Name] -> TcM ErrMsg
-mkDcErrMsg parent thing thing_doc parents = do
+failWithDcErr :: Name -> Name -> SDoc -> [Name] -> TcM a
+failWithDcErr parent thing thing_doc parents = do
   ty_thing <- tcLookupGlobal thing
-  mkErrTc $
-    dcErrMsg parent (tyThingCategory' ty_thing) thing_doc (map ppr parents)
+  failWithTc $ dcErrMsg parent (tyThingCategory' ty_thing)
+                        thing_doc (map ppr parents)
   where
     tyThingCategory' :: TyThing -> String
     tyThingCategory' (AnId i)
@@ -714,21 +735,29 @@ mkDcErrMsg parent thing thing_doc parents = do
     tyThingCategory' i = tyThingCategory i
 
 
-exportClashErr :: GlobalRdrEnv -> Name -> Name -> IE GhcPs -> IE GhcPs
+exportClashErr :: GlobalRdrEnv -> OccName
+               -> Name -> Name
+               -> IE GhcPs -> IE GhcPs
                -> MsgDoc
-exportClashErr global_env name1 name2 ie1 ie2
+exportClashErr global_env occ name1 name2 ie1 ie2
   = vcat [ text "Conflicting exports for" <+> quotes (ppr occ) <> colon
          , ppr_export ie1' name1'
          , ppr_export ie2' name2' ]
   where
-    occ = nameOccName name1
     ppr_export ie name = nest 3 (hang (quotes (ppr ie) <+> text "exports" <+>
-                                       quotes (ppr name))
+                                       quotes (ppr_name name))
                                     2 (pprNameProvenance (get_gre name)))
+
+    -- DuplicateRecordFields means that nameOccName might be a mangled
+    -- $sel-prefixed thing, in which case show the correct OccName alone
+    ppr_name name
+      | nameOccName name == occ = ppr name
+      | otherwise               = ppr occ
 
     -- get_gre finds a GRE for the Name, so that we can show its provenance
     get_gre name
-        = fromMaybe (pprPanic "exportClashErr" (ppr name)) (lookupGRE_Name global_env name)
+        = fromMaybe (pprPanic "exportClashErr" (ppr name))
+                    (lookupGRE_Name_OccName global_env name occ)
     get_loc name = greSrcSpan (get_gre name)
     (name1', ie1', name2', ie2') = if get_loc name1 < get_loc name2
                                    then (name1, ie1, name2, ie2)

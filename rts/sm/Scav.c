@@ -11,6 +11,37 @@
  *
  * ---------------------------------------------------------------------------*/
 
+/* ----------------------------------------------------------------------------
+   We have two main scavenge functions:
+
+   - scavenge_block(bdescr *bd)
+   - scavenge_one(StgPtr p)
+
+   As the names and parameters suggest, first one scavenges a whole block while
+   the second one only scavenges one object. This however is not the only
+   difference. scavenge_block scavenges all SRTs while scavenge_one only
+   scavenges SRTs of stacks. The reason is because scavenge_one is called in two
+   cases:
+
+   - When scavenging a mut_list
+   - When scavenging a large object
+
+   We don't have to scavenge SRTs when scavenging a mut_list, because we only
+   scavenge mut_lists in minor GCs, and static objects are only collected in
+   major GCs.
+
+   However, because scavenge_one is also used to scavenge large objects (which
+   are scavenged even in major GCs), we need to deal with SRTs of large
+   objects. We never allocate large FUNs and THUNKs, but we allocate large
+   STACKs (e.g. in threadStackOverflow), and stack frames can have SRTs. So
+   scavenge_one skips FUN and THUNK SRTs but scavenges stack frame SRTs.
+
+   In summary, in a major GC:
+
+   - scavenge_block() scavenges all SRTs
+   - scavenge_one() scavenges only stack frame SRTs
+   ------------------------------------------------------------------------- */
+
 #include "PosixSource.h"
 #include "Rts.h"
 
@@ -329,105 +360,17 @@ scavenge_AP (StgAP *ap)
    Scavenge SRTs
    -------------------------------------------------------------------------- */
 
-/* Similar to scavenge_large_bitmap(), but we don't write back the
- * pointers we get back from evacuate().
- */
-static void
-scavenge_large_srt_bitmap( StgLargeSRT *large_srt )
-{
-    uint32_t i, j, size;
-    StgWord bitmap;
-    StgClosure **p;
-
-    size   = (uint32_t)large_srt->l.size;
-    p      = (StgClosure **)large_srt->srt;
-
-    for (i = 0; i < size / BITS_IN(W_); i++) {
-        bitmap = large_srt->l.bitmap[i];
-        // skip zero words: bitmaps can be very sparse, and this helps
-        // performance a lot in some cases.
-        if (bitmap != 0) {
-            for (j = 0; j < BITS_IN(W_); j++) {
-                if ((bitmap & 1) != 0) {
-                    evacuate(p);
-                }
-                p++;
-                bitmap = bitmap >> 1;
-            }
-        } else {
-            p += BITS_IN(W_);
-        }
-    }
-    if (size % BITS_IN(W_) != 0) {
-        bitmap = large_srt->l.bitmap[i];
-        for (j = 0; j < size % BITS_IN(W_); j++) {
-            if ((bitmap & 1) != 0) {
-                evacuate(p);
-            }
-            p++;
-            bitmap = bitmap >> 1;
-        }
-    }
-}
-
-/* evacuate the SRT.  If srt_bitmap is zero, then there isn't an
- * srt field in the info table.  That's ok, because we'll
- * never dereference it.
- */
-STATIC_INLINE GNUC_ATTR_HOT void
-scavenge_srt (StgClosure **srt, uint32_t srt_bitmap)
-{
-  uint32_t bitmap;
-  StgClosure **p;
-
-  bitmap = srt_bitmap;
-  p = srt;
-
-  if (bitmap == (StgHalfWord)(-1)) {
-      scavenge_large_srt_bitmap( (StgLargeSRT *)srt );
-      return;
-  }
-
-  while (bitmap != 0) {
-      if ((bitmap & 1) != 0) {
-#if defined(COMPILING_WINDOWS_DLL)
-          // Special-case to handle references to closures hiding out in DLLs, since
-          // double indirections required to get at those. The code generator knows
-          // which is which when generating the SRT, so it stores the (indirect)
-          // reference to the DLL closure in the table by first adding one to it.
-          // We check for this here, and undo the addition before evacuating it.
-          //
-          // If the SRT entry hasn't got bit 0 set, the SRT entry points to a
-          // closure that's fixed at link-time, and no extra magic is required.
-          if ( (W_)(*srt) & 0x1 ) {
-              evacuate( (StgClosure**) ((W_) (*srt) & ~0x1));
-          } else {
-              evacuate(p);
-          }
-#else
-          evacuate(p);
-#endif
-      }
-      p++;
-      bitmap = bitmap >> 1;
-  }
-}
-
-
 STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_thunk_srt(const StgInfoTable *info)
 {
     StgThunkInfoTable *thunk_info;
-    uint32_t bitmap;
 
     if (!major_gc) return;
 
     thunk_info = itbl_to_thunk_itbl(info);
-    bitmap = thunk_info->i.srt_bitmap;
-    if (bitmap) {
-        // don't read srt_offset if bitmap==0, because it doesn't exist
-        // and so the memory might not be readable.
-        scavenge_srt((StgClosure **)GET_SRT(thunk_info), bitmap);
+    if (thunk_info->i.srt) {
+        StgClosure *srt = (StgClosure*)GET_SRT(thunk_info);
+        evacuate(&srt);
     }
 }
 
@@ -435,16 +378,13 @@ STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_fun_srt(const StgInfoTable *info)
 {
     StgFunInfoTable *fun_info;
-    uint32_t bitmap;
 
     if (!major_gc) return;
 
     fun_info = itbl_to_fun_itbl(info);
-    bitmap = fun_info->i.srt_bitmap;
-    if (bitmap) {
-        // don't read srt_offset if bitmap==0, because it doesn't exist
-        // and so the memory might not be readable.
-        scavenge_srt((StgClosure **)GET_FUN_SRT(fun_info), bitmap);
+    if (fun_info->i.srt) {
+        StgClosure *srt = (StgClosure*)GET_FUN_SRT(fun_info);
+        evacuate(&srt);
     }
 }
 
@@ -737,18 +677,16 @@ scavenge_block (bdescr *bd)
         break;
     }
 
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         // follow everything
     {
         p = scavenge_mut_arr_ptrs((StgMutArrPtrs*)p);
 
-        // If we're going to put this object on the mutable list, then
-        // set its info ptr to MUT_ARR_PTRS_FROZEN0 to indicate that.
         if (gct->failed_to_evac) {
-            ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN0_info;
+            ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_DIRTY_info;
         } else {
-            ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_info;
+            ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_CLEAN_info;
         }
         break;
     }
@@ -780,8 +718,8 @@ scavenge_block (bdescr *bd)
         break;
     }
 
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         // follow everything
     {
         StgPtr next;
@@ -791,12 +729,10 @@ scavenge_block (bdescr *bd)
             evacuate((StgClosure **)p);
         }
 
-        // If we're going to put this object on the mutable list, then
-        // set its info ptr to SMALL_MUT_ARR_PTRS_FROZEN0 to indicate that.
         if (gct->failed_to_evac) {
-            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN0_info;
+            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_DIRTY_info;
         } else {
-            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_info;
+            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_CLEAN_info;
         }
         break;
     }
@@ -1133,20 +1069,18 @@ scavenge_mark_stack(void)
             break;
         }
 
-        case MUT_ARR_PTRS_FROZEN:
-        case MUT_ARR_PTRS_FROZEN0:
+        case MUT_ARR_PTRS_FROZEN_CLEAN:
+        case MUT_ARR_PTRS_FROZEN_DIRTY:
             // follow everything
         {
             StgPtr q = p;
 
             scavenge_mut_arr_ptrs((StgMutArrPtrs *)p);
 
-            // If we're going to put this object on the mutable list, then
-            // set its info ptr to MUT_ARR_PTRS_FROZEN0 to indicate that.
             if (gct->failed_to_evac) {
-                ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN0_info;
+                ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_DIRTY_info;
             } else {
-                ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_info;
+                ((StgClosure *)q)->header.info = &stg_MUT_ARR_PTRS_FROZEN_CLEAN_info;
             }
             break;
         }
@@ -1180,8 +1114,8 @@ scavenge_mark_stack(void)
             break;
         }
 
-        case SMALL_MUT_ARR_PTRS_FROZEN:
-        case SMALL_MUT_ARR_PTRS_FROZEN0:
+        case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+        case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
             // follow everything
         {
             StgPtr next, q = p;
@@ -1191,12 +1125,10 @@ scavenge_mark_stack(void)
                 evacuate((StgClosure **)p);
             }
 
-            // If we're going to put this object on the mutable list, then
-            // set its info ptr to SMALL_MUT_ARR_PTRS_FROZEN0 to indicate that.
             if (gct->failed_to_evac) {
-                ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN0_info;
+                ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_DIRTY_info;
             } else {
-                ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_info;
+                ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_CLEAN_info;
             }
             break;
         }
@@ -1365,7 +1297,7 @@ scavenge_one(StgPtr p)
 
     case WEAK:
         // This WEAK object will not be considered by tidyWeakList during this
-        // collection because it is in a generation >= N, but it is on the
+        // collection because it is in a generation > N, but it is on the
         // mutable list so we must evacuate all of its pointers because some
         // of them may point into a younger generation.
         scavengeLiveWeak((StgWeak *)p);
@@ -1457,18 +1389,16 @@ scavenge_one(StgPtr p)
         break;
     }
 
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
     {
         // follow everything
         scavenge_mut_arr_ptrs((StgMutArrPtrs *)p);
 
-        // If we're going to put this object on the mutable list, then
-        // set its info ptr to MUT_ARR_PTRS_FROZEN0 to indicate that.
         if (gct->failed_to_evac) {
-            ((StgClosure *)p)->header.info = &stg_MUT_ARR_PTRS_FROZEN0_info;
+            ((StgClosure *)p)->header.info = &stg_MUT_ARR_PTRS_FROZEN_DIRTY_info;
         } else {
-            ((StgClosure *)p)->header.info = &stg_MUT_ARR_PTRS_FROZEN_info;
+            ((StgClosure *)p)->header.info = &stg_MUT_ARR_PTRS_FROZEN_CLEAN_info;
         }
         break;
     }
@@ -1502,8 +1432,8 @@ scavenge_one(StgPtr p)
         break;
     }
 
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
     {
         // follow everything
         StgPtr next, q=p;
@@ -1513,12 +1443,10 @@ scavenge_one(StgPtr p)
             evacuate((StgClosure **)p);
         }
 
-        // If we're going to put this object on the mutable list, then
-        // set its info ptr to SMALL_MUT_ARR_PTRS_FROZEN0 to indicate that.
         if (gct->failed_to_evac) {
-            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN0_info;
+            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_DIRTY_info;
         } else {
-            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_info;
+            ((StgClosure *)q)->header.info = &stg_SMALL_MUT_ARR_PTRS_FROZEN_CLEAN_info;
         }
         break;
     }
@@ -1653,8 +1581,8 @@ scavenge_mutable_list(bdescr *bd, generation *gen)
                 mutlist_MUTVARS++; break;
             case MUT_ARR_PTRS_CLEAN:
             case MUT_ARR_PTRS_DIRTY:
-            case MUT_ARR_PTRS_FROZEN:
-            case MUT_ARR_PTRS_FROZEN0:
+            case MUT_ARR_PTRS_FROZEN_CLEAN:
+            case MUT_ARR_PTRS_FROZEN_DIRTY:
                 mutlist_MUTARRS++; break;
             case MVAR_CLEAN:
                 barf("MVAR_CLEAN on mutable list");
@@ -1669,10 +1597,6 @@ scavenge_mutable_list(bdescr *bd, generation *gen)
                     mutlist_TVAR_WATCH_QUEUE++;
                 else if (((StgClosure*)p)->header.info == &stg_TREC_HEADER_info)
                     mutlist_TREC_HEADER++;
-                else if (((StgClosure*)p)->header.info == &stg_ATOMIC_INVARIANT_info)
-                    mutlist_ATOMIC_INVARIANT++;
-                else if (((StgClosure*)p)->header.info == &stg_INVARIANT_CHECK_QUEUE_info)
-                    mutlist_INVARIANT_CHECK_QUEUE++;
                 else
                     mutlist_OTHERS++;
                 break;
@@ -1690,6 +1614,7 @@ scavenge_mutable_list(bdescr *bd, generation *gen)
             //
             switch (get_itbl((StgClosure *)p)->type) {
             case MUT_ARR_PTRS_CLEAN:
+            case SMALL_MUT_ARR_PTRS_CLEAN:
                 recordMutableGen_GC((StgClosure *)p,gen_no);
                 continue;
             case MUT_ARR_PTRS_DIRTY:
@@ -1813,7 +1738,11 @@ scavenge_static(void)
 
     case FUN_STATIC:
       scavenge_fun_srt(info);
-      break;
+      /* fallthrough */
+
+      // a FUN_STATIC can also be an SRT, so it may have pointer
+      // fields.  See Note [SRTs] in CmmBuildInfoTables, specifically
+      // the [FUN] optimisation.
 
     case CONSTR:
     case CONSTR_NOCAF:
@@ -1979,8 +1908,10 @@ scavenge_stack(StgPtr p, StgPtr stack_end)
         p = scavenge_small_bitmap(p, size, bitmap);
 
     follow_srt:
-        if (major_gc)
-            scavenge_srt((StgClosure **)GET_SRT(info), info->i.srt_bitmap);
+        if (major_gc && info->i.srt) {
+            StgClosure *srt = (StgClosure*)GET_SRT(info);
+            evacuate(&srt);
+        }
         continue;
 
     case RET_BCO: {

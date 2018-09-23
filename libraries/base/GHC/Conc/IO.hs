@@ -85,7 +85,7 @@ ioManagerCapabilitiesChanged = return ()
 -- | Block the current thread until data is available to read on the
 -- given file descriptor (GHC only).
 --
--- This will throw an 'IOError' if the file descriptor was closed
+-- This will throw an 'Prelude.IOError' if the file descriptor was closed
 -- while this thread was blocked.  To safely close a file descriptor
 -- that has been used with 'threadWaitRead', use 'closeFdWith'.
 threadWaitRead :: Fd -> IO ()
@@ -101,7 +101,7 @@ threadWaitRead fd
 -- | Block the current thread until data can be written to the
 -- given file descriptor (GHC only).
 --
--- This will throw an 'IOError' if the file descriptor was closed
+-- This will throw an 'Prelude.IOError' if the file descriptor was closed
 -- while this thread was blocked.  To safely close a file descriptor
 -- that has been used with 'threadWaitWrite', use 'closeFdWith'.
 threadWaitWrite :: Fd -> IO ()
@@ -188,8 +188,9 @@ threadDelay time
         case delay# time# s of { s' -> (# s', () #)
         }}
 
--- | Set the value of returned TVar to True after a given number of
--- microseconds. The caveats associated with threadDelay also apply.
+-- | Switch the value of returned 'TVar' from initial value 'False' to 'True'
+-- after a given number of microseconds. The caveats associated with
+-- 'threadDelay' also apply.
 --
 registerDelay :: Int -> IO (TVar Bool)
 registerDelay usecs

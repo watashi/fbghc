@@ -15,6 +15,8 @@ module PprCore (
         pprRules, pprOptCo
     ) where
 
+import GhcPrelude
+
 import CoreSyn
 import CoreStats (exprStats)
 import Literal( pprLiteral )
@@ -126,10 +128,18 @@ ppr_binding ann (val_bdr, expr)
       -- lambda (the first rendering looks like a nullary join point returning
       -- an n-argument function).
     pp_join_bind join_arity
+      | bndrs `lengthAtLeast` join_arity
       = hang (ppr val_bdr <+> sep (map (pprBndr LambdaBind) lhs_bndrs))
            2 (equals <+> pprCoreExpr rhs)
+      | otherwise -- Yikes!  A join-binding with too few lambda
+                  -- Lint will complain, but we don't want to crash
+                  -- the pretty-printer else we can't see what's wrong
+                  -- So refer to printing  j = e
+      = pp_normal_bind
       where
-        (lhs_bndrs, rhs) = collectNBinders join_arity expr
+        (bndrs, body) = collectBinders expr
+        lhs_bndrs = take join_arity bndrs
+        rhs       = mkLams (drop join_arity bndrs) body
 
 pprParendExpr expr = ppr_expr parens expr
 pprCoreExpr   expr = ppr_expr noParens expr
@@ -213,7 +223,7 @@ ppr_expr add_par (Case expr var ty [(con,args,rhs)])
              ]
     else add_par $
          sep [sep [sep [ text "case" <+> pprCoreExpr expr
-                       , ifPprDebug (text "return" <+> ppr ty)
+                       , whenPprDebug (text "return" <+> ppr ty)
                        , text "of" <+> ppr_bndr var
                        ]
                   , char '{' <+> ppr_case_pat con args <+> arrow
@@ -228,7 +238,7 @@ ppr_expr add_par (Case expr var ty alts)
   = add_par $
     sep [sep [text "case"
                 <+> pprCoreExpr expr
-                <+> ifPprDebug (text "return" <+> ppr ty),
+                <+> whenPprDebug (text "return" <+> ppr ty),
               text "of" <+> ppr_bndr var <+> char '{'],
          nest 2 (vcat (punctuate semi (map pprCoreAlt alts))),
          char '}'
@@ -374,7 +384,7 @@ pprTypedLamBinder bind_site debug_on var
   = sdocWithDynFlags $ \dflags ->
     case () of
     _
-      | not debug_on            -- Show case-bound wild bilders only if debug is on
+      | not debug_on            -- Show case-bound wild binders only if debug is on
       , CaseBind <- bind_site
       , isDeadBinder var        -> empty
 
@@ -602,21 +612,3 @@ instance Outputable id => Outputable (Tickish id) where
   ppr (SourceNote span _) =
       hcat [ text "src<", pprUserRealSpan True span, char '>']
 
-{-
------------------------------------------------------
---      Vectorisation declarations
------------------------------------------------------
--}
-
-instance Outputable CoreVect where
-  ppr (Vect     var e)               = hang (text "VECTORISE" <+> ppr var <+> char '=')
-                                         4 (pprCoreExpr e)
-  ppr (NoVect   var)                 = text "NOVECTORISE" <+> ppr var
-  ppr (VectType False var Nothing)   = text "VECTORISE type" <+> ppr var
-  ppr (VectType True  var Nothing)   = text "VECTORISE SCALAR type" <+> ppr var
-  ppr (VectType False var (Just tc)) = text "VECTORISE type" <+> ppr var <+> char '=' <+>
-                                       ppr tc
-  ppr (VectType True var (Just tc))  = text "VECTORISE SCALAR type" <+> ppr var <+>
-                                       char '=' <+> ppr tc
-  ppr (VectClass tc)                 = text "VECTORISE class" <+> ppr tc
-  ppr (VectInst var)                 = text "VECTORISE SCALAR instance" <+> ppr var

@@ -19,6 +19,8 @@ module FunDeps (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Name
 import Var
 import Class
@@ -237,7 +239,7 @@ improveClsFD clas_tvs fd
 --         for fundep (x,y -> p,q)  from class  (C x p y q)
 -- If (sx,sy) unifies with (tx,ty), take the subst S
 
--- 'qtvs' are the quantified type variables, the ones which an be instantiated
+-- 'qtvs' are the quantified type variables, the ones which can be instantiated
 -- to make the types match.  For example, given
 --      class C a b | a->b where ...
 --      instance C (Maybe x) (Tree x) where ..
@@ -281,7 +283,14 @@ improveClsFD clas_tvs fd
                   -> []
 
                   | otherwise
-                  -> [(meta_tvs, fdeqs)]
+                  -> -- pprTrace "iproveClsFD" (vcat
+                     --  [ text "is_tvs =" <+> ppr qtvs
+                     --  , text "tys_inst =" <+> ppr tys_inst
+                     --  , text "tys_actual =" <+> ppr tys_actual
+                     --  , text "ltys1 =" <+> ppr ltys1
+                     --  , text "ltys2 =" <+> ppr ltys2
+                     --  , text "subst =" <+> ppr subst ]) $
+                     [(meta_tvs, fdeqs)]
                         -- We could avoid this substTy stuff by producing the eqn
                         -- (qtvs, ls1++rs1, ls2++rs2)
                         -- which will re-do the ls1/ls2 unification when the equation is
@@ -532,7 +541,7 @@ oclose preds fixed_tvs
   | null tv_fds = fixed_tvs -- Fast escape hatch for common case.
   | otherwise   = fixVarSet extend fixed_tvs
   where
-    extend fixed_tvs = foldl add fixed_tvs tv_fds
+    extend fixed_tvs = foldl' add fixed_tvs tv_fds
        where
           add fixed_tvs (ls,rs)
             | ls `subVarSet` fixed_tvs = fixed_tvs `unionVarSet` closeOverKinds rs
@@ -643,7 +652,7 @@ checkFunDeps inst_envs (ClsInst { is_tvs = qtvs1, is_cls = cls
                    | otherwise                = Skolem
 
     eq_inst i1 i2 = instanceDFunId i1 == instanceDFunId i2
-        -- An single instance may appear twice in the un-nubbed conflict list
+        -- A single instance may appear twice in the un-nubbed conflict list
         -- because it may conflict with more than one fundep.  E.g.
         --      class C a b c | a -> b, a -> c
         --      instance C Int Bool Bool

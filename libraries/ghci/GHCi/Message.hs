@@ -1,6 +1,5 @@
 {-# LANGUAGE GADTs, DeriveGeneric, StandaloneDeriving, ScopedTypeVariables,
-    GeneralizedNewtypeDeriving, ExistentialQuantification, RecordWildCards,
-    CPP #-}
+    GeneralizedNewtypeDeriving, ExistentialQuantification, RecordWildCards #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing -fno-warn-orphans #-}
 
 -- |
@@ -23,13 +22,14 @@ module GHCi.Message
   , Pipe(..), remoteCall, remoteTHCall, readPipe, writePipe
   ) where
 
+import Prelude -- See note [Why do we import Prelude here?]
 import GHCi.RemoteTypes
-import GHCi.InfoTable (StgInfoTable)
 import GHCi.FFI
 import GHCi.TH.Binary ()
 import GHCi.BreakArray
 
 import GHC.LanguageExtensions
+import GHC.Exts.Heap
 import GHC.ForeignSrcLang
 import GHC.Fingerprint
 import Control.Concurrent
@@ -41,18 +41,12 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
 import Data.Dynamic
-#if MIN_VERSION_base(4,10,0)
--- Previously this was re-exported by Data.Dynamic
 import Data.Typeable (TypeRep)
-#endif
 import Data.IORef
 import Data.Map (Map)
+import Foreign
 import GHC.Generics
-#if MIN_VERSION_base(4,9,0)
 import GHC.Stack.CCS
-#else
-import GHC.Stack as GHC.Stack.CCS
-#endif
 import qualified Language.Haskell.TH        as TH
 import qualified Language.Haskell.TH.Syntax as TH
 import System.Exit
@@ -210,6 +204,18 @@ data Message a where
                    -> [RemoteRef (TH.Q ())]
                    -> Message (QResult ())
 
+  -- | Remote interface to GHC.Exts.Heap.getClosureData. This is used by
+  -- the GHCi debugger to inspect values in the heap for :print and
+  -- type reconstruction.
+  GetClosure
+    :: HValueRef
+    -> Message (GenClosure HValueRef)
+
+  -- | Evaluate something. This is used to support :force in GHCi.
+  Seq
+    :: HValueRef
+    -> Message (EvalResult ())
+
 deriving instance Show (Message a)
 
 
@@ -243,9 +249,11 @@ data THMessage a where
   ReifyConStrictness :: TH.Name -> THMessage (THResult [TH.DecidedStrictness])
 
   AddDependentFile :: FilePath -> THMessage (THResult ())
+  AddTempFile :: String -> THMessage (THResult FilePath)
   AddModFinalizer :: RemoteRef (TH.Q ()) -> THMessage (THResult ())
+  AddCorePlugin :: String -> THMessage (THResult ())
   AddTopDecls :: [TH.Dec] -> THMessage (THResult ())
-  AddForeignFile :: ForeignSrcLang -> String -> THMessage (THResult ())
+  AddForeignFilePath :: ForeignSrcLang -> FilePath -> THMessage (THResult ())
   IsExtEnabled :: Extension -> THMessage (THResult Bool)
   ExtsEnabled :: THMessage (THResult [Extension])
 
@@ -275,14 +283,16 @@ getTHMessage = do
     8  -> THMsg <$> ReifyModule <$> get
     9  -> THMsg <$> ReifyConStrictness <$> get
     10 -> THMsg <$> AddDependentFile <$> get
-    11 -> THMsg <$> AddTopDecls <$> get
-    12 -> THMsg <$> (IsExtEnabled <$> get)
-    13 -> THMsg <$> return ExtsEnabled
-    14 -> THMsg <$> return StartRecover
-    15 -> THMsg <$> EndRecover <$> get
-    16 -> return (THMsg RunTHDone)
-    17 -> THMsg <$> AddModFinalizer <$> get
-    _  -> THMsg <$> (AddForeignFile <$> get <*> get)
+    11 -> THMsg <$> AddTempFile <$> get
+    12 -> THMsg <$> AddTopDecls <$> get
+    13 -> THMsg <$> (IsExtEnabled <$> get)
+    14 -> THMsg <$> return ExtsEnabled
+    15 -> THMsg <$> return StartRecover
+    16 -> THMsg <$> EndRecover <$> get
+    17 -> return (THMsg RunTHDone)
+    18 -> THMsg <$> AddModFinalizer <$> get
+    19 -> THMsg <$> (AddForeignFilePath <$> get <*> get)
+    _  -> THMsg <$> AddCorePlugin <$> get
 
 putTHMessage :: THMessage a -> Put
 putTHMessage m = case m of
@@ -297,14 +307,16 @@ putTHMessage m = case m of
   ReifyModule a               -> putWord8 8  >> put a
   ReifyConStrictness a        -> putWord8 9  >> put a
   AddDependentFile a          -> putWord8 10 >> put a
-  AddTopDecls a               -> putWord8 11 >> put a
-  IsExtEnabled a              -> putWord8 12 >> put a
-  ExtsEnabled                 -> putWord8 13
-  StartRecover                -> putWord8 14
-  EndRecover a                -> putWord8 15 >> put a
-  RunTHDone                   -> putWord8 16
-  AddModFinalizer a           -> putWord8 17 >> put a
-  AddForeignFile lang a       -> putWord8 18 >> put lang >> put a
+  AddTempFile a               -> putWord8 11 >> put a
+  AddTopDecls a               -> putWord8 12 >> put a
+  IsExtEnabled a              -> putWord8 13 >> put a
+  ExtsEnabled                 -> putWord8 14
+  StartRecover                -> putWord8 15
+  EndRecover a                -> putWord8 16 >> put a
+  RunTHDone                   -> putWord8 17
+  AddModFinalizer a           -> putWord8 18 >> put a
+  AddForeignFilePath lang a   -> putWord8 19 >> put lang >> put a
+  AddCorePlugin a             -> putWord8 20 >> put a
 
 
 data EvalOpts = EvalOpts
@@ -384,17 +396,7 @@ fromSerializableException EUserInterrupt = toException UserInterrupt
 fromSerializableException (EExitCode c) = toException c
 fromSerializableException (EOtherException str) = toException (ErrorCall str)
 
--- NB: Replace this with a derived instance once we depend on GHC 8.0
--- as the minimum
-instance Binary ExitCode where
-  put ExitSuccess      = putWord8 0
-  put (ExitFailure ec) = putWord8 1 >> put ec
-  get = do
-    w <- getWord8
-    case w of
-      0 -> pure ExitSuccess
-      _ -> ExitFailure <$> get
-
+instance Binary ExitCode
 instance Binary SerializableException
 
 data THResult a
@@ -421,6 +423,22 @@ data QState = QState
        -- ^ pipe to communicate with GHC
   }
 instance Show QState where show _ = "<QState>"
+
+-- Orphan instances of Binary for Ptr / FunPtr by conversion to Word64.
+-- This is to support Binary StgInfoTable which includes these.
+instance Binary (Ptr a) where
+  put p = put (fromIntegral (ptrToWordPtr p) :: Word64)
+  get = (wordPtrToPtr . fromIntegral) <$> (get :: Get Word64)
+
+instance Binary (FunPtr a) where
+  put = put . castFunPtrToPtr
+  get = castPtrToFunPtr <$> get
+
+-- Binary instances to support the GetClosure message
+instance Binary StgInfoTable
+instance Binary ClosureType
+instance Binary PrimType
+instance Binary a => Binary (GenClosure a)
 
 data Msg = forall a . (Binary a, Show a) => Msg (Message a)
 
@@ -462,7 +480,9 @@ getMessage = do
       31 -> Msg <$> return StartTH
       32 -> Msg <$> (RunModFinalizers <$> get <*> get)
       33 -> Msg <$> (AddSptEntry <$> get <*> get)
-      _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      34 -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
+      35 -> Msg <$> (GetClosure <$> get)
+      _  -> Msg <$> (Seq <$> get)
 
 putMessage :: Message a -> Put
 putMessage m = case m of
@@ -501,6 +521,8 @@ putMessage m = case m of
   RunModFinalizers a b        -> putWord8 32 >> put a >> put b
   AddSptEntry a b             -> putWord8 33 >> put a >> put b
   RunTH st q loc ty           -> putWord8 34 >> put st >> put q >> put loc >> put ty
+  GetClosure a                -> putWord8 35 >> put a
+  Seq a                       -> putWord8 36 >> put a
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages

@@ -236,6 +236,7 @@ forkOS_createThreadWrapper ( void * entry )
     cap = rts_lock();
     rts_evalStableIO(&cap, (HsStablePtr) entry, NULL);
     rts_unlock(cap);
+    rts_done();
     return 0;
 }
 
@@ -577,9 +578,8 @@ void setThreadNode (uint32_t node)
 {
     if (osNumaAvailable())
     {
-        StgWord mask = 0;
-        mask |= 1 << node;
-        if (!SetThreadAffinityMask(GetCurrentThread(), mask))
+        uint64_t mask = 0;
+        if (!GetNumaNodeProcessorMask(node, &mask) && !SetThreadAffinityMask(GetCurrentThread(), mask))
         {
             sysErrorBelch(
                 "setThreadNode: Error setting affinity of thread to NUMA node `%u': %lu.",

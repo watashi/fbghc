@@ -2,9 +2,7 @@
 
 -- The default iteration limit is a bit too low for the definitions
 -- in this module.
-#if __GLASGOW_HASKELL__ >= 800
 {-# OPTIONS_GHC -fmax-pmcheck-iterations=10000000 #-}
-#endif
 
 -----------------------------------------------------------------------------
 --
@@ -32,6 +30,8 @@ where
 #include "../includes/MachDeps.h"
 
 -- NCG stuff:
+import GhcPrelude
+
 import X86.Instr
 import X86.Cond
 import X86.Regs
@@ -65,7 +65,6 @@ import SrcLoc           ( srcSpanFile, srcSpanStartLine, srcSpanStartCol )
 import ForeignCall      ( CCallConv(..) )
 import OrdList
 import Outputable
-import Unique
 import FastString
 import DynFlags
 import Util
@@ -211,6 +210,9 @@ stmtToInstrs stmt = do
        -> genCCall dflags is32Bit target result_regs args
 
     CmmBranch id          -> genBranch id
+
+    --We try to arrange blocks such that the likely branch is the fallthrough
+    --in CmmContFlowOpt. So we can assume the condition is likely false here.
     CmmCondBranch arg true false _ -> do
       b1 <- genCondJump true arg
       b2 <- genBranch false
@@ -295,7 +297,7 @@ data Amode
         = Amode AddrMode InstrBlock
 
 {-
-Now, given a tree (the argument to an CmmLoad) that references memory,
+Now, given a tree (the argument to a CmmLoad) that references memory,
 produce a suitable addressing mode.
 
 A Rule of the Game (tm) for Amodes: use of the addr bit must
@@ -328,7 +330,7 @@ is32BitInteger i = i64 <= 0x7fffffff && i64 >= -0x80000000
 jumpTableEntry :: DynFlags -> Maybe BlockId -> CmmStatic
 jumpTableEntry dflags Nothing = CmmStaticLit (CmmInt 0 (wordWidth dflags))
 jumpTableEntry _ (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
-    where blockLabel = mkAsmTempLabel (getUnique blockid)
+    where blockLabel = blockLbl blockid
 
 
 -- -----------------------------------------------------------------------------
@@ -466,6 +468,20 @@ iselExpr64 (CmmMachOp (MO_UU_Conv _ W64) [expr]) = do
                           r_dst_lo
             )
 
+iselExpr64 (CmmMachOp (MO_SS_Conv W32 W64) [expr]) = do
+     fn <- getAnyReg expr
+     r_dst_lo <-  getNewRegNat II32
+     let r_dst_hi = getHiVRegFromLo r_dst_lo
+         code = fn r_dst_lo
+     return (
+             ChildCode64 (code `snocOL`
+                          MOV II32 (OpReg r_dst_lo) (OpReg eax) `snocOL`
+                          CLTD II32 `snocOL`
+                          MOV II32 (OpReg eax) (OpReg r_dst_lo) `snocOL`
+                          MOV II32 (OpReg edx) (OpReg r_dst_hi))
+                          r_dst_lo
+            )
+
 iselExpr64 expr
    = pprPanic "iselExpr64(i386)" (ppr expr)
 
@@ -502,6 +518,9 @@ getRegister' dflags is32Bit (CmmReg reg)
 
 getRegister' dflags is32Bit (CmmRegOff r n)
   = getRegister' dflags is32Bit $ mangleIndexTree dflags r n
+
+getRegister' dflags is32Bit (CmmMachOp (MO_AlignmentCheck align _) [e])
+  = addAlignmentCheck align <$> getRegister' dflags is32Bit e
 
 -- for 32-bit architectuers, support some 64 -> 32 bit conversions:
 -- TO_W_(x), TO_W_(x >> 32)
@@ -731,8 +750,10 @@ getRegister' _ is32Bit (CmmMachOp mop [x, y]) = do -- dyadic MachOps
       MO_F_Ne _ -> condFltReg is32Bit NE  x y
       MO_F_Gt _ -> condFltReg is32Bit GTT x y
       MO_F_Ge _ -> condFltReg is32Bit GE  x y
-      MO_F_Lt _ -> condFltReg is32Bit LTT x y
-      MO_F_Le _ -> condFltReg is32Bit LE  x y
+      -- Invert comparison condition and swap operands
+      -- See Note [SSE Parity Checks]
+      MO_F_Lt _ -> condFltReg is32Bit GTT  y x
+      MO_F_Le _ -> condFltReg is32Bit GE   y x
 
       MO_Eq _   -> condIntReg EQQ x y
       MO_Ne _   -> condIntReg NE  x y
@@ -1255,6 +1276,21 @@ isOperand is32Bit (CmmLit lit)  = is32BitLit is32Bit lit
                           || isSuitableFloatingPointLit lit
 isOperand _ _            = False
 
+-- | Given a 'Register', produce a new 'Register' with an instruction block
+-- which will check the value for alignment. Used for @-falignment-sanitisation@.
+addAlignmentCheck :: Int -> Register -> Register
+addAlignmentCheck align reg =
+    case reg of
+      Fixed fmt reg code -> Fixed fmt reg (code `appOL` check fmt reg)
+      Any fmt f          -> Any fmt (\reg -> f reg `appOL` check fmt reg)
+  where
+    check :: Format -> Reg -> InstrBlock
+    check fmt reg =
+        ASSERT(not $ isFloatFormat fmt)
+        toOL [ TEST fmt (OpImm $ ImmInt $ align-1) (OpReg reg)
+             , JXX_GBL NE $ ImmCLbl mkBadAlignmentLabel
+             ]
+
 memConstant :: Int -> CmmLit -> NatM Amode
 memConstant align lit = do
   lbl <- getNewLabelNat
@@ -1331,15 +1367,17 @@ getCondCode (CmmMachOp mop [x, y])
       MO_F_Ne W32 -> condFltCode NE  x y
       MO_F_Gt W32 -> condFltCode GTT x y
       MO_F_Ge W32 -> condFltCode GE  x y
-      MO_F_Lt W32 -> condFltCode LTT x y
-      MO_F_Le W32 -> condFltCode LE  x y
+      -- Invert comparison condition and swap operands
+      -- See Note [SSE Parity Checks]
+      MO_F_Lt W32 -> condFltCode GTT  y x
+      MO_F_Le W32 -> condFltCode GE   y x
 
       MO_F_Eq W64 -> condFltCode EQQ x y
       MO_F_Ne W64 -> condFltCode NE  x y
       MO_F_Gt W64 -> condFltCode GTT x y
       MO_F_Ge W64 -> condFltCode GE  x y
-      MO_F_Lt W64 -> condFltCode LTT x y
-      MO_F_Le W64 -> condFltCode LE  x y
+      MO_F_Lt W64 -> condFltCode GTT y x
+      MO_F_Le W64 -> condFltCode GE  y x
 
       _ -> condIntCode (machOpToCond mop) x y
 
@@ -1639,11 +1677,19 @@ genCondJump' _ id bool = do
     else do
         lbl <- getBlockIdNat
 
-        -- see comment with condFltReg
+        -- See Note [SSE Parity Checks]
         let code = case cond of
                         NE  -> or_unordered
                         GU  -> plain_test
                         GEU -> plain_test
+                        -- Use ASSERT so we don't break releases if
+                        -- LTT/LE creep in somehow.
+                        LTT ->
+                          ASSERT2(False, ppr "Should have been turned into >")
+                          and_ordered
+                        LE  ->
+                          ASSERT2(False, ppr "Should have been turned into >=")
+                          and_ordered
                         _   -> and_ordered
 
             plain_test = unitOL (
@@ -1854,6 +1900,72 @@ genCCall dflags is32Bit (PrimTarget (MO_PopCnt width)) dest_regs@[dst]
   where
     format = intFormat width
     lbl = mkCmmCodeLabel primUnitId (fsLit (popCntLabel width))
+
+genCCall dflags is32Bit (PrimTarget (MO_Pdep width)) dest_regs@[dst]
+         args@[src, mask] = do
+    let platform = targetPlatform dflags
+    if isBmi2Enabled dflags
+        then do code_src  <- getAnyReg src
+                code_mask <- getAnyReg mask
+                src_r     <- getNewRegNat format
+                mask_r    <- getNewRegNat format
+                let dst_r = getRegisterReg platform False (CmmLocal dst)
+                return $ code_src src_r `appOL` code_mask mask_r `appOL`
+                    (if width == W8 then
+                         -- The PDEP instruction doesn't take a r/m8
+                         unitOL (MOVZxL II8  (OpReg src_r ) (OpReg src_r )) `appOL`
+                         unitOL (MOVZxL II8  (OpReg mask_r) (OpReg mask_r)) `appOL`
+                         unitOL (PDEP   II16 (OpReg mask_r) (OpReg src_r ) dst_r)
+                     else
+                         unitOL (PDEP format (OpReg mask_r) (OpReg src_r) dst_r)) `appOL`
+                    (if width == W8 || width == W16 then
+                         -- We used a 16-bit destination register above,
+                         -- so zero-extend
+                         unitOL (MOVZxL II16 (OpReg dst_r) (OpReg dst_r))
+                     else nilOL)
+        else do
+            targetExpr <- cmmMakeDynamicReference dflags
+                          CallReference lbl
+            let target = ForeignTarget targetExpr (ForeignConvention CCallConv
+                                                           [NoHint] [NoHint]
+                                                           CmmMayReturn)
+            genCCall dflags is32Bit target dest_regs args
+  where
+    format = intFormat width
+    lbl = mkCmmCodeLabel primUnitId (fsLit (pdepLabel width))
+
+genCCall dflags is32Bit (PrimTarget (MO_Pext width)) dest_regs@[dst]
+         args@[src, mask] = do
+    let platform = targetPlatform dflags
+    if isBmi2Enabled dflags
+        then do code_src  <- getAnyReg src
+                code_mask <- getAnyReg mask
+                src_r     <- getNewRegNat format
+                mask_r    <- getNewRegNat format
+                let dst_r = getRegisterReg platform False (CmmLocal dst)
+                return $ code_src src_r `appOL` code_mask mask_r `appOL`
+                    (if width == W8 then
+                         -- The PEXT instruction doesn't take a r/m8
+                         unitOL (MOVZxL II8 (OpReg src_r ) (OpReg src_r )) `appOL`
+                         unitOL (MOVZxL II8 (OpReg mask_r) (OpReg mask_r)) `appOL`
+                         unitOL (PEXT II16 (OpReg mask_r) (OpReg src_r) dst_r)
+                     else
+                         unitOL (PEXT format (OpReg mask_r) (OpReg src_r) dst_r)) `appOL`
+                    (if width == W8 || width == W16 then
+                         -- We used a 16-bit destination register above,
+                         -- so zero-extend
+                         unitOL (MOVZxL II16 (OpReg dst_r) (OpReg dst_r))
+                     else nilOL)
+        else do
+            targetExpr <- cmmMakeDynamicReference dflags
+                          CallReference lbl
+            let target = ForeignTarget targetExpr (ForeignConvention CCallConv
+                                                           [NoHint] [NoHint]
+                                                           CmmMayReturn)
+            genCCall dflags is32Bit target dest_regs args
+  where
+    format = intFormat width
+    lbl = mkCmmCodeLabel primUnitId (fsLit (pextLabel width))
 
 genCCall dflags is32Bit (PrimTarget (MO_Clz width)) dest_regs@[dst] args@[src]
   | is32Bit && width == W64 = do
@@ -2129,6 +2241,8 @@ genCCall _ is32Bit target dest_regs args = do
                           ADC format (OpImm (ImmInteger 0)) (OpReg reg_h)
                return code
         _ -> panic "genCCall: Wrong number of arguments/results for add2"
+    (PrimTarget (MO_AddWordC width), [res_r, res_c]) ->
+        addSubIntC platform ADD_CC (const Nothing) CARRY width res_r res_c args
     (PrimTarget (MO_SubWordC width), [res_r, res_c]) ->
         addSubIntC platform SUB_CC (const Nothing) CARRY width res_r res_c args
     (PrimTarget (MO_AddIntC width), [res_r, res_c]) ->
@@ -2645,6 +2759,10 @@ outOfLineCmmOp mop res args
               MO_F32_Tanh  -> fsLit "tanhf"
               MO_F32_Pwr   -> fsLit "powf"
 
+              MO_F32_Asinh -> fsLit "asinhf"
+              MO_F32_Acosh -> fsLit "acoshf"
+              MO_F32_Atanh -> fsLit "atanhf"
+
               MO_F64_Sqrt  -> fsLit "sqrt"
               MO_F64_Fabs  -> fsLit "fabs"
               MO_F64_Sin   -> fsLit "sin"
@@ -2662,14 +2780,22 @@ outOfLineCmmOp mop res args
               MO_F64_Tanh  -> fsLit "tanh"
               MO_F64_Pwr   -> fsLit "pow"
 
+              MO_F64_Asinh  -> fsLit "asinh"
+              MO_F64_Acosh  -> fsLit "acosh"
+              MO_F64_Atanh  -> fsLit "atanh"
+
               MO_Memcpy _  -> fsLit "memcpy"
               MO_Memset _  -> fsLit "memset"
               MO_Memmove _ -> fsLit "memmove"
+              MO_Memcmp _  -> fsLit "memcmp"
 
               MO_PopCnt _  -> fsLit "popcnt"
               MO_BSwap _   -> fsLit "bswap"
               MO_Clz w     -> fsLit $ clzLabel w
               MO_Ctz _     -> unsupported
+
+              MO_Pdep w    -> fsLit $ pdepLabel w
+              MO_Pext w    -> fsLit $ pextLabel w
 
               MO_AtomicRMW _ _ -> fsLit "atomicrmw"
               MO_AtomicRead _  -> fsLit "atomicread"
@@ -2684,6 +2810,7 @@ outOfLineCmmOp mop res args
               MO_Add2 {}       -> unsupported
               MO_AddIntC {}    -> unsupported
               MO_SubIntC {}    -> unsupported
+              MO_AddWordC {}   -> unsupported
               MO_SubWordC {}   -> unsupported
               MO_U_Mul2 {}     -> unsupported
               MO_WriteBarrier  -> unsupported
@@ -2698,7 +2825,7 @@ outOfLineCmmOp mop res args
 genSwitch :: DynFlags -> CmmExpr -> SwitchTargets -> NatM InstrBlock
 
 genSwitch dflags expr targets
-  | gopt Opt_PIC dflags
+  | positionIndependent dflags
   = do
         (reg,e_code) <- getNonClobberedReg (cmmOffset dflags expr offset)
            -- getNonClobberedReg because it needs to survive across t_code
@@ -2750,23 +2877,29 @@ genSwitch dflags expr targets
                     JMP_TBL op ids (Section ReadOnlyData lbl) lbl
                  ]
         return code
-  where (offset, ids) = switchTargetsToTable targets
+  where
+    (offset, blockIds) = switchTargetsToTable targets
+    ids = map (fmap DestBlockId) blockIds
 
 generateJumpTableForInstr :: DynFlags -> Instr -> Maybe (NatCmmDecl (Alignment, CmmStatics) Instr)
 generateJumpTableForInstr dflags (JMP_TBL _ ids section lbl)
-    = Just (createJumpTable dflags ids section lbl)
+    = let getBlockId (DestBlockId id) = id
+          getBlockId _ = panic "Non-Label target in Jump Table"
+          blockIds = map (fmap getBlockId) ids
+      in Just (createJumpTable dflags blockIds section lbl)
 generateJumpTableForInstr _ _ = Nothing
 
 createJumpTable :: DynFlags -> [Maybe BlockId] -> Section -> CLabel
                 -> GenCmmDecl (Alignment, CmmStatics) h g
 createJumpTable dflags ids section lbl
     = let jumpTable
-            | gopt Opt_PIC dflags =
-                  let jumpTableEntryRel Nothing
-                          = CmmStaticLit (CmmInt 0 (wordWidth dflags))
+            | positionIndependent dflags =
+                  let ww = wordWidth dflags
+                      jumpTableEntryRel Nothing
+                          = CmmStaticLit (CmmInt 0 ww)
                       jumpTableEntryRel (Just blockid)
-                          = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0)
-                          where blockLabel = mkAsmTempLabel (getUnique blockid)
+                          = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0 ww)
+                          where blockLabel = blockLbl blockid
                   in map jumpTableEntryRel ids
             | otherwise = map (jumpTableEntry dflags) ids
       in CmmData section (1, Statics lbl jumpTable)
@@ -2797,6 +2930,59 @@ condIntReg cond x y = do
   return (Any II32 code)
 
 
+-----------------------------------------------------------
+---          Note [SSE Parity Checks]                   ---
+-----------------------------------------------------------
+
+-- We have to worry about unordered operands (eg. comparisons
+-- against NaN).  If the operands are unordered, the comparison
+-- sets the parity flag, carry flag and zero flag.
+-- All comparisons are supposed to return false for unordered
+-- operands except for !=, which returns true.
+--
+-- Optimisation: we don't have to test the parity flag if we
+-- know the test has already excluded the unordered case: eg >
+-- and >= test for a zero carry flag, which can only occur for
+-- ordered operands.
+--
+-- By reversing comparisons we can avoid testing the parity
+-- for < and <= as well. If any of the arguments is an NaN we
+-- return false either way. If both arguments are valid then
+-- x <= y  <->  y >= x  holds. So it's safe to swap these.
+--
+-- We invert the condition inside getRegister'and  getCondCode
+-- which should cover all invertable cases.
+-- All other functions translating FP comparisons to assembly
+-- use these to two generate the comparison code.
+--
+-- As an example consider a simple check:
+--
+-- func :: Float -> Float -> Int
+-- func x y = if x < y then 1 else 0
+--
+-- Which in Cmm gives the floating point comparison.
+--
+--  if (%MO_F_Lt_W32(F1, F2)) goto c2gg; else goto c2gf;
+--
+-- We used to compile this to an assembly code block like this:
+-- _c2gh:
+--  ucomiss %xmm2,%xmm1
+--  jp _c2gf
+--  jb _c2gg
+--  jmp _c2gf
+--
+-- Where we have to introduce an explicit
+-- check for unordered results (using jmp parity):
+--
+-- We can avoid this by exchanging the arguments and inverting the direction
+-- of the comparison. This results in the sequence of:
+--
+--  ucomiss %xmm1,%xmm2
+--  ja _c2g2
+--  jmp _c2g1
+--
+-- Removing the jump reduces the pressure on the branch predidiction system
+-- and plays better with the uOP cache.
 
 condFltReg :: Bool -> Cond -> CmmExpr -> CmmExpr -> NatM Register
 condFltReg is32Bit cond x y = if_sse2 condFltReg_sse2 condFltReg_x87
@@ -2815,27 +3001,18 @@ condFltReg is32Bit cond x y = if_sse2 condFltReg_sse2 condFltReg_x87
     CondCode _ cond cond_code <- condFltCode cond x y
     tmp1 <- getNewRegNat (archWordFormat is32Bit)
     tmp2 <- getNewRegNat (archWordFormat is32Bit)
-    let
-        -- We have to worry about unordered operands (eg. comparisons
-        -- against NaN).  If the operands are unordered, the comparison
-        -- sets the parity flag, carry flag and zero flag.
-        -- All comparisons are supposed to return false for unordered
-        -- operands except for !=, which returns true.
-        --
-        -- Optimisation: we don't have to test the parity flag if we
-        -- know the test has already excluded the unordered case: eg >
-        -- and >= test for a zero carry flag, which can only occur for
-        -- ordered operands.
-        --
-        -- ToDo: by reversing comparisons we could avoid testing the
-        -- parity flag in more cases.
-
+    let -- See Note [SSE Parity Checks]
         code dst =
            cond_code `appOL`
              (case cond of
                 NE  -> or_unordered dst
                 GU  -> plain_test   dst
                 GEU -> plain_test   dst
+                -- Use ASSERT so we don't break releases if these creep in.
+                LTT -> ASSERT2(False, ppr "Should have been turned into >")
+                       and_ordered  dst
+                LE  -> ASSERT2(False, ppr "Should have been turned into >=")
+                       and_ordered  dst
                 _   -> and_ordered  dst)
 
         plain_test dst = toOL [

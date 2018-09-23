@@ -12,6 +12,8 @@ module TidyPgm (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TcRnTypes
 import DynFlags
 import CoreSyn
@@ -59,7 +61,6 @@ import Maybes
 import UniqSupply
 import ErrUtils (Severity(..))
 import Outputable
-import UniqDFM
 import SrcLoc
 import qualified ErrUtils as Err
 
@@ -69,7 +70,7 @@ import Data.List        ( sortBy )
 import Data.IORef       ( atomicModifyIORef' )
 
 {-
-Constructing the TypeEnv, Instances, Rules, VectInfo from which the
+Constructing the TypeEnv, Instances, Rules from which the
 ModIface is constructed, and which goes on to subsequent modules in
 --make mode.
 
@@ -163,7 +164,6 @@ mkBootModDetailsTc hsc_env
                              , md_rules     = []
                              , md_anns      = []
                              , md_exports   = exports
-                             , md_vect_info = noVectInfo
                              , md_complete_sigs = []
                              })
         }
@@ -200,7 +200,7 @@ mkBootTypeEnv exports ids tcs fam_insts
 
 
 globaliseAndTidyId :: Id -> Id
--- Takes an LocalId with an External Name,
+-- Takes a LocalId with an External Name,
 -- makes it into a GlobalId
 --     * unchanged Name (might be Internal or External)
 --     * unchanged details
@@ -219,18 +219,22 @@ globaliseAndTidyId id
 
 Plan B: include pragmas, make interfaces
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-* Figure out which Ids are externally visible
+* Step 1: Figure out which Ids are externally visible
+          See Note [Choosing external Ids]
 
-* Tidy the bindings, externalising appropriate Ids
+* Step 2: Gather the externally visible rules, separately from
+          the top-level bindings.
+          See Note [Finding external rules]
+
+* Step 3: Tidy the bindings, externalising appropriate Ids
+          See Note [Tidy the top-level bindings]
 
 * Drop all Ids from the TypeEnv, and add all the External Ids from
   the bindings.  (This adds their IdInfo to the TypeEnv; and adds
   floated-out Ids that weren't even in the TypeEnv before.)
 
-Step 1: Figure out external Ids
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Note [choosing external names]
-
+Note [Choosing external Ids]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 See also the section "Interface stability" in the
 RecompilationAvoidance commentary:
   http://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/RecompilationAvoidance
@@ -240,9 +244,8 @@ First we figure out which Ids are "external" Ids.  An
 unit.  These are
   a) the user exported ones
   b) the ones bound to static forms
-  c) ones mentioned in the unfoldings, workers,
-     rules of externally-visible ones ,
-     or vectorised versions of externally-visible ones
+  c) ones mentioned in the unfoldings, workers, or
+     rules of externally-visible ones
 
 While figuring out which Ids are external, we pick a "tidy" OccName
 for each one.  That is, we make its OccName distinct from the other
@@ -270,8 +273,8 @@ as the bindings themselves are deterministic (they sometimes aren't!),
 the order in which they are presented to the tidying phase does not
 affect the names we assign.
 
-Step 2: Tidy the program
-~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Tidy the top-level bindings]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Next we traverse the bindings top to bottom.  For each *top-level*
 binder
 
@@ -318,7 +321,6 @@ tidyProgram hsc_env  (ModGuts { mg_module    = mod
                               , mg_binds     = binds
                               , mg_patsyns   = patsyns
                               , mg_rules     = imp_rules
-                              , mg_vect_info = vect_info
                               , mg_anns      = anns
                               , mg_complete_sigs = complete_sigs
                               , mg_deps      = deps
@@ -345,7 +347,7 @@ tidyProgram hsc_env  (ModGuts { mg_module    = mod
 
         ; (unfold_env, tidy_occ_env)
               <- chooseExternalIds hsc_env mod omit_prags expose_all
-                                   binds implicit_binds imp_rules (vectInfoVar vect_info)
+                                   binds implicit_binds imp_rules
         ; let { (trimmed_binds, trimmed_rules)
                     = findExternalRules omit_prags binds imp_rules unfold_env }
 
@@ -366,8 +368,6 @@ tidyProgram hsc_env  (ModGuts { mg_module    = mod
                 -- You might worry that the tidy_env contains IdInfo-rich stuff
                 -- and indeed it does, but if omit_prags is on, ext_rules is
                 -- empty
-
-              ; tidy_vect_info = tidyVectInfo tidy_env vect_info
 
                 -- Tidy the Ids inside each PatSyn, very similarly to DFunIds
                 -- and then override the PatSyns in the type_env with the new tidy ones
@@ -438,7 +438,6 @@ tidyProgram hsc_env  (ModGuts { mg_module    = mod
                    ModDetails { md_types     = tidy_type_env,
                                 md_rules     = tidy_rules,
                                 md_insts     = tidy_cls_insts,
-                                md_vect_info = tidy_vect_info,
                                 md_fam_insts = fam_insts,
                                 md_exports   = exports,
                                 md_anns      = anns,      -- are already tidy
@@ -451,7 +450,7 @@ tidyProgram hsc_env  (ModGuts { mg_module    = mod
 tidyTypeEnv :: Bool       -- Compiling without -O, so omit prags
             -> TypeEnv -> TypeEnv
 
--- The competed type environment is gotten from
+-- The completed type environment is gotten from
 --      a) the types and classes defined here (plus implicit things)
 --      b) adding Ids with correct IdInfo, including unfoldings,
 --              gotten from the bindings
@@ -486,38 +485,6 @@ trimThing other_thing
 extendTypeEnvWithPatSyns :: [PatSyn] -> TypeEnv -> TypeEnv
 extendTypeEnvWithPatSyns tidy_patsyns type_env
   = extendTypeEnvList type_env [AConLike (PatSynCon ps) | ps <- tidy_patsyns ]
-
-tidyVectInfo :: TidyEnv -> VectInfo -> VectInfo
-tidyVectInfo (_, var_env) info@(VectInfo { vectInfoVar          = vars
-                                         , vectInfoParallelVars = parallelVars
-                                         })
-  = info { vectInfoVar          = tidy_vars
-         , vectInfoParallelVars = tidy_parallelVars
-         }
-  where
-      -- we only export mappings whose domain and co-domain is exported (otherwise, the iface is
-      -- inconsistent)
-    tidy_vars = mkDVarEnv [ (tidy_var, (tidy_var, tidy_var_v))
-                          | (var, var_v) <- eltsUDFM vars
-                          , let tidy_var   = lookup_var var
-                                tidy_var_v = lookup_var var_v
-                          , isExternalId tidy_var   && isExportedId tidy_var
-                          , isExternalId tidy_var_v && isExportedId tidy_var_v
-                          , isDataConWorkId var || not (isImplicitId var)
-                          ]
-
-    tidy_parallelVars = mkDVarSet
-                          [ tidy_var
-                          | var <- dVarSetElems parallelVars
-                          , let tidy_var = lookup_var var
-                          , isExternalId tidy_var && isExportedId tidy_var
-                          ]
-
-    lookup_var var = lookupWithDefaultVarEnv var_env var var
-
-    -- We need to make sure that all names getting into the iface version of 'VectInfo' are
-    -- external; otherwise, 'MkIface' will bomb out.
-    isExternalId = isExternalName . idName
 
 {-
 Note [Don't attempt to trim data types]
@@ -619,7 +586,7 @@ get_defn id = NonRec id (unfoldingTemplate (realIdUnfolding id))
 *                                                                      *
 ************************************************************************
 
-See Note [Choosing external names].
+See Note [Choosing external Ids].
 -}
 
 type UnfoldEnv  = IdEnv (Name{-new name-}, Bool {-show unfolding-})
@@ -635,23 +602,22 @@ chooseExternalIds :: HscEnv
                   -> [CoreBind]
                   -> [CoreBind]
                   -> [CoreRule]
-                  -> DVarEnv (Var, Var)
                   -> IO (UnfoldEnv, TidyOccEnv)
                   -- Step 1 from the notes above
 
-chooseExternalIds hsc_env mod omit_prags expose_all binds implicit_binds imp_id_rules vect_vars
+chooseExternalIds hsc_env mod omit_prags expose_all binds implicit_binds imp_id_rules
   = do { (unfold_env1,occ_env1) <- search init_work_list emptyVarEnv init_occ_env
        ; let internal_ids = filter (not . (`elemVarEnv` unfold_env1)) binders
        ; tidy_internal internal_ids unfold_env1 occ_env1 }
  where
   nc_var = hsc_NC hsc_env
 
-  -- init_ext_ids is the intial list of Ids that should be
+  -- init_ext_ids is the initial list of Ids that should be
   -- externalised.  It serves as the starting point for finding a
   -- deterministic, tidy, renaming for all external Ids in this
   -- module.
   --
-  -- It is sorted, so that it has adeterministic order (i.e. it's the
+  -- It is sorted, so that it has a deterministic order (i.e. it's the
   -- same list every time this module is compiled), in contrast to the
   -- bindings, which are ordered non-deterministically.
   init_work_list = zip init_ext_ids init_ext_ids
@@ -659,13 +625,10 @@ chooseExternalIds hsc_env mod omit_prags expose_all binds implicit_binds imp_id_
 
   -- An Id should be external if either (a) it is exported,
   -- (b) it appears in the RHS of a local rule for an imported Id, or
-  -- (c) it is the vectorised version of an imported Id.
   -- See Note [Which rules to expose]
   is_external id = isExportedId id || id `elemVarSet` rule_rhs_vars
-                 || id `elemVarSet` vect_var_vs
 
   rule_rhs_vars  = mapUnionVarSet ruleRhsFreeVars imp_id_rules
-  vect_var_vs    = mkVarSet [var_v | (var, var_v) <- eltsUDFM vect_vars, isGlobalId var]
 
   binders          = map fst $ flattenBinds binds
   implicit_binders = bindersOfBinds implicit_binds
@@ -715,9 +678,6 @@ chooseExternalIds hsc_env mod omit_prags expose_all binds implicit_binds imp_id_
                 | omit_prags = ([], False)
                 | otherwise  = addExternal expose_all refined_id
 
-                -- add vectorised version if any exists
-          new_ids' = new_ids ++ maybeToList (fmap snd $ lookupDVarEnv vect_vars idocc)
-
                 -- 'idocc' is an *occurrence*, but we need to see the
                 -- unfolding in the *definition*; so look up in binder_set
           refined_id = case lookupVarSet binder_set idocc of
@@ -728,7 +688,7 @@ chooseExternalIds hsc_env mod omit_prags expose_all binds implicit_binds imp_id_
           referrer' | isExportedId refined_id = refined_id
                     | otherwise               = referrer
       --
-      search (zip new_ids' (repeat referrer') ++ rest) unfold_env' occ_env'
+      search (zip new_ids (repeat referrer') ++ rest) unfold_env' occ_env'
 
   tidy_internal :: [Id] -> UnfoldEnv -> TidyOccEnv
                 -> IO (UnfoldEnv, TidyOccEnv)
@@ -778,7 +738,7 @@ a VarSet, which is in a non-deterministic order when converted to a
 list.  Hence, here we define a free-variable finder that returns
 the free variables in the order that they are encountered.
 
-See Note [Choosing external names]
+See Note [Choosing external Ids]
 -}
 
 bndrFvsInOrder :: Bool -> Id -> [Id]
@@ -1133,9 +1093,14 @@ tidyTopBinds :: HscEnv
 
 tidyTopBinds hsc_env this_mod unfold_env init_occ_env binds
   = do mkIntegerId <- lookupMkIntegerName dflags hsc_env
+       mkNaturalId <- lookupMkNaturalName dflags hsc_env
        integerSDataCon <- lookupIntegerSDataConName dflags hsc_env
-       let cvt_integer = cvtLitInteger dflags mkIntegerId integerSDataCon
-           result      = tidy cvt_integer init_env binds
+       naturalSDataCon <- lookupNaturalSDataConName dflags hsc_env
+       let cvt_literal nt i = case nt of
+             LitNumInteger -> Just (cvtLitInteger dflags mkIntegerId integerSDataCon i)
+             LitNumNatural -> Just (cvtLitNatural dflags mkNaturalId naturalSDataCon i)
+             _             -> Nothing
+           result      = tidy cvt_literal init_env binds
        seqBinds (snd result) `seq` return result
        -- This seqBinds avoids a spike in space usage (see #13564)
   where
@@ -1144,34 +1109,35 @@ tidyTopBinds hsc_env this_mod unfold_env init_occ_env binds
     init_env = (init_occ_env, emptyVarEnv)
 
     tidy _           env []     = (env, [])
-    tidy cvt_integer env (b:bs)
-        = let (env1, b')  = tidyTopBind dflags this_mod
-                                        cvt_integer unfold_env env b
-              (env2, bs') = tidy cvt_integer env1 bs
+    tidy cvt_literal env (b:bs)
+        = let (env1, b')  = tidyTopBind dflags this_mod cvt_literal unfold_env
+                                        env b
+              (env2, bs') = tidy cvt_literal env1 bs
           in  (env2, b':bs')
 
 ------------------------
 tidyTopBind  :: DynFlags
              -> Module
-             -> (Integer -> CoreExpr)
+             -> (LitNumType -> Integer -> Maybe CoreExpr)
              -> UnfoldEnv
              -> TidyEnv
              -> CoreBind
              -> (TidyEnv, CoreBind)
 
-tidyTopBind dflags this_mod cvt_integer unfold_env
+tidyTopBind dflags this_mod cvt_literal unfold_env
             (occ_env,subst1) (NonRec bndr rhs)
   = (tidy_env2,  NonRec bndr' rhs')
   where
     Just (name',show_unfold) = lookupVarEnv unfold_env bndr
-    caf_info      = hasCafRefs dflags this_mod (subst1, cvt_integer)
+    caf_info      = hasCafRefs dflags this_mod
+                               (subst1, cvt_literal)
                                (idArity bndr) rhs
     (bndr', rhs') = tidyTopPair dflags show_unfold tidy_env2 caf_info name'
                                 (bndr, rhs)
     subst2        = extendVarEnv subst1 bndr bndr'
     tidy_env2     = (occ_env, subst2)
 
-tidyTopBind dflags this_mod cvt_integer unfold_env
+tidyTopBind dflags this_mod cvt_literal unfold_env
             (occ_env, subst1) (Rec prs)
   = (tidy_env2, Rec prs')
   where
@@ -1190,7 +1156,7 @@ tidyTopBind dflags this_mod cvt_integer unfold_env
         -- the group may refer indirectly to a CAF (because then, they all do).
     caf_info
         | or [ mayHaveCafRefs (hasCafRefs dflags this_mod
-                                          (subst1, cvt_integer)
+                                          (subst1, cvt_literal)
                                           (idArity bndr) rhs)
              | (bndr,rhs) <- prs ] = MayHaveCafRefs
         | otherwise                = NoCafRefs
@@ -1242,6 +1208,8 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
         `setCafInfo`        caf_info
         `setArityInfo`      arity
         `setStrictnessInfo` final_sig
+        `setUnfoldingInfo`  minimal_unfold_info  -- See note [Preserve evaluatedness]
+                                                 -- in CoreTidy
 
   | otherwise           -- Externally-visible Ids get the whole lot
   = vanillaIdInfo
@@ -1278,7 +1246,8 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
     --------- Unfolding ------------
     unf_info = unfoldingInfo idinfo
     unfold_info | show_unfold = tidyUnfolding rhs_tidy_env unf_info unf_from_rhs
-                | otherwise   = noUnfolding
+                | otherwise   = minimal_unfold_info
+    minimal_unfold_info = zapUnfolding unf_info
     unf_from_rhs = mkTopUnfolding dflags is_bot tidy_rhs
     is_bot = isBottomingSig final_sig
     -- NB: do *not* expose the worker if show_unfold is off,
@@ -1294,6 +1263,7 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
     -- In this case, show_unfold will be false (we don't expose unfoldings
     -- for bottoming functions), but we might still have a worker/wrapper
     -- split (see Note [Worker-wrapper for bottoming functions] in WorkWrap.hs
+
 
     --------- Arity ------------
     -- Usually the Id will have an accurate arity on it, because
@@ -1332,25 +1302,28 @@ We compute hasCafRefs here, because IdInfo is supposed to be finalised
 after TidyPgm.  But CorePrep does some transformations that affect CAF-hood.
 So we have to *predict* the result here, which is revolting.
 
-In particular CorePrep expands Integer literals.  So in the prediction code
-here we resort to applying the same expansion (cvt_integer). Ugh!
+In particular CorePrep expands Integer and Natural literals. So in the
+prediction code here we resort to applying the same expansion (cvt_literal).
+Ugh!
 -}
 
-type CafRefEnv = (VarEnv Id, Integer -> CoreExpr)
+type CafRefEnv = (VarEnv Id, LitNumType -> Integer -> Maybe CoreExpr)
   -- The env finds the Caf-ness of the Id
-  -- The Integer -> CoreExpr is the desugaring function for Integer literals
+  -- The LitNumType -> Integer -> CoreExpr is the desugaring functions for
+  -- Integer and Natural literals
   -- See Note [Disgusting computation of CafRefs]
 
 hasCafRefs :: DynFlags -> Module
            -> CafRefEnv -> Arity -> CoreExpr
            -> CafInfo
-hasCafRefs dflags this_mod p@(_,cvt_integer) arity expr
+hasCafRefs dflags this_mod (subst, cvt_literal) arity expr
   | is_caf || mentions_cafs = MayHaveCafRefs
   | otherwise               = NoCafRefs
  where
-  mentions_cafs   = cafRefsE p expr
+  mentions_cafs   = cafRefsE expr
   is_dynamic_name = isDllName dflags this_mod
-  is_caf = not (arity > 0 || rhsIsStatic (targetPlatform dflags) is_dynamic_name cvt_integer expr)
+  is_caf = not (arity > 0 || rhsIsStatic (targetPlatform dflags) is_dynamic_name
+                                         cvt_literal expr)
 
   -- NB. we pass in the arity of the expression, which is expected
   -- to be calculated by exprArity.  This is because exprArity
@@ -1358,34 +1331,36 @@ hasCafRefs dflags this_mod p@(_,cvt_integer) arity expr
   -- CorePrep later on, and we don't want to duplicate that
   -- knowledge in rhsIsStatic below.
 
-cafRefsE :: CafRefEnv -> Expr a -> Bool
-cafRefsE p (Var id)            = cafRefsV p id
-cafRefsE p (Lit lit)           = cafRefsL p lit
-cafRefsE p (App f a)           = cafRefsE p f || cafRefsE p a
-cafRefsE p (Lam _ e)           = cafRefsE p e
-cafRefsE p (Let b e)           = cafRefsEs p (rhssOfBind b) || cafRefsE p e
-cafRefsE p (Case e _ _ alts)   = cafRefsE p e || cafRefsEs p (rhssOfAlts alts)
-cafRefsE p (Tick _n e)         = cafRefsE p e
-cafRefsE p (Cast e _co)        = cafRefsE p e
-cafRefsE _ (Type _)            = False
-cafRefsE _ (Coercion _)        = False
+  cafRefsE :: Expr a -> Bool
+  cafRefsE (Var id)            = cafRefsV id
+  cafRefsE (Lit lit)           = cafRefsL lit
+  cafRefsE (App f a)           = cafRefsE f || cafRefsE a
+  cafRefsE (Lam _ e)           = cafRefsE e
+  cafRefsE (Let b e)           = cafRefsEs (rhssOfBind b) || cafRefsE e
+  cafRefsE (Case e _ _ alts)   = cafRefsE e || cafRefsEs (rhssOfAlts alts)
+  cafRefsE (Tick _n e)         = cafRefsE e
+  cafRefsE (Cast e _co)        = cafRefsE e
+  cafRefsE (Type _)            = False
+  cafRefsE (Coercion _)        = False
 
-cafRefsEs :: CafRefEnv -> [Expr a] -> Bool
-cafRefsEs _ []     = False
-cafRefsEs p (e:es) = cafRefsE p e || cafRefsEs p es
+  cafRefsEs :: [Expr a] -> Bool
+  cafRefsEs []     = False
+  cafRefsEs (e:es) = cafRefsE e || cafRefsEs es
 
-cafRefsL :: CafRefEnv -> Literal -> Bool
--- Don't forget that mk_integer id might have Caf refs!
--- We first need to convert the Integer into its final form, to
--- see whether mkInteger is used.
-cafRefsL p@(_, cvt_integer) (LitInteger i _) = cafRefsE p (cvt_integer i)
-cafRefsL _                  _                = False
+  cafRefsL :: Literal -> Bool
+  -- Don't forget that mk_integer id might have Caf refs!
+  -- We first need to convert the Integer into its final form, to
+  -- see whether mkInteger is used. Same for LitNatural.
+  cafRefsL (LitNumber nt i _) = case cvt_literal nt i of
+    Just e  -> cafRefsE e
+    Nothing -> False
+  cafRefsL _                = False
 
-cafRefsV :: CafRefEnv -> Id -> Bool
-cafRefsV (subst, _) id
-  | not (isLocalId id)                = mayHaveCafRefs (idCafInfo id)
-  | Just id' <- lookupVarEnv subst id = mayHaveCafRefs (idCafInfo id')
-  | otherwise                         = False
+  cafRefsV :: Id -> Bool
+  cafRefsV id
+    | not (isLocalId id)                = mayHaveCafRefs (idCafInfo id)
+    | Just id' <- lookupVarEnv subst id = mayHaveCafRefs (idCafInfo id')
+    | otherwise                         = False
 
 
 {-

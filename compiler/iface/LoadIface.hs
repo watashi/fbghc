@@ -6,7 +6,7 @@
 Loading interface files
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, BangPatterns, RecordWildCards, NondecreasingIndentation #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 module LoadIface (
         -- Importing one thing
@@ -16,7 +16,7 @@ module LoadIface (
         -- RnM/TcM functions
         loadModuleInterface, loadModuleInterfaces,
         loadSrcInterface, loadSrcInterface_maybe,
-        loadInterfaceForName, loadInterfaceForModule,
+        loadInterfaceForName, loadInterfaceForNameMaybe, loadInterfaceForModule,
 
         -- IfM functions
         loadInterface,
@@ -25,6 +25,7 @@ module LoadIface (
         loadDecls,      -- Should move to TcIface and be renamed
         initExternalPackageState,
         moduleFreeHolesPrecise,
+        needWiredInHomeIface, loadWiredInHomeIface,
 
         pprModIfaceSimple,
         ifaceStats, pprModIface, showIface
@@ -32,8 +33,10 @@ module LoadIface (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-}   TcIface( tcIfaceDecl, tcIfaceRules, tcIfaceInst,
-                                 tcIfaceFamInst, tcIfaceVectInfo,
+                                 tcIfaceFamInst,
                                  tcIfaceAnnotations, tcIfaceCompleteSigs )
 
 import DynFlags
@@ -74,6 +77,7 @@ import Hooks
 import FieldLabel
 import RnModIface
 import UniqDSet
+import Plugins
 
 import Control.Monad
 import Control.Exception
@@ -144,7 +148,7 @@ importDecl name
         { eps <- getEps
         ; case lookupTypeEnv (eps_PTE eps) name of
             Just thing -> return $ Succeeded thing
-            Nothing    -> let doc = ifPprDebug (found_things_msg eps $$ empty)
+            Nothing    -> let doc = whenPprDebug (found_things_msg eps $$ empty)
                                     $$ not_found_msg
                           in return $ Failed doc
     }}}
@@ -309,6 +313,15 @@ loadInterfaceForName doc name
       ; ASSERT2( isExternalName name, ppr name )
         initIfaceTcRn $ loadSysInterface doc (nameModule name) }
 
+-- | Only loads the interface for external non-local names.
+loadInterfaceForNameMaybe :: SDoc -> Name -> TcRn (Maybe ModIface)
+loadInterfaceForNameMaybe doc name
+  = do { this_mod <- getModule
+       ; if nameIsLocalOrFrom this_mod name || not (isExternalName name)
+         then return Nothing
+         else Just <$> (initIfaceTcRn $ loadSysInterface doc (nameModule name))
+       }
+
 -- | Loads the interface for a given Module.
 loadInterfaceForModule :: SDoc -> Module -> TcRn ModIface
 loadInterfaceForModule doc m
@@ -440,6 +453,8 @@ loadInterface doc_str mod from
         in
         initIfaceLcl (mi_semantic_module iface) loc_doc (mi_boot iface) $ do
 
+        dontLeakTheHPT $ do
+
         --      Load the new ModIface into the External Package State
         -- Even home-package interfaces loaded by loadInterface
         --      (which only happens in OneShot mode; in Batch/Interactive
@@ -448,7 +463,7 @@ loadInterface doc_str mod from
         --
         -- The main thing is to add the ModIface to the PIT, but
         -- we also take the
-        --      IfaceDecls, IfaceClsInst, IfaceFamInst, IfaceRules, IfaceVectInfo
+        --      IfaceDecls, IfaceClsInst, IfaceFamInst, IfaceRules,
         -- out of the ModIface and put them into the big EPS pools
 
         -- NB: *first* we do loadDecl, so that the provenance of all the locally-defined
@@ -462,7 +477,6 @@ loadInterface doc_str mod from
         ; new_eps_fam_insts <- mapM tcIfaceFamInst (mi_fam_insts iface)
         ; new_eps_rules     <- tcIfaceRules ignore_prags (mi_rules iface)
         ; new_eps_anns      <- tcIfaceAnnotations (mi_anns iface)
-        ; new_eps_vect_info <- tcIfaceVectInfo mod (mkNameEnv new_eps_decls) (mi_vect_info iface)
         ; new_eps_complete_sigs <- tcIfaceCompleteSigs (mi_complete_sigs iface)
 
         ; let { final_iface = iface {
@@ -490,8 +504,6 @@ loadInterface doc_str mod from
                                                        new_eps_insts,
                   eps_fam_inst_env = extendFamInstEnvList (eps_fam_inst_env eps)
                                                           new_eps_fam_insts,
-                  eps_vect_info    = plusVectInfo (eps_vect_info eps)
-                                                  new_eps_vect_info,
                   eps_ann_env      = extendAnnEnvList (eps_ann_env eps)
                                                       new_eps_anns,
                   eps_mod_fam_inst_env
@@ -508,8 +520,58 @@ loadInterface doc_str mod from
                                                    (length new_eps_insts)
                                                    (length new_eps_rules) }
 
-        ; return (Succeeded final_iface)
+        ; -- invoke plugins
+          res <- withPlugins dflags interfaceLoadAction final_iface
+        ; return (Succeeded res)
     }}}}
+
+
+
+-- Note [HPT space leak] (#15111)
+--
+-- In IfL, we defer some work until it is demanded using forkM, such
+-- as building TyThings from IfaceDecls. These thunks are stored in
+-- the ExternalPackageState, and they might never be poked.  If we're
+-- not careful, these thunks will capture the state of the loaded
+-- program when we read an interface file, and retain all that data
+-- for ever.
+--
+-- Therefore, when loading a package interface file , we use a "clean"
+-- version of the HscEnv with all the data about the currently loaded
+-- program stripped out. Most of the fields can be panics because
+-- we'll never read them, but hsc_HPT needs to be empty because this
+-- interface will cause other interfaces to be loaded recursively, and
+-- when looking up those interfaces we use the HPT in loadInterface.
+-- We know that none of the interfaces below here can refer to
+-- home-package modules however, so it's safe for the HPT to be empty.
+--
+dontLeakTheHPT :: IfL a -> IfL a
+dontLeakTheHPT thing_inside = do
+  let
+    cleanTopEnv HscEnv{..} =
+       let
+         -- wrinkle: when we're typechecking in --backpack mode, the
+         -- instantiation of a signature might reside in the HPT, so
+         -- this case breaks the assumption that EPS interfaces only
+         -- refer to other EPS interfaces. We can detect when we're in
+         -- typechecking-only mode by using hscTarget==HscNothing, and
+         -- in that case we don't empty the HPT.  (admittedly this is
+         -- a bit of a hack, better suggestions welcome). A number of
+         -- tests in testsuite/tests/backpack break without this
+         -- tweak.
+         !hpt | hscTarget hsc_dflags == HscNothing = hsc_HPT
+              | otherwise = emptyHomePackageTable
+       in
+       HscEnv {  hsc_targets      = panic "cleanTopEnv: hsc_targets"
+              ,  hsc_mod_graph    = panic "cleanTopEnv: hsc_mod_graph"
+              ,  hsc_IC           = panic "cleanTopEnv: hsc_IC"
+              ,  hsc_HPT          = hpt
+              , .. }
+
+  updTopEnv cleanTopEnv $ do
+  !_ <- getTopEnv        -- force the updTopEnv
+  thing_inside
+
 
 -- | Returns @True@ if a 'ModIface' comes from an external package.
 -- In this case, we should NOT load it into the EPS; the entities
@@ -926,7 +988,6 @@ initExternalPackageState
         -- Initialise the EPS rule pool with the built-in rules
       eps_mod_fam_inst_env
                            = emptyModuleEnv,
-      eps_vect_info        = noVectInfo,
       eps_complete_matches = emptyUFM,
       eps_ann_env          = emptyAnnEnv,
       eps_stats = EpsStats { n_ifaces_in = 0, n_decls_in = 0, n_decls_out = 0
@@ -986,6 +1047,15 @@ ifaceStats eps
                 Printing interfaces
 *                                                                      *
 ************************************************************************
+
+Note [Name qualification with --show-iface]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In order to disambiguate between identifiers from different modules, we qualify
+all names that don't originate in the current module. In order to keep visual
+noise as low as possible, we keep local names unqualified.
+
+For some background on this choice see trac #15269.
 -}
 
 -- | Read binary interface, and print it out
@@ -996,8 +1066,15 @@ showIface hsc_env filename = do
    iface <- initTcRnIf 's' hsc_env () () $
        readBinIface IgnoreHiWay TraceBinIFaceReading filename
    let dflags = hsc_dflags hsc_env
+       -- See Note [Name qualification with --show-iface]
+       qualifyImportedNames mod _
+           | mod == mi_module iface = NameUnqual
+           | otherwise              = NameNotInScope1
+       print_unqual = QueryQualify qualifyImportedNames
+                                   neverQualifyModules
+                                   neverQualifyPackages
    putLogMsg dflags NoReason SevDump noSrcSpan
-      (defaultDumpStyle dflags) (pprModIface iface)
+      (mkDumpStyle dflags print_unqual) (pprModIface iface)
 
 -- Show a ModIface but don't display details; suitable for ModIfaces stored in
 -- the EPT.
@@ -1018,6 +1095,9 @@ pprModIface iface
         , nest 2 (text "export-list hash:" <+> ppr (mi_exp_hash iface))
         , nest 2 (text "orphan hash:" <+> ppr (mi_orphan_hash iface))
         , nest 2 (text "flag hash:" <+> ppr (mi_flag_hash iface))
+        , nest 2 (text "opt_hash:" <+> ppr (mi_opt_hash iface))
+        , nest 2 (text "hpc_hash:" <+> ppr (mi_hpc_hash iface))
+        , nest 2 (text "plugin_hash:" <+> ppr (mi_plugin_hash iface))
         , nest 2 (text "sig of:" <+> ppr (mi_sig_of iface))
         , nest 2 (text "used TH splices:" <+> ppr (mi_used_th iface))
         , nest 2 (text "where")
@@ -1031,11 +1111,13 @@ pprModIface iface
         , vcat (map ppr (mi_insts iface))
         , vcat (map ppr (mi_fam_insts iface))
         , vcat (map ppr (mi_rules iface))
-        , pprVectInfo (mi_vect_info iface)
         , ppr (mi_warns iface)
         , pprTrustInfo (mi_trust iface)
         , pprTrustPkg (mi_trust_pkg iface)
         , vcat (map ppr (mi_complete_sigs iface))
+        , text "module header:" $$ nest 2 (ppr (mi_doc_hdr iface))
+        , text "declaration docs:" $$ nest 2 (ppr (mi_decl_docs iface))
+        , text "arg docs:" $$ nest 2 (ppr (mi_arg_docs iface))
         ]
   where
     pp_hsc_src HsBootFile = text "[boot]"
@@ -1071,7 +1153,8 @@ pprUsage usage@UsageHomeModule{}
         )
 pprUsage usage@UsageFile{}
   = hsep [text "addDependentFile",
-          doubleQuotes (text (usg_file_path usage))]
+          doubleQuotes (text (usg_file_path usage)),
+          ppr (usg_file_hash usage)]
 pprUsage usage@UsageMergedRequirement{}
   = hsep [text "merged", ppr (usg_mod usage), ppr (usg_mod_hash usage)]
 
@@ -1103,21 +1186,6 @@ pprFixities []    = Outputable.empty
 pprFixities fixes = text "fixities" <+> pprWithCommas pprFix fixes
                   where
                     pprFix (occ,fix) = ppr fix <+> ppr occ
-
-pprVectInfo :: IfaceVectInfo -> SDoc
-pprVectInfo (IfaceVectInfo { ifaceVectInfoVar            = vars
-                           , ifaceVectInfoTyCon          = tycons
-                           , ifaceVectInfoTyConReuse     = tyconsReuse
-                           , ifaceVectInfoParallelVars   = parallelVars
-                           , ifaceVectInfoParallelTyCons = parallelTyCons
-                           }) =
-  vcat
-  [ text "vectorised variables:" <+> hsep (map ppr vars)
-  , text "vectorised tycons:" <+> hsep (map ppr tycons)
-  , text "vectorised reused tycons:" <+> hsep (map ppr tyconsReuse)
-  , text "parallel variables:" <+> hsep (map ppr parallelVars)
-  , text "parallel tycons:" <+> hsep (map ppr parallelTyCons)
-  ]
 
 pprTrustInfo :: IfaceTrustInfo -> SDoc
 pprTrustInfo trust = text "trusted:" <+> ppr trust

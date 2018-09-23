@@ -6,4 +6,4 @@ main = do
   fd <- openFd "/dev/random" ReadOnly Nothing defaultFileFlags
   threadWaitRead fd
   putStrLn "goodbye"
-  
+

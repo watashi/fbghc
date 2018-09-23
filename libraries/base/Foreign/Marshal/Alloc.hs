@@ -1,5 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples #-}
+{-# LANGUAGE NoImplicitPrelude, MagicHash, UnboxedTuples,
+             ScopedTypeVariables #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -79,20 +80,14 @@ import GHC.Base
 -- no longer required.
 --
 {-# INLINE malloc #-}
-malloc :: Storable a => IO (Ptr a)
-malloc  = doMalloc undefined
-  where
-    doMalloc       :: Storable b => b -> IO (Ptr b)
-    doMalloc dummy  = mallocBytes (sizeOf dummy)
+malloc :: forall a . Storable a => IO (Ptr a)
+malloc  = mallocBytes (sizeOf (undefined :: a))
 
 -- |Like 'malloc' but memory is filled with bytes of value zero.
 --
 {-# INLINE calloc #-}
-calloc :: Storable a => IO (Ptr a)
-calloc = doCalloc undefined
-  where
-    doCalloc       :: Storable b => b -> IO (Ptr b)
-    doCalloc dummy = callocBytes (sizeOf dummy)
+calloc :: forall a . Storable a => IO (Ptr a)
+calloc = callocBytes (sizeOf (undefined :: a))
 
 -- |Allocate a block of memory of the given number of bytes.
 -- The block of memory is sufficiently aligned for any of the basic
@@ -117,11 +112,22 @@ callocBytes size = failWhenNULL "calloc" $ _calloc 1 (fromIntegral size)
 -- exception), so the pointer passed to @f@ must /not/ be used after this.
 --
 {-# INLINE alloca #-}
-alloca :: Storable a => (Ptr a -> IO b) -> IO b
-alloca  = doAlloca undefined
-  where
-    doAlloca       :: Storable a' => a' -> (Ptr a' -> IO b') -> IO b'
-    doAlloca dummy  = allocaBytesAligned (sizeOf dummy) (alignment dummy)
+alloca :: forall a b . Storable a => (Ptr a -> IO b) -> IO b
+alloca  =
+  allocaBytesAligned (sizeOf (undefined :: a)) (alignment (undefined :: a))
+
+-- Note [NOINLINE for touch#]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Both allocaBytes and allocaBytesAligned use the touch#, which is notoriously
+-- fragile in the presence of simplification (see #14346). In particular, the
+-- simplifier may drop the continuation containing the touch# if it can prove
+-- that the action passed to allocaBytes will not return. The hack introduced to
+-- fix this for 8.2.2 is to mark allocaBytes as NOINLINE, ensuring that the
+-- simplifier can't see the divergence.
+--
+-- These can be removed once #14375 is fixed, which suggests that we instead do
+-- away with touch# in favor of a primitive that will capture the scoping left
+-- implicit in the case of touch#.
 
 -- |@'allocaBytes' n f@ executes the computation @f@, passing as argument
 -- a pointer to a temporarily allocated block of memory of @n@ bytes.
@@ -141,6 +147,8 @@ allocaBytes (I# size) action = IO $ \ s0 ->
      case touch# barr# s3 of { s4 ->
      (# s4, r #)
   }}}}}
+-- See Note [NOINLINE for touch#]
+{-# NOINLINE allocaBytes #-}
 
 allocaBytesAligned :: Int -> Int -> (Ptr a -> IO b) -> IO b
 allocaBytesAligned (I# size) (I# align) action = IO $ \ s0 ->
@@ -152,6 +160,8 @@ allocaBytesAligned (I# size) (I# align) action = IO $ \ s0 ->
      case touch# barr# s3 of { s4 ->
      (# s4, r #)
   }}}}}
+-- See Note [NOINLINE for touch#]
+{-# NOINLINE allocaBytesAligned #-}
 
 -- |Resize a memory area that was allocated with 'malloc' or 'mallocBytes'
 -- to the size needed to store values of type @b@.  The returned pointer
@@ -163,14 +173,10 @@ allocaBytesAligned (I# size) (I# align) action = IO $ \ s0 ->
 -- If the argument to 'realloc' is 'nullPtr', 'realloc' behaves like
 -- 'malloc'.
 --
-realloc :: Storable b => Ptr a -> IO (Ptr b)
-realloc  = doRealloc undefined
+realloc :: forall a b . Storable b => Ptr a -> IO (Ptr b)
+realloc ptr = failWhenNULL "realloc" (_realloc ptr size)
   where
-    doRealloc           :: Storable b' => b' -> Ptr a' -> IO (Ptr b')
-    doRealloc dummy ptr  = let
-                             size = fromIntegral (sizeOf dummy)
-                           in
-                           failWhenNULL "realloc" (_realloc ptr size)
+    size = fromIntegral (sizeOf (undefined :: b))
 
 -- |Resize a memory area that was allocated with 'malloc' or 'mallocBytes'
 -- to the given size.  The returned pointer may refer to an entirely

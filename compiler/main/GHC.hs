@@ -132,6 +132,9 @@ module GHC (
         ForeignHValue,
         compileExprRemote, compileParsedExprRemote,
 
+        -- ** Docs
+        getDocs, GetDocsFailure(..),
+
         -- ** Other
         runTcInteractive,   -- Desired by some clients (Trac #8878)
         isStmt, hasImport, isImport, isDecl,
@@ -283,6 +286,8 @@ module GHC (
 
 #include "HsVersions.h"
 
+import GhcPrelude hiding (init)
+
 import ByteCodeTypes
 import InteractiveEval
 import InteractiveEvalTypes
@@ -295,7 +300,8 @@ import HscMain
 import GhcMake
 import DriverPipeline   ( compileOne' )
 import GhcMonad
-import TcRnMonad        ( finalSafeMode, fixSafeInstances )
+import TcRnMonad        ( finalSafeMode, fixSafeInstances, initIfaceTcRn )
+import LoadIface        ( loadSysInterface )
 import TcRnTypes
 import Packages
 import NameSet
@@ -321,6 +327,7 @@ import HscTypes
 import CmdLineParser
 import DynFlags hiding (WarnReason(..))
 import SysTools
+import SysTools.BaseDir
 import Annotations
 import Module
 import Panic
@@ -361,8 +368,6 @@ import System.Exit      ( exitWith, ExitCode(..) )
 import Exception
 import Data.IORef
 import System.FilePath
-import System.IO
-import Prelude hiding (init)
 
 
 -- %************************************************************************
@@ -472,7 +477,6 @@ withCleanupSession ghc = ghc `gfinally` cleanup
           cleanTempFiles dflags
           cleanTempDirs dflags
           stopIServ hsc_env -- shut down the IServ
-          log_finaliser dflags dflags
           --  exceptions will be blocked while we clean the temporary files,
           -- so there shouldn't be any difficulty if we receive further
           -- signals.
@@ -492,8 +496,10 @@ withCleanupSession ghc = ghc `gfinally` cleanup
 initGhcMonad :: GhcMonad m => Maybe FilePath -> m ()
 initGhcMonad mb_top_dir
   = do { env <- liftIO $
-                do { mySettings <- initSysTools mb_top_dir
-                   ; dflags <- initDynFlags (defaultDynFlags mySettings)
+                do { top_dir <- findTopDir mb_top_dir
+                   ; mySettings <- initSysTools top_dir
+                   ; myLlvmConfig <- initLlvmConfig top_dir
+                   ; dflags <- initDynFlags (defaultDynFlags mySettings myLlvmConfig)
                    ; checkBrokenTablesNextToCode dflags
                    ; setUnsafeGlobalDynFlags dflags
                       -- c.f. DynFlags.parseDynamicFlagsFull, which
@@ -591,12 +597,11 @@ setProgramDynFlags dflags = setProgramDynFlags_ True dflags
 -- | Set the action taken when the compiler produces a message.  This
 -- can also be accomplished using 'setProgramDynFlags', but using
 -- 'setLogAction' avoids invalidating the cached module graph.
-setLogAction :: GhcMonad m => LogAction -> LogFinaliser -> m ()
-setLogAction action finaliser = do
+setLogAction :: GhcMonad m => LogAction -> m ()
+setLogAction action = do
   dflags' <- getProgramDynFlags
   void $ setProgramDynFlags_ False $
-    dflags' { log_action = action
-            , log_finaliser = finaliser }
+    dflags' { log_action = action }
 
 setProgramDynFlags_ :: GhcMonad m => Bool -> DynFlags -> m [InstalledUnitId]
 setProgramDynFlags_ invalidate_needed dflags = do
@@ -672,6 +677,8 @@ checkNewDynFlags dflags = do
 
 checkNewInteractiveDynFlags :: MonadIO m => DynFlags -> m DynFlags
 checkNewInteractiveDynFlags dflags0 = do
+  -- We currently don't support use of StaticPointers in expressions entered on
+  -- the REPL. See #12356.
   dflags1 <-
       if xopt LangExt.StaticPointers dflags0
       then do liftIO $ printOrThrowWarnings dflags0 $ listToBag
@@ -847,7 +854,7 @@ instance DesugaredMod DesugaredModule where
   coreModule m = dm_core_module m
 
 type ParsedSource      = Located (HsModule GhcPs)
-type RenamedSource     = (HsGroup GhcRn, [LImportDecl GhcRn], Maybe [LIE GhcRn],
+type RenamedSource     = (HsGroup GhcRn, [LImportDecl GhcRn], Maybe [(LIE GhcRn, Avails)],
                           Maybe LHsDocString)
 type TypecheckedSource = LHsBinds GhcTc
 
@@ -1031,16 +1038,19 @@ compileCore simplify fn = do
      Just modSummary -> do
        -- Now we have the module name;
        -- parse, typecheck and desugar the module
-       mod_guts <- coreModule `fmap`
-                      -- TODO: space leaky: call hsc* directly?
-                      (desugarModule =<< typecheckModule =<< parseModule modSummary)
+       (tcg, mod_guts) <- -- TODO: space leaky: call hsc* directly?
+         do tm <- typecheckModule =<< parseModule modSummary
+            let tcg = fst (tm_internals tm)
+            (,) tcg . coreModule <$> desugarModule tm
        liftM (gutsToCoreModule (mg_safe_haskell mod_guts)) $
          if simplify
           then do
              -- If simplify is true: simplify (hscSimplify), then tidy
              -- (tidyProgram).
              hsc_env <- getSession
-             simpl_guts <- liftIO $ hscSimplify hsc_env mod_guts
+             simpl_guts <- liftIO $ do
+               plugins <- readIORef (tcg_th_coreplugins tcg)
+               hscSimplify hsc_env plugins mod_guts
              tidy_guts <- liftIO $ tidyProgram hsc_env simpl_guts
              return $ Left tidy_guts
           else
@@ -1240,12 +1250,22 @@ getGRE = withSession $ \hsc_env-> return $ ic_rn_gbl_env (hsc_IC hsc_env)
 -- by 'Name'. Each name's lists will contain every instance in which that name
 -- is mentioned in the instance head.
 getNameToInstancesIndex :: GhcMonad m
-  => m (Messages, Maybe (NameEnv ([ClsInst], [FamInst])))
-getNameToInstancesIndex = do
+  => [Module]        -- ^ visible modules. An orphan instance will be returned
+                     -- if it is visible from at least one module in the list.
+  -> Maybe [Module]  -- ^ modules to load. If this is not specified, we load
+                     -- modules for everything that is in scope unqualified.
+  -> m (Messages, Maybe (NameEnv ([ClsInst], [FamInst])))
+getNameToInstancesIndex visible_mods mods_to_load = do
   hsc_env <- getSession
   liftIO $ runTcInteractive hsc_env $
-    do { loadUnqualIfaces hsc_env (hsc_IC hsc_env)
-       ; InstEnvs {ie_global, ie_local, ie_visible} <- tcGetInstEnvs
+    do { case mods_to_load of
+           Nothing -> loadUnqualIfaces hsc_env (hsc_IC hsc_env)
+           Just mods ->
+             let doc = text "Need interface for reporting instances in scope"
+             in initIfaceTcRn $ mapM_ (loadSysInterface doc) mods
+
+       ; InstEnvs {ie_global, ie_local} <- tcGetInstEnvs
+       ; let visible_mods' = mkModuleSet visible_mods
        ; (pkg_fie, home_fie) <- tcGetFamInstEnvs
        -- We use Data.Sequence.Seq because we are creating left associated
        -- mappends.
@@ -1253,7 +1273,7 @@ getNameToInstancesIndex = do
        ; let cls_index = Map.fromListWith mappend
                  [ (n, Seq.singleton ispec)
                  | ispec <- instEnvElts ie_local ++ instEnvElts ie_global
-                 , instIsVisible ie_visible ispec
+                 , instIsVisible visible_mods' ispec
                  , n <- nameSetElemsStable $ orphNamesOfClsInst ispec
                  ]
        ; let fam_index = Map.fromListWith mappend
@@ -1301,7 +1321,6 @@ pprParenSymName a = parenSymOcc (getOccName a) (ppr (getName a))
 
 -- ----------------------------------------------------------------------------
 
-#if 0
 
 -- ToDo:
 --   - Data and Typeable instances for HsSyn.
@@ -1315,7 +1334,6 @@ pprParenSymName a = parenSymOcc (getOccName a) (ppr (getName a))
 -- :browse will use either lm_toplev or inspect lm_interface, depending
 -- on whether the module is interpreted or not.
 
-#endif
 
 -- Extract the filename, stringbuffer content and dynflags associed to a module
 --

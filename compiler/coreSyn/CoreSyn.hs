@@ -5,6 +5,7 @@
 
 {-# LANGUAGE CPP, DeriveDataTypeable, FlexibleContexts #-}
 {-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE BangPatterns #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -18,7 +19,7 @@ module CoreSyn (
         InId, InBind, InExpr, InAlt, InArg, InType, InKind,
                InBndr, InVar, InCoercion, InTyVar, InCoVar,
         OutId, OutBind, OutExpr, OutAlt, OutArg, OutType, OutKind,
-               OutBndr, OutVar, OutCoercion, OutTyVar, OutCoVar,
+               OutBndr, OutVar, OutCoercion, OutTyVar, OutCoVar, MOutCoercion,
 
         -- ** 'Expr' construction
         mkLet, mkLets, mkLetNonRec, mkLetRec, mkLams,
@@ -40,12 +41,12 @@ module CoreSyn (
         bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts,
         collectBinders, collectTyBinders, collectTyAndValBinders,
         collectNBinders,
-        collectArgs, collectArgsTicks, flattenBinds,
+        collectArgs, stripNArgs, collectArgsTicks, flattenBinds,
 
         exprToType, exprToCoercion_maybe,
         applyTypeToArg,
 
-        isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
+        isValArg, isTypeArg, isCoArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
 
         -- * Tick-related functions
@@ -77,7 +78,7 @@ module CoreSyn (
         collectAnnArgs, collectAnnArgsTicks,
 
         -- ** Operations on annotations
-        deAnnotate, deAnnotate', deAnnAlt,
+        deAnnotate, deAnnotate', deAnnAlt, deAnnBind,
         collectAnnBndrs, collectNAnnBndrs,
 
         -- * Orphanhood
@@ -92,12 +93,11 @@ module CoreSyn (
         ruleArity, ruleName, ruleIdName, ruleActivation,
         setRuleIdName, ruleModule,
         isBuiltinRule, isLocalRule, isAutoRule,
-
-        -- * Core vectorisation declarations data type
-        CoreVect(..)
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import CostCentre
 import VarEnv( InScopeSet )
@@ -110,7 +110,6 @@ import NameEnv( NameEnv, emptyNameEnv )
 import Literal
 import DataCon
 import Module
-import TyCon
 import BasicTypes
 import DynFlags
 import Outputable
@@ -174,6 +173,7 @@ These data types are the heart of the compiler
 -- The language consists of the following elements:
 --
 -- *  Variables
+--    See Note [Variable occurrences in Core]
 --
 -- *  Primitive literals
 --
@@ -188,29 +188,10 @@ These data types are the heart of the compiler
 --    this corresponds to allocating a thunk for the things
 --    bound and then executing the sub-expression.
 --
---    #top_level_invariant#
---    #letrec_invariant#
---
---    The right hand sides of all top-level and recursive @let@s
---    /must/ be of lifted type (see "Type#type_classification" for
---    the meaning of /lifted/ vs. /unlifted/). There is one exception
---    to this rule, top-level @let@s are allowed to bind primitive
---    string literals, see Note [CoreSyn top-level string literals].
---
+--    See Note [CoreSyn letrec invariant]
 --    See Note [CoreSyn let/app invariant]
 --    See Note [Levity polymorphism invariants]
---
---    #type_let#
---    We allow a /non-recursive/ let to bind a type variable, thus:
---
---    > Let (NonRec tv (Type ty)) body
---
---    This can be very convenient for postponing type substitutions until
---    the next run of the simplifier.
---
---    At the moment, the rest of the compiler only deals with type-let
---    in a Let expression, rather than at top level.  We may want to revist
---    this choice.
+--    See Note [CoreSyn type and coercion invariant]
 --
 -- *  Case expression. Operationally this corresponds to evaluating
 --    the scrutinee (expression examined) to weak head normal form
@@ -311,16 +292,17 @@ data AltCon
 -- This instance is a bit shady. It can only be used to compare AltCons for
 -- a single type constructor. Fortunately, it seems quite unlikely that we'll
 -- ever need to compare AltCons for different type constructors.
+-- The instance adheres to the order described in [CoreSyn case invariants]
 instance Ord AltCon where
   compare (DataAlt con1) (DataAlt con2) =
     ASSERT( dataConTyCon con1 == dataConTyCon con2 )
     compare (dataConTag con1) (dataConTag con2)
-  compare (DataAlt _) _ = LT
-  compare _ (DataAlt _) = GT
+  compare (DataAlt _) _ = GT
+  compare _ (DataAlt _) = LT
   compare (LitAlt l1) (LitAlt l2) = compare l1 l2
-  compare (LitAlt _) DEFAULT = LT
+  compare (LitAlt _) DEFAULT = GT
   compare DEFAULT DEFAULT = EQ
-  compare DEFAULT _ = GT
+  compare DEFAULT _ = LT
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 
@@ -344,7 +326,7 @@ In particular, scrutinee variables `x` in expressions of the form
 "wild_". These "wild" variables may appear in the body of the
 case-expression, and further, may be shadowed within the body.
 
-So the Unique in an Var is not really unique at all.  Still, it's very
+So the Unique in a Var is not really unique at all.  Still, it's very
 useful to give a constant-time equality/ordering for Vars, and to give
 a key that can be used to make sets of Vars (VarSet), or mappings from
 Vars to other things (VarEnv).   Moreover, if you do want to eliminate
@@ -371,13 +353,25 @@ PrelRules for the rationale for this restriction.
 
 -------------------------- CoreSyn INVARIANTS ---------------------------
 
-Note [CoreSyn top-level invariant]
+Note [Variable occurrences in Core]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-See #toplevel_invariant#
+Variable /occurrences/ are never CoVars, though /bindings/ can be.
+All CoVars appear in Coercions.
+
+For example
+  \(c :: Age~#Int) (d::Int). d |> (sym c)
+Here 'c' is a CoVar, which is lambda-bound, but it /occurs/ in
+a Coercion, (sym c).
 
 Note [CoreSyn letrec invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-See #letrec_invariant#
+The right hand sides of all top-level and recursive @let@s
+/must/ be of lifted type (see "Type#type_classification" for
+the meaning of /lifted/ vs. /unlifted/).
+
+There is one exception to this rule, top-level @let@s are
+allowed to bind primitive string literals: see
+Note [CoreSyn top-level string literals].
 
 Note [CoreSyn top-level string literals]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -398,10 +392,10 @@ The solution is simply to allow top-level unlifted binders. We can't allow
 arbitrary unlifted expression at the top-level though, unlifted binders cannot
 be thunks, so we just allow string literals.
 
-It is important to note that top-level primitive string literals cannot be
-wrapped in Ticks, as is otherwise done with lifted bindings. CoreToStg expects
-to see just a plain (Lit (MachStr ...)) expression on the RHS of primitive
-string bindings; anything else and things break. CoreLint checks this invariant.
+We allow the top-level primitive string literals to be wrapped in Ticks
+in the same way they can be wrapped when nested in an expression.
+CoreToSTG currently discards Ticks around top-level primitive string literals.
+See Trac #14779.
 
 Also see Note [Compilation plan for top-level string literals].
 
@@ -411,7 +405,7 @@ Here is a summary on how top-level string literals are handled by various
 parts of the compilation pipeline.
 
 * In the source language, there is no way to bind a primitive string literal
-  at the top leve.
+  at the top level.
 
 * In Core, we have a special rule that permits top-level Addr# bindings. See
   Note [CoreSyn top-level string literals]. Core-to-core passes may introduce
@@ -450,6 +444,27 @@ which will generate a @case@ if necessary
 
 The let/app invariant is initially enforced by mkCoreLet and mkCoreApp in
 coreSyn/MkCore.
+
+Note [CoreSyn type and coercion invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We allow a /non-recursive/, /non-top-level/ let to bind type and
+coercion variables.  These can be very convenient for postponing type
+substitutions until the next run of the simplifier.
+
+* A type variable binding must have a RHS of (Type ty)
+
+* A coercion variable binding must have a RHS of (Coercion co)
+
+  It is possible to have terms that return a coercion, but we use
+  case-binding for those; e.g.
+     case (eq_sel d) of (co :: a ~# b) -> blah
+  where eq_sel :: (a~b) -> (a~#b)
+
+  Or even even
+      case (df @Int) of (co :: a ~# b) -> blah
+  Which is very exotic, and I think never encountered; but see
+  Note [Equality superclasses in quantified constraints]
+  in TcCanonical
 
 Note [CoreSyn case invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -703,33 +718,64 @@ polymorphic in its return type. That is, if its type is
   forall a1 ... ak. t1 -> ... -> tn -> r
 
 where its join arity is k+n, none of the type parameters ai may occur free in r.
-The most direct explanation is that given
 
-  join j @a1 ... @ak x1 ... xn = e1 in e2
+In some way, this falls out of the fact that given
 
-our typing rules require `e1` and `e2` to have the same type. Therefore the type
-of `e1`---the return type of the join point---must be the same as the type of
-e2. Since the type variables aren't bound in `e2`, its type can't include them,
-and thus neither can the type of `e1`.
+  join
+     j @a1 ... @ak x1 ... xn = e1
+  in e2
 
-There's a deeper explanation in terms of the sequent calculus in Section 5.3 of
-a previous paper:
+then all calls to `j` are in tail-call positions of `e`, and expressions in
+tail-call positions in `e` have the same type as `e`.
+Therefore the type of `e1` -- the return type of the join point -- must be the
+same as the type of e2.
+Since the type variables aren't bound in `e2`, its type can't include them, and
+thus neither can the type of `e1`.
 
-  Paul Downen, Luke Maurer, Zena Ariola, and Simon Peyton Jones. "Sequent
-  calculus as a compiler intermediate language." ICFP'16.
+This unfortunately prevents the `go` in the following code from being a
+join-point:
 
-  https://www.microsoft.com/en-us/research/wp-content/uploads/2016/04/sequent-calculus-icfp16.pdf
+  iter :: forall a. Int -> (a -> a) -> a -> a
+  iter @a n f x = go @a n f x
+    where
+      go :: forall a. Int -> (a -> a) -> a -> a
+      go @a 0 _ x = x
+      go @a n f x = go @a (n-1) f (f x)
 
-The quick version: Consider the CPS term (the paper uses the sequent calculus,
-but we can translate readily):
+In this case, a static argument transformation would fix that (see
+ticket #14620):
 
-  \k -> join j @a1 ... @ak x1 ... xn = e1 k in e2 k
+  iter :: forall a. Int -> (a -> a) -> a -> a
+  iter @a n f x = go' @a n f x
+    where
+      go' :: Int -> (a -> a) -> a -> a
+      go' 0 _ x = x
+      go' n f x = go' (n-1) f (f x)
 
-Since `j` is a join point, it doesn't bind a continuation variable but reuses
-the variable `k` from the context. But the parameters `ai` are not in `k`'s
-scope, and `k`'s type determines the return type of `j`; thus the `ai`s don't
-appear in the return type of `j`. (Also, since `e1` and `e2` are passed the same
-continuation, they must have the same type; hence the direct explanation above.)
+In general, loopification could be employed to do that (see #14068.)
+
+Can we simply drop the requirement, and allow `go` to be a join-point? We
+could, and it would work. But we could not longer apply the case-of-join-point
+transformation universally. This transformation would do:
+
+  case (join go @a n f x = case n of 0 -> x
+                                     n -> go @a (n-1) f (f x)
+        in go @Bool n neg True) of
+    True -> e1; False -> e2
+
+ ===>
+
+  join go @a n f x = case n of 0 -> case x of True -> e1; False -> e2
+                          n -> go @a (n-1) f (f x)
+  in go @Bool n neg True
+
+but that is ill-typed, as `x` is type `a`, not `Bool`.
+
+
+This also justifies why we do not consider the `e` in `e |> co` to be in
+tail position: A cast changes the type, but the type must be the same. But
+operationally, casts are vacuous, so this is a bit unfortunate! See #14610 for
+ideas how to fix this.
 
 ************************************************************************
 *                                                                      *
@@ -759,6 +805,7 @@ type OutBind     = CoreBind
 type OutExpr     = CoreExpr
 type OutAlt      = CoreAlt
 type OutArg      = CoreArg
+type MOutCoercion = MCoercion
 
 
 {- *********************************************************************
@@ -856,7 +903,7 @@ data TickishScoping =
 
     -- | Soft scoping: We want all code that is covered to stay
     -- covered.  Note that this scope type does not forbid
-    -- transformations from happening, as as long as all results of
+    -- transformations from happening, as long as all results of
     -- the transformations are still covered by this tick or a copy of
     -- it. For example
     --
@@ -1266,23 +1313,6 @@ isLocalRule = ru_local
 -- | Set the 'Name' of the 'Id.Id' at the head of the rule left hand side
 setRuleIdName :: Name -> CoreRule -> CoreRule
 setRuleIdName nm ru = ru { ru_fn = nm }
-
-{-
-************************************************************************
-*                                                                      *
-\subsection{Vectorisation declarations}
-*                                                                      *
-************************************************************************
-
-Representation of desugared vectorisation declarations that are fed to the vectoriser (via
-'ModGuts').
--}
-
-data CoreVect = Vect      Id   CoreExpr
-              | NoVect    Id
-              | VectType  Bool TyCon (Maybe TyCon)
-              | VectClass TyCon                     -- class tycon
-              | VectInst  Id                        -- instance dfun (always SCALAR)  !!!FIXME: should be superfluous now
 
 {-
 ************************************************************************
@@ -1800,12 +1830,12 @@ mkVarApps :: Expr b -> [Var] -> Expr b
 -- use 'MkCore.mkCoreConApps' if possible
 mkConApp      :: DataCon -> [Arg b] -> Expr b
 
-mkApps    f args = foldl App                       f args
-mkCoApps  f args = foldl (\ e a -> App e (Coercion a)) f args
-mkVarApps f vars = foldl (\ e a -> App e (varToCoreExpr a)) f vars
+mkApps    f args = foldl' App                       f args
+mkCoApps  f args = foldl' (\ e a -> App e (Coercion a)) f args
+mkVarApps f vars = foldl' (\ e a -> App e (varToCoreExpr a)) f vars
 mkConApp con args = mkApps (Var (dataConWorkId con)) args
 
-mkTyApps  f args = foldl (\ e a -> App e (mkTyArg a)) f args
+mkTyApps  f args = foldl' (\ e a -> App e (mkTyArg a)) f args
 
 mkConApp2 :: DataCon -> [Type] -> [Var] -> Expr b
 mkConApp2 con tys arg_ids = Var (dataConWorkId con)
@@ -2021,7 +2051,7 @@ collectNBinders orig_n orig_expr
     go n bs (Lam b e) = go (n-1) (b:bs) e
     go _ _  _         = pprPanic "collectNBinders" $ int orig_n
 
--- | Takes a nested application expression and returns the the function
+-- | Takes a nested application expression and returns the function
 -- being applied and the arguments to which it is applied
 collectArgs :: Expr b -> (Expr b, [Arg b])
 collectArgs expr
@@ -2029,6 +2059,16 @@ collectArgs expr
   where
     go (App f a) as = go f (a:as)
     go e         as = (e, as)
+
+-- | Attempt to remove the last N arguments of a function call.
+-- Strip off any ticks or coercions encountered along the way and any
+-- at the end.
+stripNArgs :: Word -> Expr a -> Maybe (Expr a)
+stripNArgs !n (Tick _ e) = stripNArgs n e
+stripNArgs n (Cast f _) = stripNArgs n f
+stripNArgs 0 e = Just e
+stripNArgs n (App f _) = stripNArgs (n - 1) f
+stripNArgs _ _ = Nothing
 
 -- | Like @collectArgs@, but also collects looks through floatable
 -- ticks if it means that we can find more arguments.
@@ -2077,6 +2117,12 @@ isTyCoArg (Type {})     = True
 isTyCoArg (Coercion {}) = True
 isTyCoArg _             = False
 
+-- | Returns @True@ iff the expression is a 'Coercion'
+-- expression at its top level
+isCoArg :: Expr b -> Bool
+isCoArg (Coercion {}) = True
+isCoArg _             = False
+
 -- | Returns @True@ iff the expression is a 'Type' expression at its
 -- top level.  Note this does NOT include 'Coercion's.
 isTypeArg :: Expr b -> Bool
@@ -2124,7 +2170,7 @@ data AnnBind bndr annot
   = AnnNonRec bndr (AnnExpr bndr annot)
   | AnnRec    [(bndr, AnnExpr bndr annot)]
 
--- | Takes a nested application expression and returns the the function
+-- | Takes a nested application expression and returns the function
 -- being applied and the arguments to which it is applied
 collectAnnArgs :: AnnExpr b a -> (AnnExpr b a, [AnnExpr b a])
 collectAnnArgs expr
@@ -2158,15 +2204,15 @@ deAnnotate' (AnnTick tick body)   = Tick tick (deAnnotate body)
 
 deAnnotate' (AnnLet bind body)
   = Let (deAnnBind bind) (deAnnotate body)
-  where
-    deAnnBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
-    deAnnBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
-
 deAnnotate' (AnnCase scrut v t alts)
   = Case (deAnnotate scrut) v t (map deAnnAlt alts)
 
 deAnnAlt :: AnnAlt bndr annot -> Alt bndr
 deAnnAlt (con,args,rhs) = (con,args,deAnnotate rhs)
+
+deAnnBind  :: AnnBind b annot -> Bind b
+deAnnBind (AnnNonRec var rhs) = NonRec var (deAnnotate rhs)
+deAnnBind (AnnRec pairs) = Rec [(v,deAnnotate rhs) | (v,rhs) <- pairs]
 
 -- | As 'collectBinders' but for 'AnnExpr' rather than 'Expr'
 collectAnnBndrs :: AnnExpr bndr annot -> ([bndr], AnnExpr bndr annot)

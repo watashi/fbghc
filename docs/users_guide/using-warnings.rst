@@ -20,23 +20,32 @@ generally likely to indicate bugs in your program. These are:
     * :ghc-flag:`-Wdeprecations`
     * :ghc-flag:`-Wdeprecated-flags`
     * :ghc-flag:`-Wunrecognised-pragmas`
-    * :ghc-flag:`-Wduplicate-constraints`
     * :ghc-flag:`-Wduplicate-exports`
     * :ghc-flag:`-Woverflowed-literals`
     * :ghc-flag:`-Wempty-enumerations`
     * :ghc-flag:`-Wmissing-fields`
     * :ghc-flag:`-Wmissing-methods`
     * :ghc-flag:`-Wwrong-do-bind`
+    * :ghc-flag:`-Wsimplifiable-class-constraints`
+    * :ghc-flag:`-Wtyped-holes`
+    * :ghc-flag:`-Wdeferred-type-errors`
+    * :ghc-flag:`-Wpartial-type-signatures`
     * :ghc-flag:`-Wunsupported-calling-conventions`
     * :ghc-flag:`-Wdodgy-foreign-imports`
     * :ghc-flag:`-Winline-rule-shadowing`
     * :ghc-flag:`-Wunsupported-llvm-version`
     * :ghc-flag:`-Wtabs`
     * :ghc-flag:`-Wunrecognised-warning-flags`
+    * :ghc-flag:`-Winaccessible-code`
+    * :ghc-flag:`-Wstar-binder`
 
 The following flags are simple ways to select standard "packages" of warnings:
 
 .. ghc-flag:: -W
+    :shortdesc: enable normal warnings
+    :type: dynamic
+    :reverse: -w
+    :category:
 
     Provides the standard warnings plus
 
@@ -53,6 +62,10 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Wunbanged-strict-patterns`
 
 .. ghc-flag:: -Wall
+    :shortdesc: enable almost all warnings (details in :ref:`options-sanity`)
+    :type: dynamic
+    :reverse: -w
+    :category:
 
     Turns on all warning options that indicate potentially suspicious
     code. The warnings that are *not* enabled by :ghc-flag:`-Wall` are
@@ -66,12 +79,28 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Wimplicit-prelude`
         * :ghc-flag:`-Wmissing-local-signatures`
         * :ghc-flag:`-Wmissing-exported-signatures`
+        * :ghc-flag:`-Wmissing-export-lists`
         * :ghc-flag:`-Wmissing-import-lists`
         * :ghc-flag:`-Wmissing-home-modules`
         * :ghc-flag:`-Widentities`
         * :ghc-flag:`-Wredundant-constraints`
+        * :ghc-flag:`-Wpartial-fields`
+        * :ghc-flag:`-Wmissed-specialisations`
+        * :ghc-flag:`-Wall-missed-specialisations`
+
+.. ghc-flag:: -Weverything
+    :shortdesc: enable all warnings supported by GHC
+    :type: dynamic
+    :category:
+
+    Turns on every single warning supported by the compiler.
 
 .. ghc-flag:: -Wcompat
+    :shortdesc: enable future compatibility warnings
+        (details in :ref:`options-sanity`)
+    :type: dynamic
+    :reverse: -Wno-compat
+    :category:
 
     Turns on warnings that will be enabled by default in the future, but remain
     off in normal compilations for the time being. This allows library authors
@@ -86,12 +115,20 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Wmissing-monadfail-instances`
         * :ghc-flag:`-Wsemigroup`
         * :ghc-flag:`-Wnoncanonical-monoid-instances`
+        * :ghc-flag:`-Wimplicit-kind-vars`
 
 .. ghc-flag:: -Wno-compat
+    :shortdesc: Disables all warnings enabled by :ghc-flag:`-Wcompat`.
+    :type: dynamic
+    :reverse: -Wcompat
+    :category:
 
     Disables all warnings enabled by :ghc-flag:`-Wcompat`.
 
 .. ghc-flag:: -w
+    :shortdesc: disable all warnings
+    :type: dynamic
+    :category:
 
     Turns off all warnings, including the standard ones and those that
     :ghc-flag:`-Wall` doesn't enable.
@@ -100,11 +137,19 @@ These options control which warnings are considered fatal and cause compilation
 to abort.
 
 .. ghc-flag:: -Werror
+    :shortdesc: make warnings fatal
+    :type: dynamic
+    :reverse: -Wwarn
+    :category:
 
     Makes any warning into a fatal error. Useful so that you don't miss
     warnings when doing batch compilation.
 
 .. ghc-flag:: -Werror=⟨wflag⟩
+    :shortdesc: make a specific warning fatal
+    :type: dynamic
+    :reverse: -Wwarn=⟨wflag⟩
+    :category:
     :noindex:
 
     :implies: ``-W<wflag>``
@@ -112,12 +157,23 @@ to abort.
     Makes a specific warning into a fatal error. The warning will be enabled if
     it hasn't been enabled yet.
 
+    ``-Werror=compat`` has the same effect as ``-Werror=...`` for each warning
+    flag in the :ghc-flag:`-Wcompat` option group.
+
 .. ghc-flag:: -Wwarn
+    :shortdesc: make warnings non-fatal
+    :type: dynamic
+    :reverse: -Werror
+    :category:
 
     Warnings are treated only as warnings, not as errors. This is the
     default, but can be useful to negate a :ghc-flag:`-Werror` flag.
 
 .. ghc-flag:: -Wwarn=⟨wflag⟩
+    :shortdesc: make a specific warning non-fatal
+    :type: dynamic
+    :reverse: -Werror=⟨wflag⟩
+    :category:
     :noindex:
 
     Causes a specific warning to be treated as normal warning, not fatal error.
@@ -125,10 +181,17 @@ to abort.
     Note that it doesn't fully negate the effects of ``-Werror=<wflag>`` - the
     warning will still be enabled.
 
+    ``-Wwarn=compat`` has the same effect as ``-Wwarn=...`` for each warning
+    flag in the :ghc-flag:`-Wcompat` option group.
+
 When a warning is emitted, the specific warning flag which controls
 it is shown.
 
 .. ghc-flag:: -fshow-warning-groups
+    :shortdesc: show which group an emitted warning belongs to.
+    :type: dynamic
+    :reverse: -fno-show-warning-groups
+    :category:
 
     When showing which flag controls a warning, also show the
     respective warning group flag(s) that warning is contained in.
@@ -142,6 +205,11 @@ all these warnings can still be controlled with ``-f(no-)warn-*`` instead
 of ``-W(no-)*``.
 
 .. ghc-flag:: -Wunrecognised-warning-flags
+    :shortdesc: throw a warning when an unreconised ``-W...`` flag is
+        encountered on the command line.
+    :type: dynamic
+    :reverse: -Wno-unrecognised-warning-flags
+    :category:
 
     Enables warnings when the compiler encounters a ``-W...`` flag that is not
     recognised.
@@ -149,6 +217,12 @@ of ``-W(no-)*``.
     This warning is on by default.
 
 .. ghc-flag:: -Wtyped-holes
+    :shortdesc: Report warnings when :ref:`typed hole <typed-holes>` errors are
+        :ref:`deferred until runtime <defer-type-errors>`. See
+        :ghc-flag:`-fdefer-typed-holes`.
+    :type: dynamic
+    :reverse: -Wno-typed-holes
+    :category:
 
     Determines whether the compiler reports typed holes warnings. Has no
     effect unless typed holes errors are deferred until runtime. See
@@ -156,7 +230,13 @@ of ``-W(no-)*``.
 
     This warning is on by default.
 
-.. ghc-flag:: -Wtype-errors
+.. ghc-flag:: -Wdeferred-type-errors
+    :shortdesc: Report warnings when :ref:`deferred type errors
+        <defer-type-errors>` are enabled. This option is enabled by
+        default. See :ghc-flag:`-fdefer-type-errors`.
+    :type: dynamic
+    :reverse: -Wno-deferred-type-errors
+    :category:
 
     Causes a warning to be reported when a type error is deferred until
     runtime. See :ref:`defer-type-errors`
@@ -164,8 +244,16 @@ of ``-W(no-)*``.
     This warning is on by default.
 
 .. ghc-flag:: -fdefer-type-errors
+    :shortdesc: Turn type errors into warnings, :ref:`deferring the error until
+        runtime <defer-type-errors>`. Implies
+        :ghc-flag:`-fdefer-typed-holes` and
+        :ghc-flag:`-fdefer-out-of-scope-variables`.
+        See also :ghc-flag:`-Wdeferred-type-errors`
+    :type: dynamic
+    :reverse: -fno-defer-type-errors
+    :category:
 
-    :implies: :ghc-flag:`-fdefer-typed-holes`
+    :implies: :ghc-flag:`-fdefer-typed-holes`, :ghc-flag:`-fdefer-out-of-scope-variables`
 
     Defer as many type errors as possible until runtime. At compile time
     you get a warning (instead of an error). At runtime, if you use a
@@ -174,6 +262,13 @@ of ``-W(no-)*``.
     :ref:`defer-type-errors`
 
 .. ghc-flag:: -fdefer-typed-holes
+    :shortdesc: Convert :ref:`typed hole <typed-holes>` errors into warnings,
+        :ref:`deferring the error until runtime <defer-type-errors>`.
+        Implied by :ghc-flag:`-fdefer-type-errors`.
+        See also :ghc-flag:`-Wtyped-holes`.
+    :type: dynamic
+    :reverse: -fno-defer-typed-holes
+    :category:
 
     Defer typed holes errors (errors about names with a leading underscore
     (e.g., “_”, “_foo”, “_bar”)) until runtime. This will turn the errors
@@ -185,20 +280,40 @@ of ``-W(no-)*``.
     Implied by :ghc-flag:`-fdefer-type-errors`. See also :ghc-flag:`-Wtyped-holes`.
 
 .. ghc-flag:: -fdefer-out-of-scope-variables
+    :shortdesc: Convert variable out of scope variables errors into warnings.
+        Implied by :ghc-flag:`-fdefer-type-errors`.
+        See also :ghc-flag:`-Wdeferred-out-of-scope-variables`.
+    :type: dynamic
+    :reverse: -fno-defer-out-of-scope-variables
+    :category:
 
     Defer variable out-of-scope errors (errors about names without a leading underscore)
     until runtime. This will turn variable-out-of-scope errors into warnings.
-    Using a value that depends on a typed hole produces a runtime error,
+    Using a value that depends on an out-of-scope variable produces a runtime error,
     the same as :ghc-flag:`-fdefer-type-errors` (which implies this option).
     See :ref:`typed-holes` and :ref:`defer-type-errors`.
 
     Implied by :ghc-flag:`-fdefer-type-errors`. See also :ghc-flag:`-Wdeferred-out-of-scope-variables`.
 
 .. ghc-flag:: -Wdeferred-out-of-scope-variables
+    :shortdesc: Report warnings when variable out-of-scope errors are
+        :ref:`deferred until runtime <defer-type-errors>`.
+        See :ghc-flag:`-fdefer-out-of-scope-variables`.
+    :type: dynamic
+    :reverse: -Wno-deferred-out-of-scope-variables
+    :category:
 
     Warn when a deferred out-of-scope variable is encountered.
 
 .. ghc-flag:: -Wpartial-type-signatures
+    :shortdesc: warn about holes in partial type signatures when
+        :ghc-flag:`-XPartialTypeSignatures` is enabled. Not applicable when
+        :ghc-flag:`-XPartialTypesignatures` is not enabled, in which case
+        errors are generated for such holes. See
+        :ref:`partial-type-signatures`.
+    :type: dynamic
+    :reverse: -Wno-partial-type-signatures
+    :category:
 
     Determines whether the compiler reports holes in partial type
     signatures as warnings. Has no effect unless
@@ -209,6 +324,10 @@ of ``-W(no-)*``.
     This warning is on by default.
 
 .. ghc-flag:: -fhelpful-errors
+    :shortdesc: Make suggestions for mis-spelled names.
+    :type: dynamic
+    :reverse: -fno-helpful-errors
+    :category:
 
     When a name or package is not found in scope, make suggestions for
     the name or package you might have meant instead.
@@ -216,6 +335,10 @@ of ``-W(no-)*``.
     This option is on by default.
 
 .. ghc-flag:: -Wunrecognised-pragmas
+    :shortdesc: warn about uses of pragmas that GHC doesn't recognise
+    :type: dynamic
+    :reverse: -Wno-unrecognised-pragmas
+    :category:
 
     Causes a warning to be emitted when a pragma that GHC doesn't
     recognise is used. As well as pragmas that GHC itself uses, GHC also
@@ -225,22 +348,47 @@ of ``-W(no-)*``.
     This option is on by default.
 
 .. ghc-flag:: -Wmissed-specialisations
-              -Wall-missed-specialisations
+    :shortdesc: warn when specialisation of an imported, overloaded function
+        fails.
+    :type: dynamic
+    :reverse: -Wno-missed-specialisations
+    :category:
 
     Emits a warning if GHC cannot specialise an overloaded function, usually
-    because the function needs an ``INLINABLE`` pragma. The "all" form reports
-    all such situations whereas the "non-all" form only reports when the
+    because the function needs an ``INLINABLE`` pragma. Reports when the
     situation arises during specialisation of an imported function.
 
-    The "non-all" form is intended to catch cases where an imported function
-    that is marked as ``INLINABLE`` (presumably to enable specialisation) cannot
-    be specialised as it calls other functions that are themselves not specialised.
+    This form is intended to catch cases where an imported function
+    that is marked as ``INLINABLE`` (presumably to enable specialisation)
+    cannot be specialised as it calls other functions that are themselves not
+    specialised.
 
-    Note that these warnings will not throw errors if used with :ghc-flag:`-Werror`.
+    Note that this warning will not throw errors if used with
+    :ghc-flag:`-Werror`.
 
-    These options are both off by default.
+    This option is off by default.
+
+.. ghc-flag:: -Wall-missed-specialisations
+    :shortdesc: warn when specialisation of any overloaded function fails.
+    :type: dynamic
+    :reverse: -Wno-all-missed-specialisations
+    :category:
+
+    Emits a warning if GHC cannot specialise an overloaded function, usually
+    because the function needs an ``INLINABLE`` pragma. Reports
+    all such situations.
+
+    Note that this warning will not throw errors if used with
+    :ghc-flag:`-Werror`.
+
+    This option is off by default.
 
 .. ghc-flag:: -Wwarnings-deprecations
+    :shortdesc: warn about uses of functions & types that have warnings or
+        deprecated pragmas
+    :type: dynamic
+    :reverse: -Wno-warnings-deprecations
+    :category:
 
     .. index::
        pair: deprecations; warnings
@@ -252,6 +400,11 @@ of ``-W(no-)*``.
     This option is on by default.
 
 .. ghc-flag:: -Wdeprecations
+    :shortdesc: warn about uses of functions & types that have warnings or
+        deprecated pragmas. Alias for :ghc-flag:`-Wwarnings-deprecations`
+    :type: dynamic
+    :reverse: -Wno-deprecations
+    :category:
 
     .. index::
        single: deprecations
@@ -263,18 +416,14 @@ of ``-W(no-)*``.
 
     This option is on by default.
 
-.. ghc-flag:: -Wamp
-
-    .. index::
-       single: AMP
-       single: Applicative-Monad Proposal
-
-    This option is deprecated.
-
-    Caused a warning to be emitted when a definition was in conflict with
-    the AMP (Applicative-Monad proosal).
-
 .. ghc-flag:: -Wnoncanonical-monad-instances
+    :shortdesc: warn when ``Applicative`` or ``Monad`` instances have
+        noncanonical definitions of ``return``, ``pure``, ``(>>)``,
+        or ``(*>)``.
+        See flag description in :ref:`options-sanity` for more details.
+    :type: dynamic
+    :reverse: -Wno-noncanonical-monad-instances
+    :category:
 
     Warn if noncanonical ``Applicative`` or ``Monad`` instances
     declarations are detected.
@@ -295,6 +444,12 @@ of ``-W(no-)*``.
     This option is off by default.
 
 .. ghc-flag:: -Wnoncanonical-monadfail-instances
+    :shortdesc: warn when ``Monad`` or ``MonadFail`` instances have
+        noncanonical definitions of ``fail``.
+        See flag description in :ref:`options-sanity` for more details.
+    :type: dynamic
+    :reverse: -Wno-noncanonical-monadfail-instances
+    :category:
 
     Warn if noncanonical ``Monad`` or ``MonadFail`` instances
     declarations are detected.
@@ -317,6 +472,12 @@ of ``-W(no-)*``.
     This option is off by default.
 
 .. ghc-flag:: -Wnoncanonical-monoid-instances
+    :shortdesc: warn when ``Semigroup`` or ``Monoid`` instances have
+        noncanonical definitions of ``(<>)`` or ``mappend``.
+        See flag description in :ref:`options-sanity` for more details.
+    :type: dynamic
+    :reverse: -Wno-noncanonical-monoid-instances
+    :category:
 
     Warn if noncanonical ``Semigroup`` or ``Monoid`` instances
     declarations are detected.
@@ -337,6 +498,11 @@ of ``-W(no-)*``.
     :ghc-flag:`-Wcompat` option group.
 
 .. ghc-flag:: -Wmissing-monadfail-instances
+    :shortdesc: Warn when a failable pattern is used in a do-block that does
+        not have a ``MonadFail`` instance.
+    :type: dynamic
+    :reverse: -Wno-missing-monadfail-instances
+    :category:
 
     .. index::
        single: MFP
@@ -353,6 +519,11 @@ of ``-W(no-)*``.
     <https://prime.haskell.org/wiki/Libraries/Proposals/MonadFail>`__.
 
 .. ghc-flag:: -Wsemigroup
+    :shortdesc: warn when a ``Monoid`` is not ``Semigroup``, and on non-
+        ``Semigroup`` definitions of ``(<>)``?
+    :type: dynamic
+    :reverse: -Wno-semigroup
+    :category:
 
     .. index::
        single: semigroup; warning
@@ -368,6 +539,10 @@ of ``-W(no-)*``.
     default, but will be switched on in a future GHC release.
 
 .. ghc-flag:: -Wdeprecated-flags
+    :shortdesc: warn about uses of commandline flags that are deprecated
+    :type: dynamic
+    :reverse: -Wno-deprecated-flags
+    :category:
 
     .. index::
        single: deprecated flags
@@ -378,6 +553,10 @@ of ``-W(no-)*``.
     This option is on by default.
 
 .. ghc-flag:: -Wunsupported-calling-conventions
+    :shortdesc: warn about use of an unsupported calling convention
+    :type: dynamic
+    :reverse: -Wno-unsupported-calling-conventions
+    :category:
 
     Causes a warning to be emitted for foreign declarations that use
     unsupported calling conventions. In particular, if the ``stdcall``
@@ -385,6 +564,10 @@ of ``-W(no-)*``.
     it will be treated as ``ccall``.
 
 .. ghc-flag:: -Wdodgy-foreign-imports
+    :shortdesc: warn about dodgy foreign imports
+    :type: dynamic
+    :reverse: -Wno-dodgy-foreign-import
+    :category:
 
     Causes a warning to be emitted for foreign imports of the following
     form: ::
@@ -395,14 +578,18 @@ of ``-W(no-)*``.
 
         foreign import "&f" f :: FunPtr t
 
-    The first form declares that \`f\` is a (pure) C function that takes
-    no arguments and returns a pointer to a C function with type \`t\`,
-    whereas the second form declares that \`f\` itself is a C function
-    with type \`t\`. The first declaration is usually a mistake, and one
+    The first form declares that ``f`` is a (pure) C function that takes
+    no arguments and returns a pointer to a C function with type ``t``,
+    whereas the second form declares that ``f`` itself is a C function
+    with type ``t``. The first declaration is usually a mistake, and one
     that is hard to debug because it results in a crash, hence this
     warning.
 
 .. ghc-flag:: -Wdodgy-exports
+    :shortdesc: warn about dodgy exports
+    :type: dynamic
+    :reverse: -Wno-dodgy-exports
+    :category:
 
     Causes a warning to be emitted when a datatype ``T`` is exported
     with all constructors, i.e. ``T(..)``, but is it just a type
@@ -412,6 +599,10 @@ of ``-W(no-)*``.
     but that module exports nothing.
 
 .. ghc-flag:: -Wdodgy-imports
+    :shortdesc: warn about dodgy imports
+    :type: dynamic
+    :reverse: -Wno-dodgy-imports
+    :category:
 
     Causes a warning to be emitted in the following cases:
 
@@ -422,16 +613,28 @@ of ``-W(no-)*``.
        exported.
 
 .. ghc-flag:: -Woverflowed-literals
+    :shortdesc: warn about literals that will overflow their type
+    :type: dynamic
+    :reverse: -Wno-overflowed-literals
+    :category:
 
     Causes a warning to be emitted if a literal will overflow, e.g.
     ``300 :: Word8``.
 
 .. ghc-flag:: -Wempty-enumerations
+    :shortdesc: warn about enumerations that are empty
+    :type: dynamic
+    :reverse: -Wno-empty-enumerations
+    :category:
 
     Causes a warning to be emitted if an enumeration is empty, e.g.
     ``[5 .. 3]``.
 
 .. ghc-flag:: -Wduplicate-constraints
+    :shortdesc: warn when a constraint appears duplicated in a type signature
+    :type: dynamic
+    :reverse: -Wno-duplicate-constraints
+    :category:
 
     .. index::
        single: duplicate constraints, warning
@@ -447,6 +650,11 @@ of ``-W(no-)*``.
     :ghc-flag:`-Wredundant-constraints`.
 
 .. ghc-flag:: -Wredundant-constraints
+    :shortdesc: Have the compiler warn about redundant constraints in type
+        signatures.
+    :type: dynamic
+    :reverse: -Wno-redundant-constraints
+    :category:
 
     :since: 8.0
 
@@ -475,8 +683,8 @@ of ``-W(no-)*``.
     Similar warnings are given for a redundant constraint in an instance
     declaration.
 
-    This option is on by default. As usual you can suppress it on a
-    per-module basis with :ghc-flag:`-Wno-redundant-constraints <-Wredundant-constraints>`.
+    When turning on, you can suppress it on a per-module basis with
+    :ghc-flag:`-Wno-redundant-constraints <-Wredundant-constraints>`.
     Occasionally you may specifically want a function to have a more
     constrained signature than necessary, perhaps to leave yourself
     wiggle-room for changing the implementation without changing the
@@ -492,6 +700,10 @@ of ``-W(no-)*``.
     constraint is needed, so no warning is issued.
 
 .. ghc-flag:: -Wduplicate-exports
+    :shortdesc: warn when an entity is exported multiple times
+    :type: dynamic
+    :reverse: -Wno-duplicate-exports
+    :category:
 
     .. index::
        single: duplicate exports, warning
@@ -505,6 +717,10 @@ of ``-W(no-)*``.
     This option is on by default.
 
 .. ghc-flag:: -Whi-shadowing
+    :shortdesc: warn when a ``.hi`` file in the current directory shadows a library
+    :type: dynamic
+    :reverse: -Wno-hi-shadowing
+    :category:
 
     .. index::
        single: shadowing; interface files
@@ -514,6 +730,11 @@ of ``-W(no-)*``.
     name in a library or other directory.
 
 .. ghc-flag:: -Widentities
+    :shortdesc: warn about uses of Prelude numeric conversions that are probably
+        the identity (and hence could be omitted)
+    :type: dynamic
+    :reverse: -Wno-identities
+    :category:
 
     Causes the compiler to emit a warning when a Prelude numeric
     conversion converts a type ``T`` to the same type ``T``; such calls are
@@ -521,27 +742,86 @@ of ``-W(no-)*``.
     ``toInteger``, ``toRational``, ``fromIntegral``, and ``realToFrac``.
 
 .. ghc-flag:: -Wimplicit-prelude
+    :shortdesc: warn when the Prelude is implicitly imported
+    :type: dynamic
+    :reverse: -Wno-implicit-prelude
+    :category:
 
     .. index::
        single: implicit prelude, warning
 
-    Have the compiler warn if the Prelude is implicitly imported. This
-    happens unless either the Prelude module is explicitly imported with
-    an ``import ... Prelude ...`` line, or this implicit import is
-    disabled (either by :ghc-flag:`-XNoImplicitPrelude` or a
-    ``LANGUAGE NoImplicitPrelude`` pragma).
+    Have the compiler warn if the Prelude is implicitly imported. This happens
+    unless either the Prelude module is explicitly imported with an ``import
+    ... Prelude ...`` line, or this implicit import is disabled (either by
+    :ghc-flag:`-XNoImplicitPrelude` or a ``LANGUAGE NoImplicitPrelude``
+    pragma).
 
-    Note that no warning is given for syntax that implicitly refers to
-    the Prelude, even if :ghc-flag:`-XNoImplicitPrelude` would change whether it
-    refers to the Prelude. For example, no warning is given when ``368``
-    means ``Prelude.fromInteger (368::Prelude.Integer)`` (where
-    ``Prelude`` refers to the actual Prelude module, regardless of the
-    imports of the module being compiled).
+    Note that no warning is given for syntax that implicitly refers to the
+    Prelude, even if :ghc-flag:`-XNoImplicitPrelude` would change whether it
+    refers to the Prelude. For example, no warning is given when ``368`` means
+    ``Prelude.fromInteger (368::Prelude.Integer)`` (where ``Prelude`` refers
+    to the actual Prelude module, regardless of the imports of the module
+    being compiled).
 
     This warning is off by default.
 
+.. ghc-flag:: -Wimplicit-kind-vars
+    :shortdesc: warn when kind variables are brought into scope implicitly despite
+        the "forall-or-nothing" rule
+    :type: dynamic
+    :reverse: -Wno-implicit-kind-vars
+    :category:
+
+    :since: 8.6
+
+    `GHC proposal #24
+    <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0024-no-kind-vars.rst>`__
+    prescribes to treat kind variables and type variables identically in
+    ``forall``, removing the legacy distinction between them.
+
+    Consider the following examples: ::
+
+        f :: Proxy a -> Proxy b -> ()
+        g :: forall a b. Proxy a -> Proxy b -> ()
+
+    ``f`` does not use an explicit ``forall``, so type variables ``a`` and ``b``
+    are brought into scope implicitly. ``g`` quantifies both ``a`` and ``b``
+    explicitly. Both ``f`` and ``g`` work today and will continue to work in the
+    future because they adhere to the "forall-or-nothing" rule: either all type
+    variables in a function definition are introduced explicitly or implicitly,
+    there is no middle ground.
+
+    A violation of the "forall-or-nothing" rule looks like this: ::
+
+        m :: forall a. Proxy a -> Proxy b -> ()
+
+    ``m`` does not introduce one of the variables, ``b``, and thus is rejected.
+
+    However, consider the following example: ::
+
+        n :: forall a. Proxy (a :: k) -> ()
+
+    While ``n`` uses ``k`` without introducing it and thus violates the rule, it
+    is currently accepted. This is because ``k`` in ``n`` is considered a kind
+    variable, as it occurs in a kind signature. In reality, the line between
+    type variables and kind variables is blurry, as the following example
+    demonstrates: ::
+
+        kindOf :: forall a. Proxy (a :: k) -> Proxy k
+
+    In ``kindOf``, the ``k`` variable is used both in a kind position and a type
+    position. Currently, ``kindOf`` happens to be accepted as well.
+
+    In a future release of GHC, both ``n`` and ``kindOf`` will be rejected per
+    the "forall-or-nothing" rule. This warning, being part of the
+    :ghc-flag:`-Wcompat` option group, allows to detect this before the actual
+    breaking change takes place.
+
 .. ghc-flag:: -Wincomplete-patterns
-              -Wincomplete-uni-patterns
+    :shortdesc: warn when a pattern match could fail
+    :type: dynamic
+    :reverse: -Wno-incomplete-patterns
+    :category:
 
     .. index::
        single: incomplete patterns, warning
@@ -559,14 +839,26 @@ of ``-W(no-)*``.
     generally considered good practice to cover all the cases in your
     functions, and it is switched on by :ghc-flag:`-W`.
 
-    The flag :ghc-flag:`-Wincomplete-uni-patterns` is similar, except that
-    it applies only to lambda-expressions and pattern bindings,
-    constructs that only allow a single pattern: ::
+
+.. ghc-flag:: -Wincomplete-uni-patterns
+    :shortdesc: warn when a pattern match in a lambda expression or
+        pattern binding could fail
+    :type: dynamic
+    :reverse: -Wno-incomplete-uni-patterns
+    :category:
+
+    The flag :ghc-flag:`-Wincomplete-uni-patterns` is similar to
+    :ghc-flag:`-Wincomplete-patterns`, except that it applies only to
+    lambda-expressions and pattern bindings, constructs that only allow a
+    single pattern: ::
 
         h = \[] -> 2
         Just k = f y
 
 .. ghc-flag:: -fmax-pmcheck-iterations=⟨n⟩
+    :shortdesc: the iteration limit for the pattern match checker
+    :type: dynamic
+    :category:
 
     :default: 2000000
 
@@ -579,6 +871,10 @@ of ``-W(no-)*``.
     pattern match, for the sake of future readers of your code.
 
 .. ghc-flag:: -Wincomplete-record-updates
+    :shortdesc: warn when a record update could fail
+    :type: dynamic
+    :reverse: -Wno-incomplete-record-updates
+    :category:
 
     .. index::
        single: incomplete record updates, warning
@@ -598,6 +894,10 @@ of ``-W(no-)*``.
     and it often doesn't indicate a bug in the program.
 
 .. ghc-flag:: -Wmissing-fields
+    :shortdesc: warn when fields of a record are uninitialised
+    :type: dynamic
+    :reverse: -Wno-missing-fields
+    :category:
 
     .. index::
        single: missing fields, warning
@@ -609,7 +909,37 @@ of ``-W(no-)*``.
     fields are initialised with bottoms), it is often an indication of a
     programmer error.
 
+.. ghc-flag:: -Wmissing-export-lists
+    :shortdesc: warn when a module declaration does not explicitly list all
+        exports
+    :type: dynamic
+    :reverse: -fnowarn-missing-export-lists
+    :category:
+
+    :since: 8.4.1
+
+    .. index::
+       single: missing export lists, warning
+       single: export lists, missing
+
+    This flag warns if you declare a module without declaring an explicit
+    export list. For example ::
+
+        module M where
+
+          p x = x
+
+    The :ghc-flag:`-Wmissing-export-lists` flag will warn that ``M`` does not
+    declare an export list. Declaring an explicit export list for ``M`` enables
+    GHC dead code analysis, prevents accidental export of names and can ease
+    optimizations like inlining.
+
 .. ghc-flag:: -Wmissing-import-lists
+    :shortdesc: warn when an import declaration does not explicitly list all the
+        names brought into scope
+    :type: dynamic
+    :reverse: -fnowarn-missing-import-lists
+    :category:
 
     .. index::
        single: missing import lists, warning
@@ -632,6 +962,10 @@ of ``-W(no-)*``.
     unlikely to produce ambiguity in ``M``.
 
 .. ghc-flag:: -Wmissing-methods
+    :shortdesc: warn when class methods are undefined
+    :type: dynamic
+    :reverse: -Wno-missing-methods
+    :category:
 
     .. index::
        single: missing methods, warning
@@ -641,23 +975,15 @@ of ``-W(no-)*``.
     declaration is missing one or more methods, and the corresponding
     class declaration has no default declaration for them.
 
-    The warning is suppressed if the method name begins with an
-    underscore. Here's an example where this is useful: ::
-
-        class C a where
-            _simpleFn :: a -> String
-            complexFn :: a -> a -> String
-            complexFn x y = ... _simpleFn ...
-
-    The idea is that: (a) users of the class will only call
-    ``complexFn``; never ``_simpleFn``; and (b) instance declarations
-    can define either ``complexFn`` or ``_simpleFn``.
-
     The ``MINIMAL`` pragma can be used to change which combination of
     methods will be required for instances of a particular class. See
     :ref:`minimal-pragma`.
 
 .. ghc-flag:: -Wmissing-signatures
+    :shortdesc: warn about top-level functions without signatures
+    :type: dynamic
+    :reverse: -Wno-missing-signatures
+    :category:
 
     .. index::
        single: type signatures, missing
@@ -668,6 +994,12 @@ of ``-W(no-)*``.
     option is off by default.
 
 .. ghc-flag:: -Wmissing-exported-sigs
+    :shortdesc: *(deprecated)*
+        warn about top-level functions without signatures, only if they
+        are exported. takes precedence over -Wmissing-signatures
+    :type: dynamic
+    :reverse: -Wno-missing-exported-sigs
+    :category:
 
     .. index::
        single: type signatures, missing
@@ -676,6 +1008,11 @@ of ``-W(no-)*``.
     :ghc-flag:`-Wmissing-exported-signatures`.
 
 .. ghc-flag:: -Wmissing-exported-signatures
+    :shortdesc: warn about top-level functions without signatures, only if they
+        are exported. takes precedence over -Wmissing-signatures
+    :type: dynamic
+    :reverse: -Wno-missing-exported-signatures
+    :category:
 
     .. index::
        single: type signatures, missing
@@ -688,6 +1025,11 @@ of ``-W(no-)*``.
     reports the inferred type. The option is off by default.
 
 .. ghc-flag:: -Wmissing-local-sigs
+    :shortdesc: *(deprecated)*
+        warn about polymorphic local bindings without signatures
+    :type: dynamic
+    :reverse: -Wno-missing-local-sigs
+    :category:
 
     .. index::
        single: type signatures, missing
@@ -696,6 +1038,10 @@ of ``-W(no-)*``.
     :ghc-flag:`-Wmissing-local-signatures`.
 
 .. ghc-flag:: -Wmissing-local-signatures
+    :shortdesc: warn about polymorphic local bindings without signatures
+    :type: dynamic
+    :reverse: -Wno-missing-local-signatures
+    :category:
 
     .. index::
        single: type signatures, missing
@@ -706,6 +1052,10 @@ of ``-W(no-)*``.
     default.
 
 .. ghc-flag:: -Wmissing-pattern-synonym-signatures
+    :shortdesc: warn when pattern synonyms do not have type signatures
+    :type: dynamic
+    :reverse: -Wno-missing-pattern-synonym-signatures
+    :category:
 
     .. index::
          single: type signatures, missing, pattern synonyms
@@ -719,6 +1069,10 @@ of ``-W(no-)*``.
     type. This option is off by default.
 
 .. ghc-flag:: -Wname-shadowing
+    :shortdesc: warn when names are shadowed
+    :type: dynamic
+    :reverse: -Wno-name-shadowing
+    :category:
 
     .. index::
        single: shadowing, warning
@@ -736,6 +1090,11 @@ of ``-W(no-)*``.
         f x = do { _ignore <- this; _ignore <- that; return (the other) }
 
 .. ghc-flag:: -Worphans
+    :shortdesc: warn when the module contains :ref:`orphan instance declarations
+        or rewrite rules <orphan-modules>`
+    :type: dynamic
+    :reverse: -Wno-orphans
+    :category:
 
     .. index::
        single: orphan instances, warning
@@ -758,6 +1117,10 @@ of ``-W(no-)*``.
     instances.
 
 .. ghc-flag:: -Woverlapping-patterns
+    :shortdesc: warn about overlapping patterns
+    :type: dynamic
+    :reverse: -Wno-overlapping-patterns
+    :category:
 
     .. index::
        single: overlapping patterns, warning
@@ -775,7 +1138,79 @@ of ``-W(no-)*``.
     second pattern overlaps it. More often than not, redundant patterns
     is a programmer mistake/error, so this option is enabled by default.
 
+.. ghc-flag:: -Winaccessible-code
+    :shortdesc: warn about inaccessible code
+    :type: dynamic
+    :reverse: -Wno-inaccessible-code
+    :category:
+
+    .. index::
+       single: inaccessible code, warning
+       single: inaccessible
+
+    By default, the compiler will warn you if types make a branch inaccessible.
+    This generally requires GADTs or similar extensions.
+
+    Take, for example, the following program ::
+
+        {-# LANGUAGE GADTs #-}
+
+        data Foo a where
+         Foo1 :: Foo Char
+         Foo2 :: Foo Int
+
+        data TyEquality a b where
+                Refl :: TyEquality a a
+
+        checkTEQ :: Foo t -> Foo u -> Maybe (TyEquality t u)
+        checkTEQ x y = error "unimportant"
+
+        step2 :: Bool
+        step2 = case checkTEQ Foo1 Foo2 of
+                 Just Refl -> True -- Inaccessible code
+                 Nothing -> False
+
+    The ``Just Refl`` case in ``step2`` is inaccessible, because in order for
+    ``checkTEQ`` to be able to produce a ``Just``, ``t ~ u`` must hold, but
+    since we're passing ``Foo1`` and ``Foo2`` here, it follows that ``t ~
+    Char``, and ``u ~ Int``, and thus ``t ~ u`` cannot hold.
+
+.. ghc-flag:: -Wstar-binder
+     :shortdesc: warn about binding the ``(*)`` type operator despite
+         :ghc-flag:`-XStarIsType`
+     :type: dynamic
+     :reverse: -Wno-star-binder
+
+     Under :ghc-flag:`-XStarIsType`, a ``*`` in types is not an operator nor
+     even a name, it is special syntax that stands for ``Data.Kind.Type``. This
+     means that an expression like ``Either * Char`` is parsed as ``Either (*)
+     Char`` and not ``(*) Either Char``.
+
+     In binding positions, we have similar parsing rules. Consider the following
+     example ::
+
+         {-# LANGUAGE TypeOperators, TypeFamilies, StarIsType #-}
+
+         type family a + b
+         type family a * b
+
+     While ``a + b`` is parsed as ``(+) a b`` and becomes a binding position for
+     the ``(+)`` type operator, ``a * b`` is parsed as ``a (*) b`` and is rejected.
+
+     As a workaround, we allow to bind ``(*)`` in prefix form::
+
+         type family (*) a b
+
+     This is a rather fragile arrangement, as generally a programmer expects
+     ``(*) a b`` to be equivalent to ``a * b``. With :ghc-flag:`-Wstar-binder`
+     we warn when this special treatment of ``(*)`` takes place.
+
 .. ghc-flag:: -Wsimplifiable-class-constraints
+    :shortdesc: Warn about class constraints in a type signature that can
+        be simplified using a top-level instance declaration.
+    :type: dynamic
+    :reverse: -Wno-simplifiable-class-constraints
+    :category:
 
     :since: 8.2
 
@@ -799,6 +1234,10 @@ of ``-W(no-)*``.
     <-Wsimplifiable-class-constraints>`.
 
 .. ghc-flag:: -Wtabs
+    :shortdesc: warn if there are tabs in the source file
+    :type: dynamic
+    :reverse: -Wno-tabs
+    :category:
 
     .. index::
        single: tabs, warning
@@ -806,6 +1245,10 @@ of ``-W(no-)*``.
     Have the compiler warn if there are tabs in your source file.
 
 .. ghc-flag:: -Wtype-defaults
+    :shortdesc: warn when defaulting happens
+    :type: dynamic
+    :reverse: -Wno-type-defaults
+    :category:
 
     .. index::
        single: defaulting mechanism, warning
@@ -822,6 +1265,10 @@ of ``-W(no-)*``.
     This warning is off by default.
 
 .. ghc-flag:: -Wmonomorphism-restriction
+    :shortdesc: warn when the Monomorphism Restriction is applied
+    :type: dynamic
+    :reverse: -Wno-monomorphism-restriction
+    :category:
 
     .. index::
        single: monomorphism restriction, warning
@@ -834,10 +1281,19 @@ of ``-W(no-)*``.
     This warning is off by default.
 
 .. ghc-flag:: -Wunsupported-llvm-version
+    :shortdesc: Warn when using :ghc-flag:`-fllvm` with an unsupported
+        version of LLVM.
+    :type: dynamic
+    :reverse: -Wno-monomorphism-restriction
+    :category:
 
     Warn when using :ghc-flag:`-fllvm` with an unsupported version of LLVM.
 
 .. ghc-flag:: -Wunticked-promoted-constructors
+    :shortdesc: warn if promoted constructors are not ticked
+    :type: dynamic
+    :reverse: -Wno-unticked-promoted-constructors
+    :category:
 
     .. index::
        single: promoted constructor, warning
@@ -859,6 +1315,12 @@ of ``-W(no-)*``.
     This warning is enabled by default in :ghc-flag:`-Wall` mode.
 
 .. ghc-flag:: -Wunused-binds
+    :shortdesc: warn about bindings that are unused. Alias for
+        :ghc-flag:`-Wunused-top-binds`, :ghc-flag:`-Wunused-local-binds` and
+        :ghc-flag:`-Wunused-pattern-binds`
+    :type: dynamic
+    :reverse: -Wno-unused-binds
+    :category:
 
     .. index::
        single: unused binds, warning
@@ -872,6 +1334,10 @@ of ``-W(no-)*``.
     -  :ghc-flag:`-Wunused-pattern-binds`
 
 .. ghc-flag:: -Wunused-top-binds
+    :shortdesc: warn about top-level bindings that are unused
+    :type: dynamic
+    :reverse: -Wno-unused-top-binds
+    :category:
 
     .. index::
        single: unused binds, warning
@@ -902,6 +1368,10 @@ of ``-W(no-)*``.
         _w = True                    -- No warning: _w starts with an underscore
 
 .. ghc-flag:: -Wunused-local-binds
+    :shortdesc: warn about local bindings that are unused
+    :type: dynamic
+    :reverse: -Wno-unused-local-binds
+    :category:
 
     .. index::
        single: unused binds, warning
@@ -914,6 +1384,10 @@ of ``-W(no-)*``.
         g = h x                      -- No warning: g is unused, but is a top-level binding
 
 .. ghc-flag:: -Wunused-pattern-binds
+    :shortdesc: warn about pattern match bindings that are unused
+    :type: dynamic
+    :reverse: -Wno-unused-pattern-binds
+    :category:
 
     .. index::
        single: unused binds, warning
@@ -936,6 +1410,10 @@ of ``-W(no-)*``.
     it forces evaluation, and is useful as an alternative to ``seq``.
 
 .. ghc-flag:: -Wunused-imports
+    :shortdesc: warn about unnecessary imports
+    :type: dynamic
+    :reverse: -Wno-unused-imports
+    :category:
 
     .. index::
        single: unused imports, warning
@@ -947,6 +1425,10 @@ of ``-W(no-)*``.
     declarations, which are anonymous in Haskell.
 
 .. ghc-flag:: -Wunused-matches
+    :shortdesc: warn about variables in patterns that aren't used
+    :type: dynamic
+    :reverse: -Wno-unused-matches
+    :category:
 
     .. index::
        single: unused matches, warning
@@ -965,6 +1447,11 @@ of ``-W(no-)*``.
     :ghc-flag:`-Wunused-type-patterns` flag.
 
 .. ghc-flag:: -Wunused-do-bind
+    :shortdesc: warn about do bindings that appear to throw away values of types
+        other than ``()``
+    :type: dynamic
+    :reverse: -Wno-unused-do-bind
+    :category:
 
     .. index::
        single: unused do binding, warning
@@ -986,6 +1473,11 @@ of ``-W(no-)*``.
         do { mapM_ popInt xs ; return 10 }
 
 .. ghc-flag:: -Wunused-type-patterns
+    :shortdesc: warn about unused type variables which arise from patterns
+        in type family and data family instances
+    :type: dynamic
+    :reverse: -Wno-unused-type-patterns
+    :category:
 
     .. index::
        single: unused type patterns, warning
@@ -1008,6 +1500,11 @@ of ``-W(no-)*``.
     documentation harder to read.
 
 .. ghc-flag:: -Wunused-foralls
+    :shortdesc: warn about type variables in user-written
+        ``forall``\\s that are unused
+    :type: dynamic
+    :reverse: -Wno-unused-foralls
+    :category:
 
     .. index::
        single: unused foralls, warning
@@ -1021,6 +1518,11 @@ of ``-W(no-)*``.
     would report ``a`` and ``c`` as unused.
 
 .. ghc-flag:: -Wwrong-do-bind
+    :shortdesc: warn about do bindings that appear to throw away monadic values
+        that you should have bound instead
+    :type: dynamic
+    :reverse: -Wno-wrong-do-bind
+    :category:
 
     .. index::
        single: apparently erroneous do binding, warning
@@ -1044,12 +1546,21 @@ of ``-W(no-)*``.
         do { popInt 10 ; return 10 }
 
 .. ghc-flag:: -Winline-rule-shadowing
+    :shortdesc: Warn if a rewrite RULE might fail to fire because the
+        function might be inlined before the rule has a chance to fire.
+        See :ref:`rules-inline`.
+    :type: dynamic
+    :reverse: -Wno-inline-rule-shadowing
+    :category:
 
     Warn if a rewrite RULE might fail to fire because the function might
     be inlined before the rule has a chance to fire. See
     :ref:`rules-inline`.
 
 .. ghc-flag:: -Wcpp-undef
+    :shortdesc: warn on uses of the `#if` directive on undefined identifiers
+    :type: dynamic
+    :category:
 
     :since: 8.2
 
@@ -1058,12 +1569,24 @@ of ``-W(no-)*``.
     undefined identifiers.
 
 .. ghc-flag:: -Wunbanged-strict-patterns
+    :shortdesc: warn on pattern bind of unlifted variable that is neither bare
+        nor banged
+    :type: dynamic
+    :reverse: -Wno-unbanged-strict-patterns
+    :category:
 
     This flag warns whenever you write a pattern that binds a variable whose
     type is unlifted, and yet the pattern is not a bang pattern nor a bare variable.
     See :ref:`glasgow-unboxed` for information about unlifted types.
 
 .. ghc-flag:: -Wmissing-home-modules
+    :shortdesc: warn when encountering a home module imported, but not listed
+        on the command line. Useful for cabal to ensure GHC won't pick
+        up modules, not listed neither in ``exposed-modules``, nor in
+        ``other-modules``.
+    :type: dynamic
+    :reverse: -Wno-missing-home-modules
+    :category:
 
     :since: 8.2
 
@@ -1073,7 +1596,23 @@ of ``-W(no-)*``.
     pick up modules, not listed neither in ``exposed-modules``, nor in
     ``other-modules``.
 
+.. ghc-flag:: -Wpartial-fields
+    :shortdesc: warn when defining a partial record field.
+    :type: dynamic
+    :reverse: -Wno-partial-fields
+    :category:
+
+    :since: 8.4
+
+    The option :ghc-flag:`-Wpartial-fields` warns about record fields that could
+    fail when accessed via a lacking constructor. The function ``f`` below will
+    fail when applied to ``Bar``, so the compiler will emit a warning at its
+    definition when :ghc-flag:`-Wpartial-fields` is enabled.
+
+    The warning is suppressed if the field name begins with an underscore. ::
+
+        data Foo = Foo { f :: Int } | Bar
+
 If you're feeling really paranoid, the :ghc-flag:`-dcore-lint` option is a good choice.
 It turns on heavyweight intra-pass sanity-checking within GHC. (It checks GHC's
 sanity, not yours.)
-

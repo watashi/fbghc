@@ -30,8 +30,21 @@
 #include "Stats.h"
 #include "ProfHeap.h"
 #include "Apply.h"
-#include "Stable.h" /* markStableTables */
+#include "StablePtr.h" /* markStablePtrTable */
+#include "StableName.h" /* rememberOldStableNameAddresses */
 #include "sm/Storage.h" // for END_OF_STATIC_LIST
+
+/* Note [What is a retainer?]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~
+The definition of what sorts of things are counted as retainers is a bit hard to
+pin down. Intuitively, we want to identify closures which will help the user
+identify memory leaks due to thunks. In practice we also end up lumping mutable
+objects in this group for reasons that have been lost to time.
+
+The definition of retainer is implemented in isRetainer(), defined later in this
+file.
+*/
+
 
 /*
   Note: what to change in order to plug-in a new retainer profiling scheme?
@@ -108,7 +121,6 @@ typedef enum {
     posTypeStep,
     posTypePtrs,
     posTypeSRT,
-    posTypeLargeSRT,
 } nextPosType;
 
 typedef union {
@@ -125,16 +137,8 @@ typedef union {
 
     // SRT
     struct {
-        StgClosure **srt;
-        StgWord    srt_bitmap;
+        StgClosure *srt;
     } srt;
-
-    // Large SRT
-    struct {
-        StgLargeSRT *srt;
-        StgWord offset;
-    } large_srt;
-
 } nextPos;
 
 typedef struct {
@@ -267,7 +271,6 @@ isEmptyRetainerStack( void )
 /* -----------------------------------------------------------------------------
  * Returns size of stack
  * -------------------------------------------------------------------------- */
-#if defined(DEBUG)
 W_
 retainerStackBlocks( void )
 {
@@ -279,7 +282,6 @@ retainerStackBlocks( void )
 
     return res;
 }
-#endif
 
 /* -----------------------------------------------------------------------------
  * Returns true if stackTop is at the stack boundary of the current stack,
@@ -324,28 +326,22 @@ find_ptrs( stackPos *info )
 static INLINE void
 init_srt_fun( stackPos *info, const StgFunInfoTable *infoTable )
 {
-    if (infoTable->i.srt_bitmap == (StgHalfWord)(-1)) {
-        info->type = posTypeLargeSRT;
-        info->next.large_srt.srt = (StgLargeSRT *)GET_FUN_SRT(infoTable);
-        info->next.large_srt.offset = 0;
+    info->type = posTypeSRT;
+    if (infoTable->i.srt) {
+        info->next.srt.srt = (StgClosure*)GET_FUN_SRT(infoTable);
     } else {
-        info->type = posTypeSRT;
-        info->next.srt.srt = (StgClosure **)GET_FUN_SRT(infoTable);
-        info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
+        info->next.srt.srt = NULL;
     }
 }
 
 static INLINE void
 init_srt_thunk( stackPos *info, const StgThunkInfoTable *infoTable )
 {
-    if (infoTable->i.srt_bitmap == (StgHalfWord)(-1)) {
-        info->type = posTypeLargeSRT;
-        info->next.large_srt.srt = (StgLargeSRT *)GET_SRT(infoTable);
-        info->next.large_srt.offset = 0;
+    info->type = posTypeSRT;
+    if (infoTable->i.srt) {
+        info->next.srt.srt = (StgClosure*)GET_SRT(infoTable);
     } else {
-        info->type = posTypeSRT;
-        info->next.srt.srt = (StgClosure **)GET_SRT(infoTable);
-        info->next.srt.srt_bitmap = infoTable->i.srt_bitmap;
+        info->next.srt.srt = NULL;
     }
 }
 
@@ -356,57 +352,10 @@ static INLINE StgClosure *
 find_srt( stackPos *info )
 {
     StgClosure *c;
-    StgWord bitmap;
-
     if (info->type == posTypeSRT) {
-        // Small SRT bitmap
-        bitmap = info->next.srt.srt_bitmap;
-        while (bitmap != 0) {
-            if ((bitmap & 1) != 0) {
-#if defined(COMPILING_WINDOWS_DLL)
-                if ((unsigned long)(*(info->next.srt.srt)) & 0x1)
-                    c = (* (StgClosure **)((unsigned long)*(info->next.srt.srt)) & ~0x1);
-                else
-                    c = *(info->next.srt.srt);
-#else
-                c = *(info->next.srt.srt);
-#endif
-                bitmap = bitmap >> 1;
-                info->next.srt.srt++;
-                info->next.srt.srt_bitmap = bitmap;
-                return c;
-            }
-            bitmap = bitmap >> 1;
-            info->next.srt.srt++;
-        }
-        // bitmap is now zero...
-        return NULL;
-    }
-    else {
-        // Large SRT bitmap
-        uint32_t i = info->next.large_srt.offset;
-        StgWord bitmap;
-
-        // Follow the pattern from GC.c:scavenge_large_srt_bitmap().
-        bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
-        bitmap = bitmap >> (i % BITS_IN(StgWord));
-        while (i < info->next.large_srt.srt->l.size) {
-            if ((bitmap & 1) != 0) {
-                c = ((StgClosure **)info->next.large_srt.srt->srt)[i];
-                i++;
-                info->next.large_srt.offset = i;
-                return c;
-            }
-            i++;
-            if (i % BITS_IN(W_) == 0) {
-                bitmap = info->next.large_srt.srt->l.bitmap[i / BITS_IN(W_)];
-            } else {
-                bitmap = bitmap >> 1;
-            }
-        }
-        // reached the end of this bitmap.
-        info->next.large_srt.offset = i;
-        return NULL;
+        c = info->next.srt.srt;
+        info->next.srt.srt = NULL;
+        return c;
     }
 }
 
@@ -414,7 +363,7 @@ find_srt( stackPos *info )
  *  push() pushes a stackElement representing the next child of *c
  *  onto the traverse stack. If *c has no child, *first_child is set
  *  to NULL and nothing is pushed onto the stack. If *c has only one
- *  child, *c_chlid is set to that child and nothing is pushed onto
+ *  child, *c_child is set to that child and nothing is pushed onto
  *  the stack.  If *c has more than two children, *first_child is set
  *  to the first child and a stackElement representing the second
  *  child is pushed onto the stack.
@@ -518,8 +467,8 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
         // StgMutArrPtr.ptrs, no SRT
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         init_ptrs(&se.info, ((StgMutArrPtrs *)c)->ptrs,
                   (StgPtr)(((StgMutArrPtrs *)c)->payload));
         *first_child = find_ptrs(&se.info);
@@ -530,8 +479,8 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
         // StgMutArrPtr.ptrs, no SRT
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         init_ptrs(&se.info, ((StgSmallMutArrPtrs *)c)->ptrs,
                   (StgPtr)(((StgSmallMutArrPtrs *)c)->payload));
         *first_child = find_ptrs(&se.info);
@@ -540,6 +489,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
         break;
 
     // layout.payload.ptrs, SRT
+    case FUN_STATIC:
     case FUN:           // *c is a heap object.
     case FUN_2_0:
         init_ptrs(&se.info, get_itbl(c)->layout.payload.ptrs, (StgPtr)c->payload);
@@ -574,9 +524,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
         init_srt_thunk(&se.info, get_thunk_itbl(c));
         break;
 
-    case FUN_STATIC:      // *c is a heap object.
-        ASSERT(get_itbl(c)->srt_bitmap != 0);
-    case FUN_0_1:
+    case FUN_0_1:      // *c is a heap object.
     case FUN_0_2:
     fun_srt_only:
         init_srt_fun(&se.info, get_fun_itbl(c));
@@ -587,7 +535,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
 
     // SRT only
     case THUNK_STATIC:
-        ASSERT(get_itbl(c)->srt_bitmap != 0);
+        ASSERT(get_itbl(c)->srt != 0);
     case THUNK_0_1:
     case THUNK_0_2:
     thunk_srt_only:
@@ -621,7 +569,7 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case IND:
     case INVALID_OBJECT:
     default:
-        barf("Invalid object *c in push()");
+        barf("Invalid object *c in push(): %d", get_itbl(c)->type);
         return;
     }
 
@@ -861,8 +809,12 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
             // StgMutArrPtr.ptrs, no SRT
         case MUT_ARR_PTRS_CLEAN:
         case MUT_ARR_PTRS_DIRTY:
-        case MUT_ARR_PTRS_FROZEN:
-        case MUT_ARR_PTRS_FROZEN0:
+        case MUT_ARR_PTRS_FROZEN_CLEAN:
+        case MUT_ARR_PTRS_FROZEN_DIRTY:
+        case SMALL_MUT_ARR_PTRS_CLEAN:
+        case SMALL_MUT_ARR_PTRS_DIRTY:
+        case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+        case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
             *c = find_ptrs(&se->info);
             if (*c == NULL) {
                 popOff();
@@ -874,6 +826,7 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
 
             // layout.payload.ptrs, SRT
         case FUN:         // always a heap object
+        case FUN_STATIC:
         case FUN_2_0:
             if (se->info.type == posTypePtrs) {
                 *c = find_ptrs(&se->info);
@@ -902,7 +855,6 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
             // SRT
         do_srt:
         case THUNK_STATIC:
-        case FUN_STATIC:
         case FUN_0_1:
         case FUN_0_2:
         case THUNK_0_1:
@@ -949,7 +901,7 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
         case IND:
         case INVALID_OBJECT:
         default:
-            barf("Invalid object *c in pop()");
+            barf("Invalid object *c in pop(): %d", get_itbl(se->c)->type);
             return;
         }
     } while (true);
@@ -1022,6 +974,9 @@ isRetainer( StgClosure *c )
     case MUT_VAR_DIRTY:
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case BLOCKING_QUEUE:
 
         // thunks are retainers.
     case THUNK:
@@ -1069,17 +1024,21 @@ isRetainer( StgClosure *c )
     // closures. See trac #3956 for a program that hit this error.
     case IND_STATIC:
     case BLACKHOLE:
+    case WHITEHOLE:
         // static objects
     case FUN_STATIC:
         // misc
     case PRIM:
     case BCO:
     case ARR_WORDS:
+    case COMPACT_NFDATA:
         // STM
     case TREC_CHUNK:
         // immutable arrays
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         return false;
 
         //
@@ -1089,11 +1048,15 @@ isRetainer( StgClosure *c )
         // legal objects during retainer profiling.
     case UPDATE_FRAME:
     case CATCH_FRAME:
+    case CATCH_RETRY_FRAME:
+    case CATCH_STM_FRAME:
     case UNDERFLOW_FRAME:
+    case ATOMICALLY_FRAME:
     case STOP_FRAME:
     case RET_BCO:
     case RET_SMALL:
     case RET_BIG:
+    case RET_FUN:
         // other cases
     case IND:
     case INVALID_OBJECT:
@@ -1122,16 +1085,7 @@ getRetainerFrom( StgClosure *c )
 {
     ASSERT(isRetainer(c));
 
-#if defined(RETAINER_SCHEME_INFO)
-    // Retainer scheme 1: retainer = info table
-    return get_itbl(c);
-#elif defined(RETAINER_SCHEME_CCS)
-    // Retainer scheme 2: retainer = cost centre stack
     return c->header.prof.ccs;
-#elif defined(RETAINER_SCHEME_CC)
-    // Retainer scheme 3: retainer = cost centre
-    return c->header.prof.ccs->cc;
-#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -1190,69 +1144,6 @@ retain_small_bitmap (StgPtr p, uint32_t size, StgWord bitmap,
         size--;
     }
     return p;
-}
-
-/* -----------------------------------------------------------------------------
- * Call retainClosure for each of the closures in an SRT.
- * ------------------------------------------------------------------------- */
-
-static void
-retain_large_srt_bitmap (StgLargeSRT *srt, StgClosure *c, retainer c_child_r)
-{
-    uint32_t i, b, size;
-    StgWord bitmap;
-    StgClosure **p;
-
-    b = 0;
-    p = (StgClosure **)srt->srt;
-    size   = srt->l.size;
-    bitmap = srt->l.bitmap[b];
-    for (i = 0; i < size; ) {
-        if ((bitmap & 1) != 0) {
-            retainClosure((StgClosure *)*p, c, c_child_r);
-        }
-        i++;
-        p++;
-        if (i % BITS_IN(W_) == 0) {
-            b++;
-            bitmap = srt->l.bitmap[b];
-        } else {
-            bitmap = bitmap >> 1;
-        }
-    }
-}
-
-static INLINE void
-retainSRT (StgClosure **srt, uint32_t srt_bitmap, StgClosure *c,
-            retainer c_child_r)
-{
-  uint32_t bitmap;
-  StgClosure **p;
-
-  bitmap = srt_bitmap;
-  p = srt;
-
-  if (bitmap == (StgHalfWord)(-1)) {
-      retain_large_srt_bitmap( (StgLargeSRT *)srt, c, c_child_r );
-      return;
-  }
-
-  while (bitmap != 0) {
-      if ((bitmap & 1) != 0) {
-#if defined(COMPILING_WINDOWS_DLL)
-          if ( (unsigned long)(*srt) & 0x1 ) {
-              retainClosure(* (StgClosure**) ((unsigned long) (*srt) & ~0x1),
-                            c, c_child_r);
-          } else {
-              retainClosure(*srt,c,c_child_r);
-          }
-#else
-          retainClosure(*srt,c,c_child_r);
-#endif
-      }
-      p++;
-      bitmap = bitmap >> 1;
-  }
 }
 
 /* -----------------------------------------------------------------------------
@@ -1327,7 +1218,9 @@ retainStack( StgClosure *c, retainer c_child_r,
             p = retain_small_bitmap(p, size, bitmap, c, c_child_r);
 
         follow_srt:
-            retainSRT((StgClosure **)GET_SRT(info), info->i.srt_bitmap, c, c_child_r);
+            if (info->i.srt) {
+                retainClosure(GET_SRT(info),c,c_child_r);
+            }
             continue;
 
         case RET_BCO: {
@@ -1559,8 +1452,7 @@ inner_loop:
         // all static objects after major garbage collections.
         goto loop;
     case THUNK_STATIC:
-    case FUN_STATIC:
-        if (get_itbl(c)->srt_bitmap == 0) {
+        if (get_itbl(c)->srt == 0) {
             // No need to compute the retainer set; no dynamic objects
             // are reachable from *c.
             //
@@ -1587,6 +1479,14 @@ inner_loop:
             // reachable static objects.
             goto loop;
         }
+    case FUN_STATIC: {
+        StgInfoTable *info = get_itbl(c);
+        if (info->srt == 0 && info->layout.payload.ptrs == 0) {
+            goto loop;
+        } else {
+            break;
+        }
+    }
     default:
         break;
     }
@@ -1683,6 +1583,15 @@ inner_loop:
         goto loop;
     }
 
+    case BLOCKING_QUEUE:
+    {
+        StgBlockingQueue *bq = (StgBlockingQueue *)c;
+        retainClosure((StgClosure*) bq->link,           c, c_child_r);
+        retainClosure((StgClosure*) bq->bh,             c, c_child_r);
+        retainClosure((StgClosure*) bq->owner,          c, c_child_r);
+        goto loop;
+    }
+
     case PAP:
     {
         StgPAP *pap = (StgPAP *)c;
@@ -1755,11 +1664,11 @@ static void
 computeRetainerSet( void )
 {
     StgWeak *weak;
-    RetainerSet *rtl;
     uint32_t g, n;
     StgPtr ml;
     bdescr *bd;
 #if defined(DEBUG_RETAINER)
+    RetainerSet *rtl;
     RetainerSet tmpRetainerSet;
 #endif
 
@@ -1784,7 +1693,9 @@ computeRetainerSet( void )
     }
 
     // Consider roots from the stable ptr table.
-    markStableTables(retainRoot, NULL);
+    markStablePtrTable(retainRoot, NULL);
+    // Remember old stable name addresses.
+    rememberOldStableNameAddresses ();
 
     // The following code resets the rs field of each unvisited mutable
     // object (computing sumOfNewCostExtra and updating costArray[] when
@@ -1801,9 +1712,9 @@ computeRetainerSet( void )
             for (ml = bd->start; ml < bd->free; ml++) {
 
                 maybeInitRetainerSet((StgClosure *)*ml);
-                rtl = retainerSetOf((StgClosure *)*ml);
 
 #if defined(DEBUG_RETAINER)
+                rtl = retainerSetOf((StgClosure *)*ml);
                 if (rtl == NULL) {
                     // first visit to *ml
                     // This is a violation of the interface rule!
@@ -1886,9 +1797,6 @@ resetStaticObjectForRetainerProfiling( StgClosure *static_objects )
             p = (StgClosure*)*THUNK_STATIC_LINK(p);
             break;
         case FUN_STATIC:
-            maybeInitRetainerSet(p);
-            p = (StgClosure*)*FUN_STATIC_LINK(p);
-            break;
         case CONSTR:
         case CONSTR_1_0:
         case CONSTR_2_0:
@@ -2056,7 +1964,7 @@ retainerProfile(void)
 #if defined(DEBUG_RETAINER)
 
 #define LOOKS_LIKE_PTR(r) ((LOOKS_LIKE_STATIC_CLOSURE(r) || \
-        ((HEAP_ALLOCED(r) && ((Bdescr((P_)r)->flags & BF_FREE) == 0)))) && \
+        (HEAP_ALLOCED(r))) && \
         ((StgWord)(*(StgPtr)r)!=(StgWord)0xaaaaaaaaaaaaaaaaULL))
 
 static uint32_t

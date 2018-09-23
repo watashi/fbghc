@@ -13,6 +13,8 @@ module ApiAnnotation (
   LRdrName -- Exists for haddocks only
   ) where
 
+import GhcPrelude
+
 import RdrName
 import Outputable
 import SrcLoc
@@ -278,13 +280,13 @@ data AnnKeywordId
     | AnnThIdTySplice -- ^ '$$'
     | AnnThTyQuote -- ^ double '''
     | AnnTilde -- ^ '~'
-    | AnnTildehsh -- ^ '~#'
     | AnnType
     | AnnUnit -- ^ '()' for types
     | AnnUsing
     | AnnVal  -- ^ e.g. INTEGER
     | AnnValStr  -- ^ String value, will need quotes when output
     | AnnVbar -- ^ '|'
+    | AnnVia -- ^ 'via'
     | AnnWhere
     | Annlarrowtail -- ^ '-<'
     | AnnlarrowtailU -- ^ '-<', unicode variant
@@ -320,7 +322,7 @@ instance Outputable AnnotationComment where
 
 -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnOpen',
 --             'ApiAnnotation.AnnClose','ApiAnnotation.AnnComma',
---             'ApiAnnotation.AnnRarrow','ApiAnnotation.AnnTildehsh',
+--             'ApiAnnotation.AnnRarrow'
 --             'ApiAnnotation.AnnTilde'
 --   - May have 'ApiAnnotation.AnnComma' when in a list
 type LRdrName = Located RdrName

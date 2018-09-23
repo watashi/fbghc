@@ -4,6 +4,8 @@
 module RegAlloc.Graph.Main (
         regAlloc
 ) where
+import GhcPrelude
+
 import qualified GraphColor as Color
 import RegAlloc.Liveness
 import RegAlloc.Graph.Spill
@@ -25,7 +27,6 @@ import UniqSet
 import UniqSupply
 import Util (seqList)
 
-import Data.List
 import Data.Maybe
 import Control.Monad
 

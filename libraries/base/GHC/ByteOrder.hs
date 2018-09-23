@@ -12,6 +12,7 @@
 --
 -- Target byte ordering.
 --
+-- @since 4.11.0.0
 -----------------------------------------------------------------------------
 
 module GHC.ByteOrder where
@@ -20,7 +21,13 @@ module GHC.ByteOrder where
 data ByteOrder
     = BigEndian    -- ^ most-significant-byte occurs in lowest address.
     | LittleEndian -- ^ least-significant-byte occurs in lowest address.
-    deriving (Eq, Ord, Bounded, Enum, Read, Show)
+    deriving ( Eq      -- ^ @since 4.11.0.0
+             , Ord     -- ^ @since 4.11.0.0
+             , Bounded -- ^ @since 4.11.0.0
+             , Enum    -- ^ @since 4.11.0.0
+             , Read    -- ^ @since 4.11.0.0
+             , Show    -- ^ @since 4.11.0.0
+             )
 
 -- | The byte ordering of the target machine.
 targetByteOrder :: ByteOrder

@@ -6,6 +6,8 @@ module RegAlloc.Linear.Stats (
 
 where
 
+import GhcPrelude
+
 import RegAlloc.Linear.Base
 import RegAlloc.Liveness
 import Instruction
@@ -13,7 +15,6 @@ import Instruction
 import UniqFM
 import Outputable
 
-import Data.List
 import State
 
 -- | Build a map of how many times each reg was alloced, clobbered, loaded etc.

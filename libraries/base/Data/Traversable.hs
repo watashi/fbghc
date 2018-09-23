@@ -60,11 +60,13 @@ import Data.Foldable ( Foldable )
 import Data.Functor
 import Data.Functor.Identity ( Identity(..) )
 import Data.Functor.Utils ( StateL(..), StateR(..) )
-import Data.Monoid ( Dual(..), Sum(..), Product(..), First(..), Last(..) )
+import Data.Monoid ( Dual(..), Sum(..), Product(..),
+                     First(..), Last(..), Alt(..), Ap(..) )
+import Data.Ord ( Down(..) )
 import Data.Proxy ( Proxy(..) )
 
 import GHC.Arr
-import GHC.Base ( Applicative(..), Monad(..), Monoid, Maybe(..),
+import GHC.Base ( Applicative(..), Monad(..), Monoid, Maybe(..), NonEmpty(..),
                   ($), (.), id, flip )
 import GHC.Generics
 import qualified GHC.List as List ( foldr )
@@ -163,7 +165,7 @@ class (Functor t, Foldable t) => Traversable t where
     traverse f = sequenceA . fmap f
 
     -- | Evaluate each action in the structure from left to right, and
-    -- and collect the results. For a version that ignores the results
+    -- collect the results. For a version that ignores the results
     -- see 'Data.Foldable.sequenceA_'.
     sequenceA :: Applicative f => t (f a) -> f (t a)
     {-# INLINE sequenceA #-}  -- See Note [Inline default methods]
@@ -198,8 +200,8 @@ Consider
 
 This gives rise to a list-instance of mapM looking like this
 
-  $fTraversable[]_$ctaverse = ...code for traverse on lists...
-       {-# INLINE $fTraversable[]_$ctaverse #-}
+  $fTraversable[]_$ctraverse = ...code for traverse on lists...
+       {-# INLINE $fTraversable[]_$ctraverse #-}
   $fTraversable[]_$cmapM    = $fTraversable[]_$ctraverse
 
 Now the $ctraverse obediently inlines into the RHS of $cmapM, /but/
@@ -236,6 +238,10 @@ instance Traversable [] where
     {-# INLINE traverse #-} -- so that traverse can fuse
     traverse f = List.foldr cons_f (pure [])
       where cons_f x ys = liftA2 (:) (f x) ys
+
+-- | @since 4.9.0.0
+instance Traversable NonEmpty where
+  traverse f ~(a :| as) = liftA2 (:|) (f a) (traverse f as)
 
 -- | @since 4.7.0.0
 instance Traversable (Either a) where
@@ -285,11 +291,21 @@ instance Traversable First where
 instance Traversable Last where
     traverse f (Last x) = Last <$> traverse f x
 
+-- | @since 4.12.0.0
+instance (Traversable f) => Traversable (Alt f) where
+    traverse f (Alt x) = Alt <$> traverse f x
+
+-- | @since 4.12.0.0
+instance (Traversable f) => Traversable (Ap f) where
+    traverse f (Ap x) = Ap <$> traverse f x
+
 -- | @since 4.9.0.0
 instance Traversable ZipList where
     traverse f (ZipList x) = ZipList <$> traverse f x
 
+-- | @since 4.9.0.0
 deriving instance Traversable Identity
+
 
 -- Instances for GHC.Generics
 -- | @since 4.9.0.0
@@ -303,20 +319,51 @@ instance Traversable U1 where
     sequence _ = pure U1
     {-# INLINE sequence #-}
 
+-- | @since 4.9.0.0
 deriving instance Traversable V1
+
+-- | @since 4.9.0.0
 deriving instance Traversable Par1
+
+-- | @since 4.9.0.0
 deriving instance Traversable f => Traversable (Rec1 f)
+
+-- | @since 4.9.0.0
 deriving instance Traversable (K1 i c)
+
+-- | @since 4.9.0.0
 deriving instance Traversable f => Traversable (M1 i c f)
+
+-- | @since 4.9.0.0
 deriving instance (Traversable f, Traversable g) => Traversable (f :+: g)
+
+-- | @since 4.9.0.0
 deriving instance (Traversable f, Traversable g) => Traversable (f :*: g)
+
+-- | @since 4.9.0.0
 deriving instance (Traversable f, Traversable g) => Traversable (f :.: g)
+
+-- | @since 4.9.0.0
 deriving instance Traversable UAddr
+
+-- | @since 4.9.0.0
 deriving instance Traversable UChar
+
+-- | @since 4.9.0.0
 deriving instance Traversable UDouble
+
+-- | @since 4.9.0.0
 deriving instance Traversable UFloat
+
+-- | @since 4.9.0.0
 deriving instance Traversable UInt
+
+-- | @since 4.9.0.0
 deriving instance Traversable UWord
+
+-- Instance for Data.Ord
+-- | @since 4.12.0.0
+deriving instance Traversable Down
 
 -- general functions
 
@@ -333,14 +380,14 @@ forM :: (Traversable t, Monad m) => t a -> (a -> m b) -> m (t b)
 forM = flip mapM
 
 -- |The 'mapAccumL' function behaves like a combination of 'fmap'
--- and 'foldl'; it applies a function to each element of a structure,
+-- and 'Data.Foldable.foldl'; it applies a function to each element of a structure,
 -- passing an accumulating parameter from left to right, and returning
 -- a final value of this accumulator together with the new structure.
 mapAccumL :: Traversable t => (a -> b -> (a, c)) -> a -> t b -> (a, t c)
 mapAccumL f s t = runStateL (traverse (StateL . flip f) t) s
 
 -- |The 'mapAccumR' function behaves like a combination of 'fmap'
--- and 'foldr'; it applies a function to each element of a structure,
+-- and 'Data.Foldable.foldr'; it applies a function to each element of a structure,
 -- passing an accumulating parameter from right to left, and returning
 -- a final value of this accumulator together with the new structure.
 mapAccumR :: Traversable t => (a -> b -> (a, c)) -> a -> t b -> (a, t c)

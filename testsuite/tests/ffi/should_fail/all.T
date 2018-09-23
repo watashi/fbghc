@@ -14,8 +14,11 @@ test('T5664', normal, compile_fail, ['-v0'])
 test('T7506', normal, compile_fail, [''])
 test('T7243', normal, compile_fail, [''])
 test('T10461', normal, compile_fail, [''])
-test('UnsafeReenter', [omit_ways(['ghciext', 'ghci']), exit_code(1)], compile_and_run, ['-v0 UnsafeReenterC.c'])
-test('UnsafeReenterGhci',
-     [exit_code(1), extra_files(['UnsafeReenter.hs', 'UnsafeReenterC.c']), expect_broken(13730)],
-     run_command,
-     ['$MAKE -s --no-print-directory UnsafeReenterGhci'])
+
+# UnsafeReenter tests implementation of an undefined behavior (calling Haskell
+# from an unsafe foreign function) and only makes sense in non-threaded way
+# (threaded runtime will hang). See #14912.
+test('UnsafeReenter',
+     [omit_ways(threaded_ways), exit_code(1)],
+     compile_and_run,
+     ['UnsafeReenterC.c'])

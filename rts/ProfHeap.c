@@ -23,6 +23,7 @@
 #include "Trace.h"
 #include "sm/GCThread.h"
 
+#include <fs_rts.h>
 #include <string.h>
 
 /* -----------------------------------------------------------------------------
@@ -126,8 +127,8 @@ closureIdentity( const StgClosure *p )
             return retainerSetOf(p);
         else
             return NULL;
+#endif
 
-#else
     case HEAP_BY_CLOSURE_TYPE:
     {
         const StgInfoTable *info;
@@ -146,7 +147,6 @@ closureIdentity( const StgClosure *p )
         }
     }
 
-#endif
     default:
         barf("closureIdentity");
     }
@@ -171,7 +171,7 @@ doingRetainerProfiling( void )
 }
 #endif /* PROFILING */
 
-// Precesses a closure 'c' being destroyed whose size is 'size'.
+// Processes a closure 'c' being destroyed whose size is 'size'.
 // Make sure that LDV_recordDead() is not invoked on 'inherently used' closures
 // such as TSO; they should not be involved in computing dragNew or voidNew.
 //
@@ -340,7 +340,7 @@ void initProfiling (void)
     sprintf(hp_filename, "%s.hp", prog);
 
     /* open the log file */
-    if ((hp_file = fopen(hp_filename, "w")) == NULL) {
+    if ((hp_file = __rts_fopen(hp_filename, "w")) == NULL) {
       debugBelch("Can't open profiling report file %s\n",
               hp_filename);
       RtsFlags.ProfFlags.doHeapProfile = 0;
@@ -814,7 +814,6 @@ dumpCensus( Census *census )
 
         if (count == 0) continue;
 
-#if !defined(PROFILING)
         switch (RtsFlags.ProfFlags.doHeapProfile) {
         case HEAP_BY_CLOSURE_TYPE:
             fprintf(hp_file, "%s", (char *)ctr->identity);
@@ -822,7 +821,6 @@ dumpCensus( Census *census )
                                       count * sizeof(W_));
             break;
         }
-#endif
 
 #if defined(PROFILING)
         switch (RtsFlags.ProfFlags.doHeapProfile) {
@@ -1095,16 +1093,16 @@ heapCensusChain( Census *census, bdescr *bd )
 
             case MUT_ARR_PTRS_CLEAN:
             case MUT_ARR_PTRS_DIRTY:
-            case MUT_ARR_PTRS_FROZEN:
-            case MUT_ARR_PTRS_FROZEN0:
+            case MUT_ARR_PTRS_FROZEN_CLEAN:
+            case MUT_ARR_PTRS_FROZEN_DIRTY:
                 prim = true;
                 size = mut_arr_ptrs_sizeW((StgMutArrPtrs *)p);
                 break;
 
             case SMALL_MUT_ARR_PTRS_CLEAN:
             case SMALL_MUT_ARR_PTRS_DIRTY:
-            case SMALL_MUT_ARR_PTRS_FROZEN:
-            case SMALL_MUT_ARR_PTRS_FROZEN0:
+            case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+            case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
                 prim = true;
                 size = small_mut_arr_ptrs_sizeW((StgSmallMutArrPtrs *)p);
                 break;

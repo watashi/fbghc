@@ -15,6 +15,8 @@ module ByteCodeAsm (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import ByteCodeInstr
 import ByteCodeItbls
 import ByteCodeTypes
@@ -123,9 +125,12 @@ mallocStrings hsc_env ulbcos = do
     return bco { unlinkedBCOLits = lits, unlinkedBCOPtrs = ptrs }
 
   spliceLit (BCONPtrStr _) = do
-    (RemotePtr p : rest) <- get
-    put rest
-    return (BCONPtrWord (fromIntegral p))
+    rptrs <- get
+    case rptrs of
+      (RemotePtr p : rest) -> do
+        put rest
+        return (BCONPtrWord (fromIntegral p))
+      _ -> panic "mallocStrings:spliceLit"
   spliceLit other = return other
 
   splicePtr (BCOPtrBCO bco) = BCOPtrBCO <$> splice bco
@@ -349,6 +354,12 @@ assembleI dflags i = case i of
   PUSH_L o1                -> emit bci_PUSH_L [SmallOp o1]
   PUSH_LL o1 o2            -> emit bci_PUSH_LL [SmallOp o1, SmallOp o2]
   PUSH_LLL o1 o2 o3        -> emit bci_PUSH_LLL [SmallOp o1, SmallOp o2, SmallOp o3]
+  PUSH8 o1                 -> emit bci_PUSH8 [SmallOp o1]
+  PUSH16 o1                -> emit bci_PUSH16 [SmallOp o1]
+  PUSH32 o1                -> emit bci_PUSH32 [SmallOp o1]
+  PUSH8_W o1               -> emit bci_PUSH8_W [SmallOp o1]
+  PUSH16_W o1              -> emit bci_PUSH16_W [SmallOp o1]
+  PUSH32_W o1              -> emit bci_PUSH32_W [SmallOp o1]
   PUSH_G nm                -> do p <- ptr (BCOPtrName nm)
                                  emit bci_PUSH_G [Op p]
   PUSH_PRIMOP op           -> do p <- ptr (BCOPtrPrimOp op)
@@ -363,6 +374,15 @@ assembleI dflags i = case i of
                            -> do let ul_bco = assembleBCO dflags proto
                                  p <- ioptr (liftM BCOPtrBCO ul_bco)
                                  emit (push_alts pk) [Op p]
+  PUSH_PAD8                -> emit bci_PUSH_PAD8 []
+  PUSH_PAD16               -> emit bci_PUSH_PAD16 []
+  PUSH_PAD32               -> emit bci_PUSH_PAD32 []
+  PUSH_UBX8 lit            -> do np <- literal lit
+                                 emit bci_PUSH_UBX8 [Op np]
+  PUSH_UBX16 lit           -> do np <- literal lit
+                                 emit bci_PUSH_UBX16 [Op np]
+  PUSH_UBX32 lit           -> do np <- literal lit
+                                 emit bci_PUSH_UBX32 [Op np]
   PUSH_UBX lit nws         -> do np <- literal lit
                                  emit bci_PUSH_UBX [Op np, SmallOp nws]
 
@@ -427,17 +447,19 @@ assembleI dflags i = case i of
      -- On Windows, stdcall labels have a suffix indicating the no. of
      -- arg words, e.g. foo@8.  testcase: ffi012(ghci)
     literal (MachLabel fs _ _) = litlabel fs
-    literal (MachWord w)       = int (fromIntegral w)
-    literal (MachInt j)        = int (fromIntegral j)
     literal MachNullAddr       = int 0
     literal (MachFloat r)      = float (fromRational r)
     literal (MachDouble r)     = double (fromRational r)
     literal (MachChar c)       = int (ord c)
-    literal (MachInt64 ii)     = int64 (fromIntegral ii)
-    literal (MachWord64 ii)    = int64 (fromIntegral ii)
     literal (MachStr bs)       = lit [BCONPtrStr bs]
        -- MachStr requires a zero-terminator when emitted
-    literal LitInteger{}       = panic "ByteCodeAsm.literal: LitInteger"
+    literal (LitNumber nt i _) = case nt of
+      LitNumInt     -> int (fromIntegral i)
+      LitNumWord    -> int (fromIntegral i)
+      LitNumInt64   -> int64 (fromIntegral i)
+      LitNumWord64  -> int64 (fromIntegral i)
+      LitNumInteger -> panic "ByteCodeAsm.literal: LitNumInteger"
+      LitNumNatural -> panic "ByteCodeAsm.literal: LitNumNatural"
 
     litlabel fs = lit [BCONPtrLbl fs]
     addr (RemotePtr a) = words [fromIntegral a]

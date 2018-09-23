@@ -37,7 +37,6 @@ module CoreFVs (
         ruleRhsFreeVars, ruleFreeVars, rulesFreeVars,
         rulesFreeVarsDSet,
         ruleLhsFreeIds, ruleLhsFreeIdsList,
-        vectsFreeVars,
 
         expr_fvs,
 
@@ -59,6 +58,8 @@ module CoreFVs (
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import CoreSyn
 import Id
@@ -350,7 +351,7 @@ orphNamesOfType (TyVarTy _)          = emptyNameSet
 orphNamesOfType (LitTy {})           = emptyNameSet
 orphNamesOfType (TyConApp tycon tys) = orphNamesOfTyCon tycon
                                        `unionNameSet` orphNamesOfTypes tys
-orphNamesOfType (ForAllTy bndr res)  = orphNamesOfType (binderKind bndr)
+orphNamesOfType (ForAllTy bndr res)  = orphNamesOfType (binderType bndr)
                                        `unionNameSet` orphNamesOfType res
 orphNamesOfType (FunTy arg res)      = unitNameSet funTyConName    -- NB!  See Trac #8535
                                        `unionNameSet` orphNamesOfType arg
@@ -365,8 +366,13 @@ orphNamesOfThings f = foldr (unionNameSet . f) emptyNameSet
 orphNamesOfTypes :: [Type] -> NameSet
 orphNamesOfTypes = orphNamesOfThings orphNamesOfType
 
+orphNamesOfMCo :: MCoercion -> NameSet
+orphNamesOfMCo MRefl    = emptyNameSet
+orphNamesOfMCo (MCo co) = orphNamesOfCo co
+
 orphNamesOfCo :: Coercion -> NameSet
-orphNamesOfCo (Refl _ ty)           = orphNamesOfType ty
+orphNamesOfCo (Refl ty)             = orphNamesOfType ty
+orphNamesOfCo (GRefl _ ty mco)      = orphNamesOfType ty `unionNameSet` orphNamesOfMCo mco
 orphNamesOfCo (TyConAppCo _ tc cos) = unitNameSet (getName tc) `unionNameSet` orphNamesOfCos cos
 orphNamesOfCo (AppCo co1 co2)       = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
 orphNamesOfCo (ForAllCo _ kind_co co)
@@ -377,20 +383,19 @@ orphNamesOfCo (AxiomInstCo con _ cos) = orphNamesOfCoCon con `unionNameSet` orph
 orphNamesOfCo (UnivCo p _ t1 t2)    = orphNamesOfProv p `unionNameSet` orphNamesOfType t1 `unionNameSet` orphNamesOfType t2
 orphNamesOfCo (SymCo co)            = orphNamesOfCo co
 orphNamesOfCo (TransCo co1 co2)     = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
-orphNamesOfCo (NthCo _ co)          = orphNamesOfCo co
+orphNamesOfCo (NthCo _ _ co)        = orphNamesOfCo co
 orphNamesOfCo (LRCo  _ co)          = orphNamesOfCo co
 orphNamesOfCo (InstCo co arg)       = orphNamesOfCo co `unionNameSet` orphNamesOfCo arg
-orphNamesOfCo (CoherenceCo co1 co2) = orphNamesOfCo co1 `unionNameSet` orphNamesOfCo co2
 orphNamesOfCo (KindCo co)           = orphNamesOfCo co
 orphNamesOfCo (SubCo co)            = orphNamesOfCo co
 orphNamesOfCo (AxiomRuleCo _ cs)    = orphNamesOfCos cs
+orphNamesOfCo (HoleCo _)            = emptyNameSet
 
 orphNamesOfProv :: UnivCoProvenance -> NameSet
 orphNamesOfProv UnsafeCoerceProv    = emptyNameSet
 orphNamesOfProv (PhantomProv co)    = orphNamesOfCo co
 orphNamesOfProv (ProofIrrelProv co) = orphNamesOfCo co
 orphNamesOfProv (PluginProv _)      = emptyNameSet
-orphNamesOfProv (HoleProv _)        = emptyNameSet
 
 orphNamesOfCos :: [Coercion] -> NameSet
 orphNamesOfCos = orphNamesOfThings orphNamesOfCo
@@ -513,17 +518,6 @@ put this 'f' in a Rec block, but will mark the binding as a non-rule loop
 breaker, which is perfectly inlinable.
 -}
 
--- |Free variables of a vectorisation declaration
-vectsFreeVars :: [CoreVect] -> VarSet
-vectsFreeVars = mapUnionVarSet vectFreeVars
-  where
-    vectFreeVars (Vect   _ rhs)   = fvVarSet $ filterFV isLocalId $ expr_fvs rhs
-    vectFreeVars (NoVect _)       = noFVs
-    vectFreeVars (VectType _ _ _) = noFVs
-    vectFreeVars (VectClass _)    = noFVs
-    vectFreeVars (VectInst _)     = noFVs
-      -- this function is only concerned with values, not types
-
 {-
 ************************************************************************
 *                                                                      *
@@ -535,14 +529,23 @@ The free variable pass annotates every node in the expression with its
 NON-GLOBAL free variables and type variables.
 -}
 
-type FVAnn = DVarSet
+type FVAnn = DVarSet  -- See Note [The FVAnn invariant]
+
+{- Note [The FVAnn invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Invariant: a FVAnn, say S, is closed:
+  That is: if v is in S,
+           then freevars( v's type/kind ) is also in S
+-}
 
 -- | Every node in a binding group annotated with its
 -- (non-global) free variables, both Ids and TyVars, and type.
 type CoreBindWithFVs = AnnBind Id FVAnn
+
 -- | Every node in an expression annotated with its
 -- (non-global) free variables, both Ids and TyVars, and type.
-type CoreExprWithFVs  = AnnExpr Id FVAnn
+-- NB: see Note [The FVAnn invariant]
+type CoreExprWithFVs  = AnnExpr  Id FVAnn
 type CoreExprWithFVs' = AnnExpr' Id FVAnn
 
 -- | Every node in an expression annotated with its
@@ -696,12 +699,14 @@ freeVarsBind (Rec binds) body_fvs
     rhss2        = map freeVars rhss
     rhs_body_fvs = foldr (unionFVs . freeVarsOf) body_fvs rhss2
     binders_fvs  = fvDVarSet $ mapUnionFV bndrRuleAndUnfoldingFVs binders
+                   -- See Note [The FVAnn invariant]
     all_fvs      = rhs_body_fvs `unionFVs` binders_fvs
             -- The "delBinderFV" happens after adding the idSpecVars,
             -- since the latter may add some of the binders as fvs
 
 freeVars :: CoreExpr -> CoreExprWithFVs
--- ^ Annotate a 'CoreExpr' with its (non-global) free type and value variables at every tree node
+-- ^ Annotate a 'CoreExpr' with its (non-global) free type
+--   and value variables at every tree node.
 freeVars = go
   where
     go :: CoreExpr -> CoreExprWithFVs
@@ -709,7 +714,8 @@ freeVars = go
       | isLocalVar v = (aFreeVar v `unionFVs` ty_fvs, AnnVar v)
       | otherwise    = (emptyDVarSet,                 AnnVar v)
       where
-        ty_fvs = dVarTypeTyCoVars v  -- Do we need this?
+        ty_fvs = dVarTypeTyCoVars v
+                 -- See Note [The FVAnn invariant]
 
     go (Lit lit) = (emptyDVarSet, AnnLit lit)
     go (Lam b body)
@@ -719,6 +725,7 @@ freeVars = go
         body'@(body_fvs, _) = go body
         b_ty  = idType b
         b_fvs = tyCoVarsOfTypeDSet b_ty
+                -- See Note [The FVAnn invariant]
 
     go (App fun arg)
       = ( freeVarsOf fun' `unionFVs` freeVarsOf arg'
@@ -731,8 +738,8 @@ freeVars = go
       = ( (bndr `delBinderFV` alts_fvs)
            `unionFVs` freeVarsOf scrut2
            `unionFVs` tyCoVarsOfTypeDSet ty
-          -- don't need to look at (idType bndr)
-          -- b/c that's redundant with scrut
+          -- Don't need to look at (idType bndr)
+          -- because that's redundant with scrut
         , AnnCase scrut2 bndr ty alts2 )
       where
         scrut2 = go scrut

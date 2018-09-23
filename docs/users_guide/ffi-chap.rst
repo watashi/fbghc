@@ -7,7 +7,10 @@ Foreign function interface (FFI)
    single: Foreign function interface
    single: interfacing with native code
 
-.. ghc-flag:: -XForeignFunctionInterface
+.. extension:: ForeignFunctionInterface
+    :shortdesc: Enable foreign function interface.
+
+    :since: 6.8.1
 
     Allow use of the Haskell foreign function interface.
 
@@ -16,7 +19,7 @@ definition is part of the Haskell Report on
 `http://www.haskell.org/ <http://www.haskell.org/>`__.
 
 FFI support is enabled by default, but can be enabled or disabled
-explicitly with the :ghc-flag:`-XForeignFunctionInterface` flag.
+explicitly with the :extension:`ForeignFunctionInterface` flag.
 
 GHC implements a number of GHC-specific extensions to the FFI Chapter of the
 Haskell 2010 Report. These extensions are described in :ref:`ffi-ghcexts`, but
@@ -32,16 +35,21 @@ GHC differences to the FFI Chapter
 Guaranteed call safety
 ~~~~~~~~~~~~~~~~~~~~~~
 
-The FFI addendum stipulates that an implementation is free to implement an
-``unsafe`` call by performing a ``safe`` call (and therefore may run in an
-arbitrary thread and may be subject to concurrent garbage collection). This
-greatly constrains library authors since it implies that it is never safe to
-pass any heap object reference to a foreign function, even if invoked with an
-``unsafe`` call. For instance, it is often desirable to pass an unpinned
-``ByteArray#``\s directly to native code to avoid making an
-otherwise-unnecessary copy. However, this can only be done safely under
-``unsafe`` call semantics as otherwise the array may be moved by the garbage
+The Haskell 2010 Report specifies that ``safe`` FFI calls must allow foreign
+calls to safely call into Haskell code. In practice, this means that the
+garbage collector must be able to run while these calls are in progress,
+moving heap-allocated Haskell values around arbitrarily.
+
+This greatly constrains library authors since it implies that it is not safe to
+pass any heap object reference to a ``safe`` foreign function call.  For
+instance, it is often desirable to pass an unpinned ``ByteArray#``\s directly
+to native code to avoid making an otherwise-unnecessary copy. However, this can
+only be done safely if the array is guaranteed not to be moved by the garbage
 collector in the middle of the call.
+
+The Chapter does *not* require implementations to refrain from doing the
+same for ``unsafe`` calls, so strictly Haskell 2010-conforming programs
+cannot pass heap-allocated references to ``unsafe`` FFI calls either.
 
 In previous releases, GHC would take advantage of the freedom afforded by the
 Chapter by performing ``safe`` foreign calls in place of ``unsafe`` calls in
@@ -50,7 +58,8 @@ compiled would fail under GHCi (e.g. :ghc-ticket:`13730`).
 
 However, since version 8.4 this is no longer the case: GHC **guarantees** that
 garbage collection will never occur during an ``unsafe`` call, even in the
-bytecode interpreter.
+bytecode interpreter, and further guarantees that ``unsafe`` calls will be
+performed in the calling thread.
 
 
 .. _ffi-ghcexts:
@@ -118,6 +127,11 @@ come with GHC. For more details see the
 Interruptible foreign calls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. extension:: InterruptibleFFI
+    :shortdesc: Enable interruptible FFI.
+
+    :since: 7.2.1
+
 This concerns the interaction of foreign calls with
 ``Control.Concurrent.throwTo``. Normally when the target of a
 ``throwTo`` is involved in a foreign call, the exception is not raised
@@ -152,7 +166,7 @@ Unix systems
 
 Windows systems
     [Vista and later only] The RTS calls the Win32 function
-    ``CancelSynchronousIO``, which will cause a blocking I/O operation
+    ``CancelSynchronousIo``, which will cause a blocking I/O operation
     to return with the error ``ERROR_OPERATION_ABORTED``.
 
 If the system call is successfully interrupted, it will return to
@@ -166,6 +180,11 @@ it is not typically necessary to handle ``ERROR_OPERATION_ABORTED``.
 
 The CAPI calling convention
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. extension:: CApiFFI
+    :shortdesc: Enable the CAPI calling convention.
+
+    :since: 7.10.1
 
 The ``CApiFFI`` extension allows a calling convention of ``capi`` to be
 used in foreign declarations, e.g. ::
@@ -225,6 +244,46 @@ forget to call it, the worst that can happen is that some memory remains
 allocated until ``hs_exit()`` is called. If you call it too often, the
 worst that can happen is that the next call to a Haskell function incurs
 some extra overhead.
+
+.. _ffi-stable-ptr-extras:
+
+Freeing many stable pointers efficiently
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The standard function ``hs_free_stable_ptr`` locks the stable pointer
+table, frees the given stable pointer, and then unlocks the stable pointer
+table again. When freeing many stable pointers at once, it is usually
+more efficient to lock and unlock the table only once.
+
+.. code-block:: c
+
+    extern void hs_lock_stable_ptr_table (void);
+
+    extern void hs_unlock_stable_ptr_table (void);
+
+    extern void hs_free_stable_ptr_unsafe (HsStablePtr sp);
+
+``hs_free_stable_ptr_unsafe`` must be used *only* when the table has been
+locked using ``hs_lock_stable_ptr_table``. It must be unlocked afterwards
+using ``hs_unlock_stable_ptr_table``. The Haskell garbage collector cannot
+run while the table is locked, so it should be unlocked promptly. The
+following operations are forbidden while the stable pointer table is locked:
+
+* Calling any Haskell function, whether or not that function
+  manipulates stable pointers.
+
+* Calling any FFI function that deals with the stable pointer table
+  except for arbitrarily many calls to ``hs_free_stable_ptr_unsafe``
+  and the final call to ``hs_unlock_stable_ptr_table``.
+
+* Calling ``hs_free_fun_ptr``.
+
+.. note::
+
+    GHC versions before 8.8 defined undocumented functions
+    ``hs_lock_stable_tables`` and ``hs_unlock_stable_tables`` instead
+    of ``hs_lock_stable_ptr_table`` and ``hs_unlock_stable_ptr_table``.
+    Those names are now deprecated.
 
 .. _ffi-ghc:
 
@@ -336,6 +395,12 @@ reliably re-initialise after this has happened; see :ref:`infelicities-ffi`.
     link using GHC, although this isn't essential. If you do use GHC, then
     don't forget the flag :ghc-flag:`-no-hs-main`, otherwise GHC
     will try to link to the ``Main`` Haskell module.
+
+.. note::
+    On Windows hs_init treats argv as UTF8-encoded. Passing other encodings
+    might lead to unexpected results. Passing NULL as argv is valid but can
+    lead to <unknown> showing up in error messages instead of the name of the
+    executable.
 
 To use ``+RTS`` flags with ``hs_init()``, we have to modify the example
 slightly. By default, GHC's RTS will only accept "safe" ``+RTS`` flags (see

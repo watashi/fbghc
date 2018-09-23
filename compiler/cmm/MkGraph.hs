@@ -1,4 +1,4 @@
-{-# LANGUAGE BangPatterns, CPP, GADTs #-}
+{-# LANGUAGE BangPatterns, GADTs #-}
 
 module MkGraph
   ( CmmAGraph, CmmAGraphScoped, CgStmt(..)
@@ -21,6 +21,8 @@ module MkGraph
   )
 where
 
+import GhcPrelude hiding ( (<*>) ) -- avoid importing (<*>)
+
 import BlockId
 import Cmm
 import CmmCallConv
@@ -35,13 +37,7 @@ import ForeignCall
 import OrdList
 import SMRep (ByteOff)
 import UniqSupply
-
-import Control.Monad
-import Data.List
-import Data.Maybe
-import Prelude (($),Int,Bool,Eq(..)) -- avoid importing (<*>)
-
-#include "HsVersions.h"
+import Util
 
 
 -----------------------------------------------------------------------------
@@ -185,12 +181,10 @@ mkNop        :: CmmAGraph
 mkNop         = nilOL
 
 mkComment    :: FastString -> CmmAGraph
-#if defined(DEBUG)
--- SDM: generating all those comments takes time, this saved about 4% for me
-mkComment fs  = mkMiddle $ CmmComment fs
-#else
-mkComment _   = nilOL
-#endif
+mkComment fs
+  -- SDM: generating all those comments takes time, this saved about 4% for me
+  | debugIsOn = mkMiddle $ CmmComment fs
+  | otherwise = nilOL
 
 ---------- Assignment and store
 mkAssign     :: CmmReg  -> CmmExpr -> CmmAGraph

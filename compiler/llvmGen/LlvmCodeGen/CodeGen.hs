@@ -7,6 +7,8 @@ module LlvmCodeGen.CodeGen ( genLlvmProc ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Llvm
 import LlvmCodeGen.Base
 import LlvmCodeGen.Regs
@@ -36,15 +38,15 @@ import Util
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Writer
 
-#if __GLASGOW_HASKELL__ > 710
 import Data.Semigroup   ( Semigroup )
 import qualified Data.Semigroup as Semigroup
-#endif
 import Data.List ( nub )
 import Data.Maybe ( catMaybes )
 
 type Atomic = Bool
 type LlvmStatements = OrdList LlvmStatement
+
+data Signage = Signed | Unsigned deriving (Eq, Show)
 
 -- -----------------------------------------------------------------------------
 -- | Top-level of the LLVM proc Code generator
@@ -207,7 +209,7 @@ genCall t@(PrimTarget (MO_Prefetch_Data localityInt)) [] args
     let args_hints' = zip args arg_hints
     argVars <- arg_varsW args_hints' ([], nilOL, [])
     fptr    <- liftExprData $ getFunPtr funTy t
-    argVars' <- castVarsW $ zip argVars argTy
+    argVars' <- castVarsW Signed $ zip argVars argTy
 
     let argSuffix = [mkIntLit i32 0, mkIntLit i32 localityInt, mkIntLit i32 1]
     statement $ Expr $ Call StdCall fptr (argVars' ++ argSuffix) []
@@ -217,6 +219,11 @@ genCall t@(PrimTarget (MO_Prefetch_Data localityInt)) [] args
 -- and return types
 genCall t@(PrimTarget (MO_PopCnt w)) dsts args =
     genCallSimpleCast w t dsts args
+
+genCall t@(PrimTarget (MO_Pdep w)) dsts args =
+    genCallSimpleCast2 w t dsts args
+genCall t@(PrimTarget (MO_Pext w)) dsts args =
+    genCallSimpleCast2 w t dsts args
 genCall t@(PrimTarget (MO_Clz w)) dsts args =
     genCallSimpleCast w t dsts args
 genCall t@(PrimTarget (MO_Ctz w)) dsts args =
@@ -284,7 +291,7 @@ genCall t@(PrimTarget op) [] args
     let args_hints = zip args arg_hints
     argVars       <- arg_varsW args_hints ([], nilOL, [])
     fptr          <- getFunPtrW funTy t
-    argVars' <- castVarsW $ zip argVars argTy
+    argVars' <- castVarsW Signed $ zip argVars argTy
 
     let alignVal = mkIntLit i32 align
         arguments = argVars' ++ (alignVal:isVolVal)
@@ -366,6 +373,9 @@ genCall t@(PrimTarget (MO_SubIntC w)) [dstV, dstO] [lhs, rhs] =
 -- actual result of the addition. So we still use genCallWithOverflow but swap
 -- the return registers.
 genCall t@(PrimTarget (MO_Add2 w)) [dstO, dstV] [lhs, rhs] =
+    genCallWithOverflow t w [dstV, dstO] [lhs, rhs]
+
+genCall t@(PrimTarget (MO_AddWordC w)) [dstV, dstO] [lhs, rhs] =
     genCallWithOverflow t w [dstV, dstO] [lhs, rhs]
 
 genCall t@(PrimTarget (MO_SubWordC w)) [dstV, dstO] [lhs, rhs] =
@@ -480,6 +490,7 @@ genCallWithOverflow t@(PrimTarget op) w [dstV, dstO] [lhs, rhs] = do
     let valid = op `elem`   [ MO_Add2 w
                             , MO_AddIntC w
                             , MO_SubIntC w
+                            , MO_AddWordC w
                             , MO_SubWordC w
                             ]
     MASSERT(valid)
@@ -515,7 +526,7 @@ genCallExtract target@(PrimTarget op) w (argA, argB) (llvmTypeA, llvmTypeB) = do
     -- Process the arguments.
     let args_hints = zip [argA, argB] (snd $ foreignTargetHints target)
     (argsV1, args1, top1) <- arg_vars args_hints ([], nilOL, [])
-    (argsV2, args2) <- castVars $ zip argsV1 argTy
+    (argsV2, args2) <- castVars Signed $ zip argsV1 argTy
 
     -- Get the function and make the call.
     fname <- cmmPrimOpFunctions op
@@ -555,9 +566,10 @@ genCallSimpleCast w t@(PrimTarget op) [dst] args = do
     let (_, arg_hints) = foreignTargetHints t
     let args_hints = zip args arg_hints
     (argsV, stmts2, top2)       <- arg_vars args_hints ([], nilOL, [])
-    (argsV', stmts4)            <- castVars $ zip argsV [width]
+    (argsV', stmts4)            <- castVars Signed $ zip argsV [width]
     (retV, s1)                  <- doExpr width $ Call StdCall fptr argsV' []
-    ([retV'], stmts5)           <- castVars [(retV,dstTy)]
+    (retVs', stmts5)            <- castVars (cmmPrimOpRetValSignage op) [(retV,dstTy)]
+    let retV'                    = singletonPanic "genCallSimpleCast" retVs'
     let s2                       = Store retV' dstV
 
     let stmts = stmts2 `appOL` stmts4 `snocOL`
@@ -565,6 +577,38 @@ genCallSimpleCast w t@(PrimTarget op) [dst] args = do
     return (stmts, top2 ++ top3)
 genCallSimpleCast _ _ dsts _ =
     panic ("genCallSimpleCast: " ++ show (length dsts) ++ " dsts")
+
+-- Handle simple function call that only need simple type casting, of the form:
+--   truncate arg >>= \a -> call(a) >>= zext
+--
+-- since GHC only really has i32 and i64 types and things like Word8 are backed
+-- by an i32 and just present a logical i8 range. So we must handle conversions
+-- from i32 to i8 explicitly as LLVM is strict about types.
+genCallSimpleCast2 :: Width -> ForeignTarget -> [CmmFormal] -> [CmmActual]
+              -> LlvmM StmtData
+genCallSimpleCast2 w t@(PrimTarget op) [dst] args = do
+    let width = widthToLlvmInt w
+        dstTy = cmmToLlvmType $ localRegType dst
+
+    fname                       <- cmmPrimOpFunctions op
+    (fptr, _, top3)             <- getInstrinct fname width (const width <$> args)
+
+    dstV                        <- getCmmReg (CmmLocal dst)
+
+    let (_, arg_hints) = foreignTargetHints t
+    let args_hints = zip args arg_hints
+    (argsV, stmts2, top2)       <- arg_vars args_hints ([], nilOL, [])
+    (argsV', stmts4)            <- castVars Signed $ zip argsV (const width <$> argsV)
+    (retV, s1)                  <- doExpr width $ Call StdCall fptr argsV' []
+    (retVs', stmts5)             <- castVars (cmmPrimOpRetValSignage op) [(retV,dstTy)]
+    let retV'                    = singletonPanic "genCallSimpleCast2" retVs'
+    let s2                       = Store retV' dstV
+
+    let stmts = stmts2 `appOL` stmts4 `snocOL`
+                s1 `appOL` stmts5 `snocOL` s2
+    return (stmts, top2 ++ top3)
+genCallSimpleCast2 _ _ dsts _ =
+    panic ("genCallSimpleCast2: " ++ show (length dsts) ++ " dsts")
 
 -- | Create a function pointer from a target.
 getFunPtrW :: (LMString -> LlvmType) -> ForeignTarget
@@ -635,31 +679,32 @@ arg_vars ((e, _):rest) (vars, stmts, tops)
 
 
 -- | Cast a collection of LLVM variables to specific types.
-castVarsW :: [(LlvmVar, LlvmType)]
+castVarsW :: Signage
+          -> [(LlvmVar, LlvmType)]
           -> WriterT LlvmAccum LlvmM [LlvmVar]
-castVarsW vars = do
-    (vars, stmts) <- lift $ castVars vars
+castVarsW signage vars = do
+    (vars, stmts) <- lift $ castVars signage vars
     tell $ LlvmAccum stmts mempty
     return vars
 
 -- | Cast a collection of LLVM variables to specific types.
-castVars :: [(LlvmVar, LlvmType)]
+castVars :: Signage -> [(LlvmVar, LlvmType)]
          -> LlvmM ([LlvmVar], LlvmStatements)
-castVars vars = do
-                done <- mapM (uncurry castVar) vars
+castVars signage vars = do
+                done <- mapM (uncurry (castVar signage)) vars
                 let (vars', stmts) = unzip done
                 return (vars', toOL stmts)
 
 -- | Cast an LLVM variable to a specific type, panicing if it can't be done.
-castVar :: LlvmVar -> LlvmType -> LlvmM (LlvmVar, LlvmStatement)
-castVar v t | getVarType v == t
+castVar :: Signage -> LlvmVar -> LlvmType -> LlvmM (LlvmVar, LlvmStatement)
+castVar signage v t | getVarType v == t
             = return (v, Nop)
 
             | otherwise
             = do dflags <- getDynFlags
                  let op = case (getVarType v, t) of
                       (LMInt n, LMInt m)
-                          -> if n < m then LM_Sext else LM_Trunc
+                          -> if n < m then extend else LM_Trunc
                       (vt, _) | isFloat vt && isFloat t
                           -> if llvmWidthInBits dflags vt < llvmWidthInBits dflags t
                                 then LM_Fpext else LM_Fptrunc
@@ -673,7 +718,16 @@ castVar v t | getVarType v == t
                       (vt, _) -> panic $ "castVars: Can't cast this type ("
                                   ++ showSDoc dflags (ppr vt) ++ ") to (" ++ showSDoc dflags (ppr t) ++ ")"
                  doExpr t $ Cast op v t
+    where extend = case signage of
+            Signed      -> LM_Sext
+            Unsigned    -> LM_Zext
 
+
+cmmPrimOpRetValSignage :: CallishMachOp -> Signage
+cmmPrimOpRetValSignage mop = case mop of
+    MO_Pdep _   -> Unsigned
+    MO_Pext _   -> Unsigned
+    _           -> Signed
 
 -- | Decide what C function to use to implement a CallishMachOp
 cmmPrimOpFunctions :: CallishMachOp -> LlvmM LMString
@@ -704,6 +758,10 @@ cmmPrimOpFunctions mop = do
     MO_F32_Cosh   -> fsLit "coshf"
     MO_F32_Tanh   -> fsLit "tanhf"
 
+    MO_F32_Asinh  -> fsLit "asinhf"
+    MO_F32_Acosh  -> fsLit "acoshf"
+    MO_F32_Atanh  -> fsLit "atanhf"
+
     MO_F64_Exp    -> fsLit "exp"
     MO_F64_Log    -> fsLit "log"
     MO_F64_Sqrt   -> fsLit "llvm.sqrt.f64"
@@ -722,14 +780,28 @@ cmmPrimOpFunctions mop = do
     MO_F64_Cosh   -> fsLit "cosh"
     MO_F64_Tanh   -> fsLit "tanh"
 
+    MO_F64_Asinh  -> fsLit "asinh"
+    MO_F64_Acosh  -> fsLit "acosh"
+    MO_F64_Atanh  -> fsLit "atanh"
+
     MO_Memcpy _   -> fsLit $ "llvm.memcpy."  ++ intrinTy1
     MO_Memmove _  -> fsLit $ "llvm.memmove." ++ intrinTy1
     MO_Memset _   -> fsLit $ "llvm.memset."  ++ intrinTy2
+    MO_Memcmp _   -> fsLit $ "memcmp"
 
     (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     (MO_BSwap w)  -> fsLit $ "llvm.bswap."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     (MO_Clz w)    -> fsLit $ "llvm.ctlz."   ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     (MO_Ctz w)    -> fsLit $ "llvm.cttz."   ++ showSDoc dflags (ppr $ widthToLlvmInt w)
+
+    (MO_Pdep w)   ->  let w' = showSDoc dflags (ppr $ widthInBits w)
+                      in  if isBmi2Enabled dflags
+                            then fsLit $ "llvm.x86.bmi.pdep."   ++ w'
+                            else fsLit $ "hs_pdep"              ++ w'
+    (MO_Pext w)   ->  let w' = showSDoc dflags (ppr $ widthInBits w)
+                      in  if isBmi2Enabled dflags
+                            then fsLit $ "llvm.x86.bmi.pext."   ++ w'
+                            else fsLit $ "hs_pext"              ++ w'
 
     (MO_Prefetch_Data _ )-> fsLit "llvm.prefetch"
 
@@ -738,6 +810,8 @@ cmmPrimOpFunctions mop = do
     MO_SubIntC w    -> fsLit $ "llvm.ssub.with.overflow."
                              ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     MO_Add2 w       -> fsLit $ "llvm.uadd.with.overflow."
+                             ++ showSDoc dflags (ppr $ widthToLlvmInt w)
+    MO_AddWordC w   -> fsLit $ "llvm.uadd.with.overflow."
                              ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     MO_SubWordC w   -> fsLit $ "llvm.usub.with.overflow."
                              ++ showSDoc dflags (ppr $ widthToLlvmInt w)
@@ -1136,6 +1210,8 @@ genMachOp _ op [x] = case op of
             all0s = LMLitVar $ LMVectorLit (replicate len all0)
         in negateVec vecty all0s LM_MO_FSub
 
+    MO_AlignmentCheck _ _ -> panic "-falignment-sanitisation is not supported by -fllvm"
+
     -- Handle unsupported cases explicitly so we get a warning
     -- of missing case when new MachOps added
     MO_Add _          -> panicOp
@@ -1206,7 +1282,8 @@ genMachOp _ op [x] = case op of
 
         negateVec ty v2 negOp = do
             (vx, stmts1, top) <- exprToVar x
-            ([vx'], stmts2) <- castVars [(vx, ty)]
+            (vxs', stmts2) <- castVars Signed [(vx, ty)]
+            let vx' = singletonPanic "genMachOp: negateVec" vxs'
             (v1, s1) <- doExpr ty $ LlvmOp negOp v2 vx'
             return (v1, stmts1 `appOL` stmts2 `snocOL` s1, top)
 
@@ -1269,7 +1346,8 @@ genMachOp_slow :: EOption -> MachOp -> [CmmExpr] -> LlvmM ExprData
 genMachOp_slow _ (MO_V_Extract l w) [val, idx] = runExprData $ do
     vval <- exprToVarW val
     vidx <- exprToVarW idx
-    [vval'] <- castVarsW [(vval, LMVector l ty)]
+    vval' <- singletonPanic "genMachOp_slow" <$>
+             castVarsW Signed [(vval, LMVector l ty)]
     doExprW ty $ Extract vval' vidx
   where
     ty = widthToLlvmInt w
@@ -1277,7 +1355,8 @@ genMachOp_slow _ (MO_V_Extract l w) [val, idx] = runExprData $ do
 genMachOp_slow _ (MO_VF_Extract l w) [val, idx] = runExprData $ do
     vval <- exprToVarW val
     vidx <- exprToVarW idx
-    [vval'] <- castVarsW [(vval, LMVector l ty)]
+    vval' <- singletonPanic "genMachOp_slow" <$>
+             castVarsW Signed [(vval, LMVector l ty)]
     doExprW ty $ Extract vval' vidx
   where
     ty = widthToLlvmFloat w
@@ -1287,7 +1366,8 @@ genMachOp_slow _ (MO_V_Insert l w) [val, elt, idx] = runExprData $ do
     vval <- exprToVarW val
     velt <- exprToVarW elt
     vidx <- exprToVarW idx
-    [vval'] <- castVarsW [(vval, ty)]
+    vval' <- singletonPanic "genMachOp_slow" <$>
+             castVarsW Signed [(vval, ty)]
     doExprW ty $ Insert vval' velt vidx
   where
     ty = LMVector l (widthToLlvmInt w)
@@ -1296,7 +1376,8 @@ genMachOp_slow _ (MO_VF_Insert l w) [val, elt, idx] = runExprData $ do
     vval <- exprToVarW val
     velt <- exprToVarW elt
     vidx <- exprToVarW idx
-    [vval'] <- castVarsW [(vval, ty)]
+    vval' <- singletonPanic "genMachOp_slow" <$>
+             castVarsW Signed [(vval, ty)]
     doExprW ty $ Insert vval' velt vidx
   where
     ty = LMVector l (widthToLlvmFloat w)
@@ -1385,6 +1466,8 @@ genMachOp_slow opt op [x, y] = case op of
 
     MO_VF_Neg {} -> panicOp
 
+    MO_AlignmentCheck {} -> panicOp
+
     where
         binLlvmOp ty binOp = runExprData $ do
             vx <- exprToVarW x
@@ -1406,8 +1489,10 @@ genMachOp_slow opt op [x, y] = case op of
         binCastLlvmOp ty binOp = runExprData $ do
             vx <- exprToVarW x
             vy <- exprToVarW y
-            [vx', vy'] <- castVarsW [(vx, ty), (vy, ty)]
-            doExprW ty $ binOp vx' vy'
+            vxy' <- castVarsW Signed [(vx, ty), (vy, ty)]
+            case vxy' of
+              [vx',vy'] -> doExprW ty $ binOp vx' vy'
+              _         -> panic "genMachOp_slow: binCastLlvmOp"
 
         -- | Need to use EOption here as Cmm expects word size results from
         -- comparisons while LLVM return i1. Need to extend to llvmWord type
@@ -1463,8 +1548,8 @@ genMachOp_slow opt op [x, y] = case op of
         panicOp = panic $ "LLVM.CodeGen.genMachOp_slow: unary op encountered"
                        ++ "with two arguments! (" ++ show op ++ ")"
 
--- More then two expression, invalid!
-genMachOp_slow _ _ _ = panic "genMachOp: More then 2 expressions in MachOp!"
+-- More than two expression, invalid!
+genMachOp_slow _ _ _ = panic "genMachOp: More than 2 expressions in MachOp!"
 
 
 -- | Handle CmmLoad expression.
@@ -1650,7 +1735,7 @@ genLit opt (CmmLabelOff label off) = do
     (v1, s1) <- doExpr (getVarType vlbl) $ LlvmOp LM_MO_Add vlbl voff
     return (v1, stmts `snocOL` s1, stat)
 
-genLit opt (CmmLabelDiffOff l1 l2 off) = do
+genLit opt (CmmLabelDiffOff l1 l2 off w) = do
     dflags <- getDynFlags
     (vl1, stmts1, stat1) <- genLit opt (CmmLabel l1)
     (vl2, stmts2, stat2) <- genLit opt (CmmLabel l2)
@@ -1659,13 +1744,17 @@ genLit opt (CmmLabelDiffOff l1 l2 off) = do
     let ty2 = getVarType vl2
     if (isInt ty1) && (isInt ty2)
        && (llvmWidthInBits dflags ty1 == llvmWidthInBits dflags ty2)
-
        then do
             (v1, s1) <- doExpr (getVarType vl1) $ LlvmOp LM_MO_Sub vl1 vl2
             (v2, s2) <- doExpr (getVarType v1 ) $ LlvmOp LM_MO_Add v1 voff
-            return (v2, stmts1 `appOL` stmts2 `snocOL` s1 `snocOL` s2,
-                        stat1 ++ stat2)
-
+            let ty = widthToLlvmInt w
+            let stmts = stmts1 `appOL` stmts2 `snocOL` s1 `snocOL` s2
+            if w /= wordWidth dflags
+              then do
+                (v3, s3) <- doExpr ty $ Cast LM_Trunc v2 ty
+                return (v3, stmts `snocOL` s3, stat1 ++ stat2)
+              else
+                return (v2, stmts, stat1 ++ stat2)
         else
             panic "genLit: CmmLabelDiffOff encountered with different label ty!"
 
@@ -1832,16 +1921,13 @@ getTBAARegMeta = getTBAAMeta . getTBAA
 -- | A more convenient way of accumulating LLVM statements and declarations.
 data LlvmAccum = LlvmAccum LlvmStatements [LlvmCmmDecl]
 
-#if __GLASGOW_HASKELL__ > 710
 instance Semigroup LlvmAccum where
   LlvmAccum stmtsA declsA <> LlvmAccum stmtsB declsB =
         LlvmAccum (stmtsA Semigroup.<> stmtsB) (declsA Semigroup.<> declsB)
-#endif
 
 instance Monoid LlvmAccum where
     mempty = LlvmAccum nilOL []
-    LlvmAccum stmtsA declsA `mappend` LlvmAccum stmtsB declsB =
-        LlvmAccum (stmtsA `mappend` stmtsB) (declsA `mappend` declsB)
+    mappend = (Semigroup.<>)
 
 liftExprData :: LlvmM ExprData -> WriterT LlvmAccum LlvmM LlvmVar
 liftExprData action = do
@@ -1876,3 +1962,8 @@ getCmmRegW = lift . getCmmReg
 
 genLoadW :: Atomic -> CmmExpr -> CmmType -> WriterT LlvmAccum LlvmM LlvmVar
 genLoadW atomic e ty = liftExprData $ genLoad atomic e ty
+
+-- | Return element of single-element list; 'panic' if list is not a single-element list
+singletonPanic :: String -> [a] -> a
+singletonPanic _ [x] = x
+singletonPanic s _ = panic s

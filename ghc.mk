@@ -203,16 +203,6 @@ $(error Can not build haddock docs when CrossCompiling or Stage1Only. \
 endif
 endif
 
-ifneq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
-# The User's Guide requires mkUserGuidePart, which uses the GHC API.
-ifneq "$(CrossCompiling) $(Stage1Only)" "NO NO"
-$(error Can not build User's Guide when CrossCompiling or Stage1Only. \
-  Set BUILD_SPHINX_HTML=NO, BUILD_SPHINX_PDF=NO in your \
-  mk/build.mk file. \
-  See Note [No stage2 packages when CrossCompiling or Stage1Only])
-endif
-endif
-
 endif # CLEANING
 
 # -----------------------------------------------------------------------------
@@ -430,7 +420,7 @@ else # CLEANING
 # programs such as GHC and ghc-pkg, that we do not assume the stage0
 # compiler already has installed (or up-to-date enough).
 
-PACKAGES_STAGE0 = binary Cabal/Cabal hpc ghc-boot-th ghc-boot transformers template-haskell ghci
+PACKAGES_STAGE0 = binary text transformers mtl parsec Cabal/Cabal hpc ghc-boot-th ghc-boot template-haskell ghc-heap ghci
 ifeq "$(Windows_Host)" "NO"
 PACKAGES_STAGE0 += terminfo
 endif
@@ -457,12 +447,19 @@ PACKAGES_STAGE1 += process
 PACKAGES_STAGE1 += hpc
 PACKAGES_STAGE1 += pretty
 PACKAGES_STAGE1 += binary
+PACKAGES_STAGE1 += text
+PACKAGES_STAGE1 += transformers
+PACKAGES_STAGE1 += mtl
+PACKAGES_STAGE1 += parsec
+# temporary until Cabal switches to parsec mode by default
+libraries/Cabal/Cabal_dist-boot_CONFIGURE_OPTS += --flag parsec
+libraries/Cabal/Cabal_dist-install_CONFIGURE_OPTS += --flag parsec
 PACKAGES_STAGE1 += Cabal/Cabal
 PACKAGES_STAGE1 += ghc-boot-th
 PACKAGES_STAGE1 += ghc-boot
 PACKAGES_STAGE1 += template-haskell
-PACKAGES_STAGE1 += transformers
 PACKAGES_STAGE1 += ghc-compact
+PACKAGES_STAGE1 += ghc-heap
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 PACKAGES_STAGE1 += xhtml
@@ -474,8 +471,10 @@ else
 libraries/haskeline_CONFIGURE_OPTS += --flags=-terminfo
 endif
 
+PACKAGES_STAGE1 += stm
 PACKAGES_STAGE1 += haskeline
 PACKAGES_STAGE1 += ghci
+PACKAGES_STAGE1 += libiserv
 
 # See Note [No stage2 packages when CrossCompiling or Stage1Only].
 # See Note [Stage1Only vs stage=1] in mk/config.mk.in.
@@ -483,11 +482,6 @@ ifeq "$(CrossCompiling) $(Stage1Only)" "NO NO"
 define addExtraPackage
 ifeq "$2" "-"
 # Do nothing; this package is already handled above
-else ifeq "$2" "dph"
-ifeq "$$(BUILD_DPH) $$(GhcProfiled)" "YES NO"
-# The DPH packages need TH, which is incompatible with a profiled GHC.
-PACKAGES_STAGE2 += $1
-endif
 else ifeq "$2" "extra"
 ifeq "$$(BUILD_EXTRA_PKGS)" "YES"
 PACKAGES_STAGE2 += $1
@@ -540,9 +534,12 @@ utils/ghc-pkg/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/hsc2hs/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/compare_sizes/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/runghc/dist-install/package-data.mk: $(fixed_pkg_prev)
-iserv/stage2/package-data.mk: $(fixed_pkg_prev)
-iserv/stage2_p/package-data.mk: $(fixed_pkg_prev)
-iserv/stage2_dyn/package-data.mk: $(fixed_pkg_prev)
+utils/iserv/stage2/package-data.mk: $(fixed_pkg_prev)
+utils/iserv/stage2_p/package-data.mk: $(fixed_pkg_prev)
+utils/iserv/stage2_dyn/package-data.mk: $(fixed_pkg_prev)
+ifeq "$(Windows_Host)" "YES"
+utils/gen-dll/dist-install/package-data.mk: $(fixed_pkg_prev)
+endif
 
 # the GHC package doesn't live in libraries/, so we add its dependency manually:
 compiler/stage2/package-data.mk: $(fixed_pkg_prev)
@@ -562,7 +559,6 @@ utils/haddock/dist/package-data.mk: compiler/stage2/package-data.mk
 utils/ghctags/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/check-api-annotations/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/check-ppr/dist-install/package-data.mk: compiler/stage2/package-data.mk
-utils/mkUserGuidePart/dist/package-data.mk: compiler/stage2/package-data.mk
 
 # add the final package.conf dependency: ghc-prim depends on RTS
 libraries/ghc-prim/dist-install/package-data.mk : rts/dist/package.conf.inplace
@@ -599,15 +595,9 @@ libraries/ghci_dist-install_CONFIGURE_OPTS += --flags=ghci
 
 # We want the ghc-prim package to include the GHC.Prim module when it
 # is registered, but not when it is built, because GHC.Prim is not a
-# real source module, it is built-in to GHC.  The old build system did
-# this using Setup.hs, but we can't do that here, so we have a flag to
-# enable GHC.Prim in the .cabal file (so that the ghc-prim package
-# remains compatible with the old build system for the time being).
-# GHC.Prim module in the ghc-prim package with a flag:
-#
-libraries/ghc-prim_CONFIGURE_OPTS += --flag=include-ghc-prim
+# real source module, it is built-in to GHC.
 
-# And then we strip it out again before building the package:
+# Strip it out again before building the package:
 define libraries/ghc-prim_PACKAGE_MAGIC
 libraries/ghc-prim_dist-install_MODULES := $$(filter-out GHC.Prim,$$(libraries/ghc-prim_dist-install_MODULES))
 endef
@@ -626,6 +616,7 @@ libraries/ghc-prim_dist-install_EXTRA_HADDOCK_SRCS = libraries/ghc-prim/dist-ins
 ifneq "$(CLEANING)" "YES"
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-gmp
+compiler_stage2_CONFIGURE_OPTS += --flags=integer-gmp
 else ifeq "$(INTEGER_LIBRARY)" "integer-simple"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
 else
@@ -651,6 +642,9 @@ BUILD_DIRS += includes
 BUILD_DIRS += rts
 BUILD_DIRS += bindisttest
 BUILD_DIRS += utils/genapply
+ifeq "$(Windows_Host)" "YES"
+BUILD_DIRS += utils/gen-dll
+endif
 
 # When cleaning, don't add any library packages to BUILD_DIRS. We include
 # ghc.mk files for all BUILD_DIRS, but they don't exist until after running
@@ -665,13 +659,6 @@ ifneq "$(CLEANING)" "YES"
 BUILD_DIRS += $(patsubst %, libraries/%, $(PACKAGES_STAGE2))
 BUILD_DIRS += $(patsubst %, libraries/%, $(PACKAGES_STAGE1))
 BUILD_DIRS += $(patsubst %, libraries/%, $(filter-out $(PACKAGES_STAGE1),$(PACKAGES_STAGE0)))
-ifeq "$(BUILD_DPH)" "YES"
-# Note: `$(eval $(call foreachLibrary,addExtraPackage))` above adds the
-# packages listed in `libraries/dph/ghc-packages` (e.g. dph-base) to
-# PACKAGES_STAGE2. But not 'libraries/dph' itself (it doesn't have a cabal
-# file). Since it does have a ghc.mk file, we add it to BUILD_DIRS here.
-BUILD_DIRS += $(wildcard libraries/dph)
-endif
 endif
 
 BUILD_DIRS += libraries/integer-gmp/gmp
@@ -684,16 +671,14 @@ BUILD_DIRS += utils/testremove
 BUILD_DIRS += utils/ghctags
 BUILD_DIRS += utils/check-api-annotations
 BUILD_DIRS += utils/check-ppr
-BUILD_DIRS += utils/dll-split
 BUILD_DIRS += utils/ghc-cabal
 BUILD_DIRS += utils/hpc
 BUILD_DIRS += utils/runghc
 BUILD_DIRS += ghc
-BUILD_DIRS += utils/mkUserGuidePart
 BUILD_DIRS += docs/users_guide
 BUILD_DIRS += utils/count_lines
 BUILD_DIRS += utils/compare_sizes
-BUILD_DIRS += iserv
+BUILD_DIRS += utils/iserv
 
 # ----------------------------------------------
 # Actually include the sub-ghc.mk's
@@ -708,7 +693,6 @@ BUILD_DIRS := $(filter-out utils/mkdirhier,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/genprimopcode,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out bindisttest,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/genapply,$(BUILD_DIRS))
-BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif
 ifeq "$(HADDOCK_DOCS)" "NO"
 BUILD_DIRS := $(filter-out utils/haddock,$(BUILD_DIRS))
@@ -717,7 +701,6 @@ endif
 ifeq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
 BUILD_DIRS := $(filter-out docs/users_guide,$(BUILD_DIRS))
 # Don't to build this little utility if we're not building the User's Guide.
-BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif
 ifeq "$(Windows_Host)" "NO"
 BUILD_DIRS := $(filter-out utils/touchy,$(BUILD_DIRS))
@@ -799,8 +782,7 @@ endif
 
 ifneq "$(BINDIST)" "YES"
 # Make sure we have all the GHCi libs by the time we've built
-# ghc-stage2.  DPH includes a bit of Template Haskell which needs the
-# GHCi libs, and we don't have a better way to express that dependency.
+# ghc-stage2.
 #
 GHCI_LIBS = $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_GHCI_LIB)) \
 	    $(compiler_stage2_GHCI_LIB)
@@ -1053,6 +1035,8 @@ $(eval $(call bindist-list,.,\
     INSTALL \
     configure config.sub config.guess install-sh \
     settings.in \
+    llvm-targets \
+    llvm-passes \
     packages \
     Makefile \
     mk/config.mk.in \
@@ -1079,7 +1063,7 @@ $(eval $(call bindist-list,.,\
     $(wildcard compiler/stage2/doc) \
     $(wildcard libraries/*/dist-install/doc/) \
     $(wildcard libraries/*/*/dist-install/doc/) \
-    $(filter-out settings,$(INSTALL_LIBS)) \
+    $(filter-out settings llvm-targets llvm-passes,$(INSTALL_LIBS)) \
     $(RTS_INSTALL_LIBS) \
     $(filter-out %/project.mk mk/config.mk %/mk/install.mk,$(MAKEFILE_LIST)) \
     mk/project.mk \
@@ -1087,10 +1071,6 @@ $(eval $(call bindist-list,.,\
     bindist.mk \
     libraries/gen_contents_index \
     libraries/prologue.txt \
-    $(wildcard libraries/dph/LICENSE \
-               libraries/dph/ghc-packages \
-               libraries/dph/ghc-packages2 \
-               libraries/dph/ghc-stage2-package) \
  ))
 endif
 # mk/project.mk gets an absolute path, so we manually include it in
@@ -1112,7 +1092,7 @@ BIN_DIST_MK = $(BIN_DIST_PREP_DIR)/bindist.mk
 unix-binary-dist-prep:
 	$(call removeTrees,bindistprep/)
 	"$(MKDIRHIER)" $(BIN_DIST_PREP_DIR)
-	set -e; for i in packages LICENSE compiler ghc iserv rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
+	set -e; for i in packages LICENSE compiler ghc rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in llvm-targets llvm-passes ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
 	echo "HADDOCK_DOCS       = $(HADDOCK_DOCS)"       >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_HTML  = $(BUILD_SPHINX_HTML)"  >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_PDF   = $(BUILD_SPHINX_PDF)"   >> $(BIN_DIST_MK)
@@ -1206,11 +1186,11 @@ SRC_DIST_TESTSUITE_TARBALL        = $(SRC_DIST_ROOT)/$(SRC_DIST_TESTSUITE_NAME).
 # Files to include in source distributions
 #
 SRC_DIST_GHC_DIRS = mk rules docs distrib bindisttest libffi includes \
-    utils docs rts compiler ghc driver libraries libffi-tarballs iserv
+    utils docs rts compiler ghc driver libraries libffi-tarballs
 SRC_DIST_GHC_FILES += \
     configure.ac config.guess config.sub configure \
     aclocal.m4 README.md ANNOUNCE HACKING.md INSTALL.md LICENSE Makefile \
-    install-sh settings.in VERSION GIT_COMMIT_ID \
+    install-sh settings.in llvm-targets llvm-passes VERSION GIT_COMMIT_ID \
     boot packages ghc.mk MAKEHELP.md
 
 .PHONY: VERSION
@@ -1236,7 +1216,7 @@ GIT_COMMIT_ID:
 sdist-ghc-prep-tree : VERSION GIT_COMMIT_ID
 
 # Extra packages which shouldn't be in the source distribution: see #8801
-EXTRA_PACKAGES=parallel stm random primitive vector dph
+EXTRA_PACKAGES=parallel
 
 .PHONY: sdist-ghc-prep-tree
 sdist-ghc-prep-tree :
@@ -1264,6 +1244,15 @@ $(eval $(call sdist-ghc-file,compiler,stage2,parser,Parser,y))
 $(eval $(call sdist-ghc-file,utils/hpc,dist-install,,HpcParser,y))
 $(eval $(call sdist-ghc-file,utils/genprimopcode,dist,,Lexer,x))
 $(eval $(call sdist-ghc-file,utils/genprimopcode,dist,,Parser,y))
+
+# Recent Cabal library versions have a pre-generated Lexer.hs in the source
+# repo, and have moved Lexer.x out of the way, so trying to generate it from
+# here no longer works, and is no longer necessary.
+# According to https://github.com/haskell/cabal/issues/4633 however, this is
+# only a temporary solution, so we will probably have to adjust to whatever
+# the proper solution is going to be once there is one.
+#
+# $(eval $(call sdist-ghc-file2,libraries/Cabal/Cabal,dist-install,Distribution/Parsec,Lexer,x))
 
 .PHONY: sdist-ghc-prep
 sdist-ghc-prep : sdist-ghc-prep-tree
@@ -1359,6 +1348,8 @@ clean_files :
 	$(call removeTrees,inplace/bin)
 	$(call removeTrees,inplace/lib)
 	$(call removeTrees,libraries/bootstrapping.conf)
+# Clean the files that ./validate creates.
+	$(call removeFiles,mk/are-validating.mk)
 
 .PHONY: clean_libraries
 clean_libraries: $(patsubst %,clean_libraries/%_dist-install,$(PACKAGES_STAGE1) $(PACKAGES_STAGE2))
@@ -1391,9 +1382,6 @@ clean_bindistprep:
 	$(call removeTrees,bindistprep/)
 
 distclean : clean
-# Clean the files that ./validate creates.
-	$(call removeFiles,mk/are-validating.mk)
-
 # Clean the files that we ask ./configure to create.
 	$(call removeFiles,mk/config.mk)
 	$(call removeFiles,mk/install.mk)
@@ -1402,6 +1390,7 @@ distclean : clean
 	$(call removeFiles,ghc/ghc-bin.cabal)
 	$(call removeFiles,libraries/ghci/ghci.cabal)
 	$(call removeFiles,utils/runghc/runghc.cabal)
+	$(call removeFiles,utils/gen-dll/gen-dll.cabal)
 	$(call removeFiles,settings)
 	$(call removeFiles,docs/users_guide/ug-book.xml)
 	$(call removeFiles,docs/users_guide/ug-ent.xml)
@@ -1447,6 +1436,16 @@ distclean : clean
 # Don't delete 'inplace' itself, it contains source files.
 	$(call removeTrees,inplace/mingw)
 	$(call removeTrees,inplace/perl)
+
+# Remove the fs utilities.
+	$(call removeFiles,utils/lndir/fs.h)
+	$(call removeFiles,utils/lndir/fs.c)
+	$(call removeFiles,utils/unlit/fs.h)
+	$(call removeFiles,utils/unlit/fs.c)
+	$(call removeFiles,rts/fs.h)
+	$(call removeFiles,rts/fs.c)
+	$(call removeFiles,libraries/base/include/fs.h)
+	$(call removeFiles,libraries/base/cbits/fs.c)
 
 maintainer-clean : distclean
 	$(call removeFiles,configure mk/config.h.in)
@@ -1512,8 +1511,8 @@ endif
 #  - neither do we register the ghc library (compiler/stage1) that we build
 #    with stage0. TODO Why not? We do build it...
 #  - as a result, we need to a) use ghc-stage2 to build packages that depend on
-#    the ghc library (e.g. ghctags [4] and mkUserGuidePart) and b) exclude
-#    those packages when ghc-stage2 is not available.
+#    the ghc library (e.g. ghctags [4]) and b) exclude those packages when
+#    ghc-stage2 is not available.
 #  - when Stage1Only=YES, it's clear that ghc-stage2 is not available (we just
 #    said we didn't want it), so we have to exclude the stage2 packages from
 #    the build. This includes the case where Stage1Only=YES is combined with

@@ -56,7 +56,7 @@ test('records-fail1', normal, compile_fail, [''])
 test('doaitse', normal, compile, [''])
 test('josef', normal, compile, [''])
 
-# Interaction of fundeps with GADTs doesn't work well 
+# Interaction of fundeps with GADTs doesn't work well
 test('gadt-fd', expect_broken(345), compile, [''])
 
 test('karl1', normal, compile, [''])
@@ -105,11 +105,17 @@ test('T5424', [], multimod_compile, ['T5424', '-v0 -O0'])
 
 test('FloatEq', normal, compile, [''])
 test('T7205', normal, compile, [''])
-test('T7293', normal, compile_fail, [''])
+test('T7293', normal, compile_fail, ['-Werror'])
 test('T7294', normal, compile, [''])
 test('T7321', [], run_command, ['$MAKE -s --no-print-directory T7321'])
 test('T7974', normal, compile, [''])
 test('T7558', normal, compile_fail, [''])
 test('T9096', normal, compile, [''])
 test('T9380', normal, compile_and_run, [''])
+test('T12087', normal, compile_fail, [''])
 test('T12468', normal, compile_fail, [''])
+test('T14320', normal, compile, [''])
+test('T14719', normal, compile_fail, ['-fdiagnostics-show-caret'])
+test('T14808', normal, compile, [''])
+test('T15009', normal, compile, [''])
+test('T15558', normal, compile, [''])

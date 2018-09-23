@@ -196,20 +196,22 @@ module UnariseStg (unarise) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import BasicTypes
 import CoreSyn
 import DataCon
 import FastString (FastString, mkFastString)
 import Id
-import Literal (Literal (..))
-import MkCore (aBSENT_ERROR_ID)
+import Literal
+import MkCore (aBSENT_SUM_FIELD_ERROR_ID)
 import MkId (voidPrimId, voidArgId)
 import MonadUtils (mapAccumLM)
 import Outputable
 import RepType
 import StgSyn
 import Type
-import TysPrim (intPrimTy)
+import TysPrim (intPrimTy,wordPrimTy,word64PrimTy)
 import TysWiredIn
 import UniqSupply
 import Util
@@ -332,7 +334,7 @@ unariseExpr _ e@StgLam{}
   = pprPanic "unariseExpr: found lambda" (ppr e)
 
 unariseExpr rho (StgCase scrut bndr alt_ty alts)
-  -- a tuple/sum binders in the scrutinee can always be eliminated
+  -- tuple/sum binders in the scrutinee can always be eliminated
   | StgApp v [] <- scrut
   , Just (MultiVal xs) <- lookupVarEnv rho v
   = elimCase rho xs bndr alt_ty alts
@@ -349,7 +351,8 @@ unariseExpr rho (StgCase scrut bndr alt_ty alts)
   = do scrut' <- unariseExpr rho scrut
        alts'  <- unariseAlts rho alt_ty bndr alts
        return (StgCase scrut' bndr alt_ty alts')
-                       -- bndr will be dead after unarise
+                       -- bndr may have a unboxed sum/tuple type but it will be
+                       -- dead after unarise (checked in StgLint)
 
 unariseExpr rho (StgLet bind e)
   = StgLet <$> unariseBinding rho bind <*> unariseExpr rho e
@@ -475,7 +478,7 @@ unariseSumAlt rho _ (DEFAULT, _, e)
 unariseSumAlt rho args (DataAlt sumCon, bs, e)
   = do let rho' = mapSumIdBinders bs args rho
        e' <- unariseExpr rho' e
-       return ( LitAlt (MachInt (fromIntegral (dataConTag sumCon))), [], e' )
+       return ( LitAlt (LitNumber LitNumInt (fromIntegral (dataConTag sumCon)) intPrimTy), [], e' )
 
 unariseSumAlt _ scrt alt
   = pprPanic "unariseSumAlt" (ppr scrt $$ ppr alt)
@@ -561,7 +564,7 @@ mkUbxSum dc ty_args args0
       tag = dataConTag dc
 
       layout'  = layoutUbxSum sum_slots (mapMaybe (typeSlotTy . stgArgType) args0)
-      tag_arg  = StgLitArg (MachInt (fromIntegral tag))
+      tag_arg  = StgLitArg (LitNumber LitNumInt (fromIntegral tag) intPrimTy)
       arg_idxs = IM.fromList (zipEqual "mkUbxSum" layout' args0)
 
       mkTupArgs :: Int -> [SlotTy] -> IM.IntMap StgArg -> [StgArg]
@@ -574,9 +577,10 @@ mkUbxSum dc ty_args args0
         = slotRubbishArg slot : mkTupArgs (arg_idx + 1) slots_left arg_map
 
       slotRubbishArg :: SlotTy -> StgArg
-      slotRubbishArg PtrSlot    = StgVarArg aBSENT_ERROR_ID
-      slotRubbishArg WordSlot   = StgLitArg (MachWord 0)
-      slotRubbishArg Word64Slot = StgLitArg (MachWord64 0)
+      slotRubbishArg PtrSlot    = StgVarArg aBSENT_SUM_FIELD_ERROR_ID
+                         -- See Note [aBSENT_SUM_FIELD_ERROR_ID] in MkCore
+      slotRubbishArg WordSlot   = StgLitArg (LitNumber LitNumWord 0 wordPrimTy)
+      slotRubbishArg Word64Slot = StgLitArg (LitNumber LitNumWord64 0 word64PrimTy)
       slotRubbishArg FloatSlot  = StgLitArg (MachFloat 0)
       slotRubbishArg DoubleSlot = StgLitArg (MachDouble 0)
     in
@@ -640,6 +644,35 @@ So in short, when we have a void id,
                          in argument position of a DataCon application.
 -}
 
+unariseArgBinder
+    :: Bool -- data con arg?
+    -> UnariseEnv -> Id -> UniqSM (UnariseEnv, [Id])
+unariseArgBinder is_con_arg rho x =
+  case typePrimRep (idType x) of
+    []
+      | is_con_arg
+      -> return (extendRho rho x (MultiVal []), [])
+      | otherwise -- fun arg, do not remove void binders
+      -> return (extendRho rho x (MultiVal []), [voidArgId])
+
+    [rep]
+      -- Arg represented as single variable, but original type may still be an
+      -- unboxed sum/tuple, e.g. (# Void# | Void# #).
+      --
+      -- While not unarising the binder in this case does not break any programs
+      -- (because it unarises to a single variable), it triggers StgLint as we
+      -- break the the post-unarisation invariant that says unboxed tuple/sum
+      -- binders should vanish. See Note [Post-unarisation invariants].
+      | isUnboxedSumType (idType x) || isUnboxedTupleType (idType x)
+      -> do x' <- mkId (mkFastString "us") (primRepToType rep)
+            return (extendRho rho x (MultiVal [StgVarArg x']), [x'])
+      | otherwise
+      -> return (rho, [x])
+
+    reps -> do
+      xs <- mkIds (mkFastString "us") (map primRepToType reps)
+      return (extendRho rho x (MultiVal (map StgVarArg xs)), xs)
+
 --------------------------------------------------------------------------------
 
 -- | MultiVal a function argument. Never returns an empty list.
@@ -658,16 +691,9 @@ unariseFunArgs = concatMap . unariseFunArg
 unariseFunArgBinders :: UnariseEnv -> [Id] -> UniqSM (UnariseEnv, [Id])
 unariseFunArgBinders rho xs = second concat <$> mapAccumLM unariseFunArgBinder rho xs
 
-unariseFunArgBinder :: UnariseEnv -> Id -> UniqSM (UnariseEnv, [Id])
 -- Result list of binders is never empty
-unariseFunArgBinder rho x  =
-  case typePrimRep (idType x) of
-    []   -> return (extendRho rho x (MultiVal []), [voidArgId])
-                           -- NB: do not remove void binders
-    [_]  -> return (rho, [x])
-    reps -> do
-      xs <- mkIds (mkFastString "us") (map primRepToType reps)
-      return (extendRho rho x (MultiVal (map StgVarArg xs)), xs)
+unariseFunArgBinder :: UnariseEnv -> Id -> UniqSM (UnariseEnv, [Id])
+unariseFunArgBinder = unariseArgBinder False
 
 --------------------------------------------------------------------------------
 
@@ -682,7 +708,9 @@ unariseConArg rho (StgVarArg x) =
                                   -- Here realWorld# is not in the envt, but
                                   -- is a void, and so should be eliminated
       | otherwise -> [StgVarArg x]
-unariseConArg _ arg = [arg]       -- We have no void literals
+unariseConArg _ arg@(StgLitArg lit) =
+    ASSERT(not (isVoidTy (literalType lit)))  -- We have no void literals
+    [arg]
 
 unariseConArgs :: UnariseEnv -> [InStgArg] -> [OutStgArg]
 unariseConArgs = concatMap . unariseConArg
@@ -690,13 +718,10 @@ unariseConArgs = concatMap . unariseConArg
 unariseConArgBinders :: UnariseEnv -> [Id] -> UniqSM (UnariseEnv, [Id])
 unariseConArgBinders rho xs = second concat <$> mapAccumLM unariseConArgBinder rho xs
 
+-- Different from `unariseFunArgBinder`: result list of binders may be empty.
+-- See DataCon applications case in Note [Post-unarisation invariants].
 unariseConArgBinder :: UnariseEnv -> Id -> UniqSM (UnariseEnv, [Id])
-unariseConArgBinder rho x =
-  case typePrimRep (idType x) of
-    [_]  -> return (rho, [x])
-    reps -> do
-      xs <- mkIds (mkFastString "us") (map primRepToType reps)
-      return (extendRho rho x (MultiVal (map StgVarArg xs)), xs)
+unariseConArgBinder = unariseArgBinder True
 
 unariseFreeVars :: UnariseEnv -> [InId] -> [OutId]
 unariseFreeVars rho fvs

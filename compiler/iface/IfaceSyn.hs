@@ -41,6 +41,8 @@ module IfaceSyn (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import IfaceType
 import BinFingerprint
 import CoreSyn( IsOrphan, isOrphan )
@@ -62,9 +64,9 @@ import SrcLoc
 import Fingerprint
 import Binary
 import BooleanFormula ( BooleanFormula, pprBooleanFormula, isTrue )
-import Var( TyVarBndr(..) )
+import Var( VarBndr(..) )
 import TyCon ( Role (..), Injectivity(..) )
-import Util( filterOut, filterByList )
+import Util( dropList, filterByList )
 import DataCon (SrcStrictness(..), SrcUnpackedness(..))
 import Lexeme (isLexSym)
 import DynFlags
@@ -85,7 +87,7 @@ infixl 3 &&&
 -- | A binding top-level 'Name' in an interface file (e.g. the name of an
 -- 'IfaceDecl').
 type IfaceTopBndr = Name
-  -- It's convenient to have an Name in the IfaceSyn, although in each
+  -- It's convenient to have a Name in the IfaceSyn, although in each
   -- case the namespace is implied by the context. However, having an
   -- Name makes things like ifaceDeclImplicitBndrs and ifaceDeclFingerprints
   -- very convenient. Moreover, having the key of the binder means that
@@ -180,9 +182,11 @@ data IfaceClassBody
 
 data IfaceTyConParent
   = IfNoParent
-  | IfDataInstance IfExtName
-                   IfaceTyCon
-                   IfaceTcArgs
+  | IfDataInstance
+       IfExtName     -- Axiom name
+       IfaceTyCon    -- Family TyCon (pretty-printing only, not used in TcIface)
+                     -- see Note [Pretty printing via IfaceSyn] in PprTyThing
+       IfaceAppArgs  -- Arguments of the family TyCon
 
 data IfaceFamTyConFlav
   = IfaceDataFamilyTyCon                      -- Data family
@@ -190,6 +194,7 @@ data IfaceFamTyConFlav
   | IfaceClosedSynFamilyTyCon (Maybe (IfExtName, [IfaceAxBranch]))
     -- ^ Name of associated axiom and branches for pretty printing purposes,
     -- or 'Nothing' for an empty closed family without an axiom
+    -- See Note [Pretty printing via IfaceSyn] in PprTyThing
   | IfaceAbstractClosedSynFamilyTyCon
   | IfaceBuiltInSynFamTyCon -- for pretty printing purposes only
 
@@ -209,7 +214,7 @@ data IfaceAT = IfaceAT  -- See Class.ClassATItem
 -- This is just like CoAxBranch
 data IfaceAxBranch = IfaceAxBranch { ifaxbTyVars   :: [IfaceTvBndr]
                                    , ifaxbCoVars   :: [IfaceIdBndr]
-                                   , ifaxbLHS      :: IfaceTcArgs
+                                   , ifaxbLHS      :: IfaceAppArgs
                                    , ifaxbRoles    :: [Role]
                                    , ifaxbRHS      :: IfaceType
                                    , ifaxbIncomps  :: [BranchIndex] }
@@ -238,7 +243,14 @@ data IfaceConDecl
         -- but it's not so easy for the original TyCon/DataCon
         -- So this guarantee holds for IfaceConDecl, but *not* for DataCon
 
-        ifConExTvs   :: [IfaceForAllBndr],  -- Existential tyvars (w/ visibility)
+        ifConExTCvs   :: [IfaceBndr],  -- Existential ty/covars
+        ifConUserTvBinders :: [IfaceForAllBndr],
+          -- The tyvars, in the order the user wrote them
+          -- INVARIANT: the set of tyvars in ifConUserTvBinders is exactly the
+          --            set of tyvars (*not* covars) of ifConExTCvs, unioned
+          --            with the set of ifBinders (from the parent IfaceDecl)
+          --            whose tyvars do not appear in ifConEqSpec
+          -- See Note [DataCon user type variable binders] in DataCon
         ifConEqSpec  :: IfaceEqSpec,        -- Equality constraints
         ifConCtxt    :: IfaceContext,       -- Non-stupid context
         ifConArgTys  :: [IfaceType],        -- Arg types
@@ -564,7 +576,7 @@ pprAxBranch pp_tc (IfaceAxBranch { ifaxbTyVars = tvs
       | otherwise
       = brackets (pprWithCommas (pprIfaceTvBndr True) tvs <> semi <+>
                   pprWithCommas pprIfaceIdBndr cvs)
-    pp_lhs = hang pp_tc 2 (pprParendIfaceTcArgs pat_tys)
+    pp_lhs = hang pp_tc 2 (pprParendIfaceAppArgs pat_tys)
     maybe_incomps = ppUnless (null incomps) $ parens $
                     text "incompatible indices:" <+> ppr incomps
 
@@ -691,26 +703,28 @@ pprIfaceDecl :: ShowSub -> IfaceDecl -> SDoc
 -- NB: pprIfaceDecl is also used for pretty-printing TyThings in GHCi
 --     See Note [Pretty-printing TyThings] in PprTyThing
 pprIfaceDecl ss (IfaceData { ifName = tycon, ifCType = ctype,
-                             ifCtxt = context,
+                             ifCtxt = context, ifResKind = kind,
                              ifRoles = roles, ifCons = condecls,
                              ifParent = parent,
                              ifGadtSyntax = gadt,
                              ifBinders = binders })
 
-  | gadt_style = vcat [ pp_roles
-                      , pp_nd <+> pp_lhs <+> pp_where
-                      , nest 2 (vcat pp_cons)
-                      , nest 2 $ ppShowIface ss pp_extra ]
-  | otherwise  = vcat [ pp_roles
-                      , hang (pp_nd <+> pp_lhs) 2 (add_bars pp_cons)
-                      , nest 2 $ ppShowIface ss pp_extra ]
+  | gadt      = vcat [ pp_roles
+                     , pp_nd <+> pp_lhs <+> pp_kind <+> pp_where
+                     , nest 2 (vcat pp_cons)
+                     , nest 2 $ ppShowIface ss pp_extra ]
+  | otherwise = vcat [ pp_roles
+                     , hang (pp_nd <+> pp_lhs <+> pp_kind) 2 (add_bars pp_cons)
+                     , nest 2 $ ppShowIface ss pp_extra ]
   where
     is_data_instance = isIfaceDataInstance parent
 
-    gadt_style = gadt || any (not . isVanillaIfaceConDecl) cons
     cons       = visibleIfConDecls condecls
-    pp_where   = ppWhen (gadt_style && not (null cons)) $ text "where"
+    pp_where   = ppWhen (gadt && not (null cons)) $ text "where"
     pp_cons    = ppr_trim (map show_con cons) :: [SDoc]
+    pp_kind
+      | isIfaceLiftedTypeKind kind = empty
+      | otherwise = dcolon <+> ppr kind
 
     pp_lhs = case parent of
                IfNoParent -> pprIfaceDeclHead context ss tycon binders Nothing
@@ -732,7 +746,7 @@ pprIfaceDecl ss (IfaceData { ifName = tycon, ifCType = ctype,
     ok_con dc = showSub ss dc || any (showSub ss . flSelector) (ifConFields dc)
 
     show_con dc
-      | ok_con dc = Just $ pprIfaceConDecl ss gadt_style tycon binders parent dc
+      | ok_con dc = Just $ pprIfaceConDecl ss gadt tycon binders parent dc
       | otherwise = Nothing
 
     pp_nd = case condecls of
@@ -851,11 +865,13 @@ pprIfaceDecl _ (IfacePatSyn { ifName = name,
   = sdocWithDynFlags mk_msg
   where
     mk_msg dflags
-      = hsep [ text "pattern", pprPrefixOcc name, dcolon
-             , univ_msg, pprIfaceContextArr req_ctxt
-             , ppWhen insert_empty_ctxt $ parens empty <+> darrow
-             , ex_msg, pprIfaceContextArr prov_ctxt
-             , pprIfaceType $ foldr IfaceFunTy pat_ty arg_tys]
+      = hang (text "pattern" <+> pprPrefixOcc name)
+           2 (dcolon <+> sep [univ_msg
+                             , pprIfaceContextArr req_ctxt
+                             , ppWhen insert_empty_ctxt $ parens empty <+> darrow
+                             , ex_msg
+                             , pprIfaceContextArr prov_ctxt
+                             , pprIfaceType $ foldr IfaceFunTy pat_ty arg_tys ])
       where
         univ_msg = pprUserIfaceForAll univ_bndrs
         ex_msg   = pprUserIfaceForAll ex_bndrs
@@ -940,7 +956,7 @@ pprIfaceTyConParent IfNoParent
 pprIfaceTyConParent (IfDataInstance _ tc tys)
   = sdocWithDynFlags $ \dflags ->
     let ftys = stripInvisArgs dflags tys
-    in pprIfaceTypeApp TopPrec tc ftys
+    in pprIfaceTypeApp topPrec tc ftys
 
 pprIfaceDeclHead :: IfaceContext -> ShowSub -> Name
                  -> [IfaceTyConBinder]   -- of the tycon, for invisible-suppression
@@ -953,12 +969,6 @@ pprIfaceDeclHead context ss tc_occ bndrs m_res_kind
           <+> pprIfaceTyConBinders (suppressIfaceInvisibles dflags bndrs bndrs)
         , maybe empty (\res_kind -> dcolon <+> pprIfaceType res_kind) m_res_kind ]
 
-isVanillaIfaceConDecl :: IfaceConDecl -> Bool
-isVanillaIfaceConDecl (IfCon { ifConExTvs  = ex_tvs
-                             , ifConEqSpec = eq_spec
-                             , ifConCtxt   = ctxt })
-  = (null ex_tvs) && (null eq_spec) && (null ctxt)
-
 pprIfaceConDecl :: ShowSub -> Bool
                 -> IfaceTopBndr
                 -> [IfaceTyConBinder]
@@ -966,37 +976,46 @@ pprIfaceConDecl :: ShowSub -> Bool
                 -> IfaceConDecl -> SDoc
 pprIfaceConDecl ss gadt_style tycon tc_binders parent
         (IfCon { ifConName = name, ifConInfix = is_infix,
-                 ifConExTvs = ex_tvs,
+                 ifConUserTvBinders = user_tvbs,
                  ifConEqSpec = eq_spec, ifConCtxt = ctxt, ifConArgTys = arg_tys,
                  ifConStricts = stricts, ifConFields = fields })
-  | gadt_style            = pp_prefix_con <+> dcolon <+> ppr_ty
-  | not (null fields)     = pp_prefix_con <+> pp_field_args
-  | is_infix
-  , [ty1, ty2] <- pp_args = sep [ ty1
-                                , pprInfixIfDeclBndr how_much (occName name)
-                                , ty2]
-
-  | otherwise             = pp_prefix_con <+> sep pp_args
+  | gadt_style = pp_prefix_con <+> dcolon <+> ppr_gadt_ty
+  | otherwise  = ppr_ex_quant pp_h98_con
   where
+    pp_h98_con
+      | not (null fields) = pp_prefix_con <+> pp_field_args
+      | is_infix
+      , [ty1, ty2] <- pp_args
+      = sep [ ty1
+            , pprInfixIfDeclBndr how_much (occName name)
+            , ty2]
+      | otherwise = pp_prefix_con <+> sep pp_args
+
     how_much = ss_how_much ss
     tys_w_strs :: [(IfaceBang, IfaceType)]
     tys_w_strs = zip stricts arg_tys
     pp_prefix_con = pprPrefixIfDeclBndr how_much (occName name)
 
-    (univ_tvs, pp_res_ty) = mk_user_con_res_ty eq_spec
-    ppr_ty = pprIfaceForAllPart (map tv_to_forall_bndr univ_tvs ++ ex_tvs)
-                                ctxt pp_tau
+    -- If we're pretty-printing a H98-style declaration with existential
+    -- quantification, then user_tvbs will always consist of the universal
+    -- tyvar binders followed by the existential tyvar binders. So to recover
+    -- the visibilities of the existential tyvar binders, we can simply drop
+    -- the universal tyvar binders from user_tvbs.
+    ex_tvbs = dropList tc_binders user_tvbs
+    ppr_ex_quant = pprIfaceForAllPartMust ex_tvbs ctxt
+    pp_gadt_res_ty = mk_user_con_res_ty eq_spec
+    ppr_gadt_ty = pprIfaceForAllPart user_tvbs ctxt pp_tau
 
         -- A bit gruesome this, but we can't form the full con_tau, and ppr it,
         -- because we don't have a Name for the tycon, only an OccName
     pp_tau | null fields
-           = case pp_args ++ [pp_res_ty] of
+           = case pp_args ++ [pp_gadt_res_ty] of
                 (t:ts) -> fsep (t : map (arrow <+>) ts)
                 []     -> panic "pp_con_taus"
            | otherwise
-           = sep [pp_field_args, arrow <+> pp_res_ty]
+           = sep [pp_field_args, arrow <+> pp_gadt_res_ty]
 
-    ppr_bang IfNoBang = sdocWithPprDebug $ \dbg -> ppWhen dbg $ char '_'
+    ppr_bang IfNoBang = whenPprDebug $ char '_'
     ppr_bang IfStrict = char '!'
     ppr_bang IfUnpack = text "{-# UNPACK #-}"
     ppr_bang (IfUnpackCo co) = text "! {-# UNPACK #-}" <>
@@ -1030,23 +1049,24 @@ pprIfaceConDecl ss gadt_style tycon tc_binders parent
         sel = flSelector lbl
         occ = mkVarOccFS (flLabel lbl)
 
-    mk_user_con_res_ty :: IfaceEqSpec -> ([IfaceTvBndr], SDoc)
+    mk_user_con_res_ty :: IfaceEqSpec -> SDoc
     -- See Note [Result type of a data family GADT]
     mk_user_con_res_ty eq_spec
       | IfDataInstance _ tc tys <- parent
-      = (con_univ_tvs, pprIfaceType (IfaceTyConApp tc (substIfaceTcArgs gadt_subst tys)))
+      = pprIfaceType (IfaceTyConApp tc (substIfaceAppArgs gadt_subst tys))
       | otherwise
-      = (con_univ_tvs, sdocWithDynFlags (ppr_tc_app gadt_subst))
+      = sdocWithDynFlags (ppr_tc_app gadt_subst)
       where
         gadt_subst = mkIfaceTySubst eq_spec
-        con_univ_tvs = filterOut (inDomIfaceTySubst gadt_subst) $
-                       map ifTyConBinderTyVar tc_binders
 
     ppr_tc_app gadt_subst dflags
        = pprPrefixIfDeclBndr how_much (occName tycon)
          <+> sep [ pprParendIfaceType (substIfaceTyVar gadt_subst tv)
-                 | (tv,_kind)
-                     <- map ifTyConBinderTyVar $
+                 | IfaceTvBndr (tv,_kind)
+                   -- Coercions variables are invisible, see Note
+                   -- [VarBndrs, TyCoVarBinders, TyConBinders, and visibility]
+                   -- in TyCoRep
+                     <- map (ifTyConBinderVar) $
                         suppressIfaceInvisibles dflags tc_binders tc_binders ]
 
 instance Outputable IfaceRule where
@@ -1081,9 +1101,6 @@ instance Outputable IfaceFamInst where
 ppr_rough :: Maybe IfaceTyCon -> SDoc
 ppr_rough Nothing   = dot
 ppr_rough (Just tc) = ppr tc
-
-tv_to_forall_bndr :: IfaceTvBndr -> IfaceForAllBndr
-tv_to_forall_bndr tv = TvBndr tv Specified
 
 {-
 Note [Result type of a data family GADT]
@@ -1276,7 +1293,7 @@ freeNamesIfDecl (IfaceId { ifType = t, ifIdDetails = d, ifIdInfo = i})
 
 freeNamesIfDecl (IfaceData { ifBinders = bndrs, ifResKind = res_k
                            , ifParent = p, ifCtxt = ctxt, ifCons = cons })
-  = freeNamesIfTyVarBndrs bndrs &&&
+  = freeNamesIfVarBndrs bndrs &&&
     freeNamesIfType res_k &&&
     freeNamesIfaceTyConParent p &&&
     freeNamesIfContext ctxt &&&
@@ -1284,18 +1301,18 @@ freeNamesIfDecl (IfaceData { ifBinders = bndrs, ifResKind = res_k
 
 freeNamesIfDecl (IfaceSynonym { ifBinders = bndrs, ifResKind = res_k
                               , ifSynRhs = rhs })
-  = freeNamesIfTyVarBndrs bndrs &&&
+  = freeNamesIfVarBndrs bndrs &&&
     freeNamesIfKind res_k &&&
     freeNamesIfType rhs
 
 freeNamesIfDecl (IfaceFamily { ifBinders = bndrs, ifResKind = res_k
                              , ifFamFlav = flav })
-  = freeNamesIfTyVarBndrs bndrs &&&
+  = freeNamesIfVarBndrs bndrs &&&
     freeNamesIfKind res_k &&&
     freeNamesIfFamFlav flav
 
 freeNamesIfDecl (IfaceClass{ ifBinders = bndrs, ifBody = cls_body })
-  = freeNamesIfTyVarBndrs bndrs &&&
+  = freeNamesIfVarBndrs bndrs &&&
     freeNamesIfClassBody cls_body
 
 freeNamesIfDecl (IfaceAxiom { ifTyCon = tc, ifAxBranches = branches })
@@ -1313,8 +1330,8 @@ freeNamesIfDecl (IfacePatSyn { ifPatMatcher = (matcher, _)
                              , ifFieldLabels = lbls })
   = unitNameSet matcher &&&
     maybe emptyNameSet (unitNameSet . fst) mb_builder &&&
-    freeNamesIfTyVarBndrs univ_bndrs &&&
-    freeNamesIfTyVarBndrs ex_bndrs &&&
+    freeNamesIfVarBndrs univ_bndrs &&&
+    freeNamesIfVarBndrs ex_bndrs &&&
     freeNamesIfContext prov_ctxt &&&
     freeNamesIfContext req_ctxt &&&
     fnList freeNamesIfType args &&&
@@ -1336,7 +1353,7 @@ freeNamesIfAxBranch (IfaceAxBranch { ifaxbTyVars   = tyvars
                                    , ifaxbRHS      = rhs })
   = fnList freeNamesIfTvBndr tyvars &&&
     fnList freeNamesIfIdBndr covars &&&
-    freeNamesIfTcArgs lhs &&&
+    freeNamesIfAppArgs lhs &&&
     freeNamesIfType rhs
 
 freeNamesIfIdDetails :: IfaceIdDetails -> NameSet
@@ -1377,12 +1394,12 @@ freeNamesIfConDecls (IfNewTyCon  c) = freeNamesIfConDecl c
 freeNamesIfConDecls _                   = emptyNameSet
 
 freeNamesIfConDecl :: IfaceConDecl -> NameSet
-freeNamesIfConDecl (IfCon { ifConExTvs   = ex_tvs, ifConCtxt = ctxt
+freeNamesIfConDecl (IfCon { ifConExTCvs  = ex_tvs, ifConCtxt = ctxt
                           , ifConArgTys  = arg_tys
                           , ifConFields  = flds
                           , ifConEqSpec  = eq_spec
                           , ifConStricts = bangs })
-  = freeNamesIfTyVarBndrs ex_tvs &&&
+  = fnList freeNamesIfBndr ex_tvs &&&
     freeNamesIfContext ctxt &&&
     fnList freeNamesIfType arg_tys &&&
     mkNameSet (map flSelector flds) &&&
@@ -1396,26 +1413,32 @@ freeNamesIfBang _               = emptyNameSet
 freeNamesIfKind :: IfaceType -> NameSet
 freeNamesIfKind = freeNamesIfType
 
-freeNamesIfTcArgs :: IfaceTcArgs -> NameSet
-freeNamesIfTcArgs (ITC_Vis   t ts) = freeNamesIfType t &&& freeNamesIfTcArgs ts
-freeNamesIfTcArgs (ITC_Invis k ks) = freeNamesIfKind k &&& freeNamesIfTcArgs ks
-freeNamesIfTcArgs ITC_Nil          = emptyNameSet
+freeNamesIfAppArgs :: IfaceAppArgs -> NameSet
+freeNamesIfAppArgs (IA_Vis   t ts) = freeNamesIfType t &&& freeNamesIfAppArgs ts
+freeNamesIfAppArgs (IA_Invis k ks) = freeNamesIfKind k &&& freeNamesIfAppArgs ks
+freeNamesIfAppArgs IA_Nil          = emptyNameSet
 
 freeNamesIfType :: IfaceType -> NameSet
 freeNamesIfType (IfaceFreeTyVar _)    = emptyNameSet
 freeNamesIfType (IfaceTyVar _)        = emptyNameSet
-freeNamesIfType (IfaceAppTy s t)      = freeNamesIfType s &&& freeNamesIfType t
-freeNamesIfType (IfaceTyConApp tc ts) = freeNamesIfTc tc &&& freeNamesIfTcArgs ts
-freeNamesIfType (IfaceTupleTy _ _ ts) = freeNamesIfTcArgs ts
+freeNamesIfType (IfaceAppTy s t)      = freeNamesIfType s &&& freeNamesIfAppArgs t
+freeNamesIfType (IfaceTyConApp tc ts) = freeNamesIfTc tc &&& freeNamesIfAppArgs ts
+freeNamesIfType (IfaceTupleTy _ _ ts) = freeNamesIfAppArgs ts
 freeNamesIfType (IfaceLitTy _)        = emptyNameSet
-freeNamesIfType (IfaceForAllTy tv t)  = freeNamesIfTyVarBndr tv &&& freeNamesIfType t
+freeNamesIfType (IfaceForAllTy tv t)  = freeNamesIfVarBndr tv &&& freeNamesIfType t
 freeNamesIfType (IfaceFunTy s t)      = freeNamesIfType s &&& freeNamesIfType t
 freeNamesIfType (IfaceDFunTy s t)     = freeNamesIfType s &&& freeNamesIfType t
 freeNamesIfType (IfaceCastTy t c)     = freeNamesIfType t &&& freeNamesIfCoercion c
 freeNamesIfType (IfaceCoercionTy c)   = freeNamesIfCoercion c
 
+freeNamesIfMCoercion :: IfaceMCoercion -> NameSet
+freeNamesIfMCoercion IfaceMRefl    = emptyNameSet
+freeNamesIfMCoercion (IfaceMCo co) = freeNamesIfCoercion co
+
 freeNamesIfCoercion :: IfaceCoercion -> NameSet
-freeNamesIfCoercion (IfaceReflCo _ t) = freeNamesIfType t
+freeNamesIfCoercion (IfaceReflCo t) = freeNamesIfType t
+freeNamesIfCoercion (IfaceGReflCo _ t mco)
+  = freeNamesIfType t &&& freeNamesIfMCoercion mco
 freeNamesIfCoercion (IfaceFunCo _ c1 c2)
   = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
 freeNamesIfCoercion (IfaceTyConAppCo _ tc cos)
@@ -1424,8 +1447,9 @@ freeNamesIfCoercion (IfaceAppCo c1 c2)
   = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
 freeNamesIfCoercion (IfaceForAllCo _ kind_co co)
   = freeNamesIfCoercion kind_co &&& freeNamesIfCoercion co
-freeNamesIfCoercion (IfaceCoVarCo _)
-  = emptyNameSet
+freeNamesIfCoercion (IfaceFreeCoVar _) = emptyNameSet
+freeNamesIfCoercion (IfaceCoVarCo _)   = emptyNameSet
+freeNamesIfCoercion (IfaceHoleCo _)    = emptyNameSet
 freeNamesIfCoercion (IfaceAxiomInstCo ax _ cos)
   = unitNameSet ax &&& fnList freeNamesIfCoercion cos
 freeNamesIfCoercion (IfaceUnivCo p _ t1 t2)
@@ -1440,8 +1464,6 @@ freeNamesIfCoercion (IfaceLRCo _ co)
   = freeNamesIfCoercion co
 freeNamesIfCoercion (IfaceInstCo co co2)
   = freeNamesIfCoercion co &&& freeNamesIfCoercion co2
-freeNamesIfCoercion (IfaceCoherenceCo c1 c2)
-  = freeNamesIfCoercion c1 &&& freeNamesIfCoercion c2
 freeNamesIfCoercion (IfaceKindCo c)
   = freeNamesIfCoercion c
 freeNamesIfCoercion (IfaceSubCo co)
@@ -1455,13 +1477,12 @@ freeNamesIfProv IfaceUnsafeCoerceProv    = emptyNameSet
 freeNamesIfProv (IfacePhantomProv co)    = freeNamesIfCoercion co
 freeNamesIfProv (IfaceProofIrrelProv co) = freeNamesIfCoercion co
 freeNamesIfProv (IfacePluginProv _)      = emptyNameSet
-freeNamesIfProv (IfaceHoleProv _)        = emptyNameSet
 
-freeNamesIfTyVarBndr :: TyVarBndr IfaceTvBndr vis -> NameSet
-freeNamesIfTyVarBndr (TvBndr tv _) = freeNamesIfTvBndr tv
+freeNamesIfVarBndr :: VarBndr IfaceBndr vis -> NameSet
+freeNamesIfVarBndr (Bndr bndr _) = freeNamesIfBndr bndr
 
-freeNamesIfTyVarBndrs :: [TyVarBndr IfaceTvBndr vis] -> NameSet
-freeNamesIfTyVarBndrs = fnList freeNamesIfTyVarBndr
+freeNamesIfVarBndrs :: [VarBndr IfaceBndr vis] -> NameSet
+freeNamesIfVarBndrs = fnList freeNamesIfVarBndr
 
 freeNamesIfBndr :: IfaceBndr -> NameSet
 freeNamesIfBndr (IfaceIdBndr b) = freeNamesIfIdBndr b
@@ -1552,7 +1573,7 @@ freeNamesIfFamInst (IfaceFamInst { ifFamInstFam = famName
 freeNamesIfaceTyConParent :: IfaceTyConParent -> NameSet
 freeNamesIfaceTyConParent IfNoParent = emptyNameSet
 freeNamesIfaceTyConParent (IfDataInstance ax tc tys)
-  = unitNameSet ax &&& freeNamesIfTc tc &&& freeNamesIfTcArgs tys
+  = unitNameSet ax &&& freeNamesIfTc tc &&& freeNamesIfAppArgs tys
 
 -- helpers
 (&&&) :: NameSet -> NameSet -> NameSet
@@ -1865,7 +1886,7 @@ instance Binary IfaceConDecls where
             _ -> error "Binary(IfaceConDecls).get: Invalid IfaceConDecls"
 
 instance Binary IfaceConDecl where
-    put_ bh (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10) = do
+    put_ bh (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11) = do
         putIfaceTopBndr bh a1
         put_ bh a2
         put_ bh a3
@@ -1873,10 +1894,11 @@ instance Binary IfaceConDecl where
         put_ bh a5
         put_ bh a6
         put_ bh a7
-        put_ bh (length a8)
-        mapM_ (put_ bh) a8
-        put_ bh a9
+        put_ bh a8
+        put_ bh (length a9)
+        mapM_ (put_ bh) a9
         put_ bh a10
+        put_ bh a11
     get bh = do
         a1 <- getIfaceTopBndr bh
         a2 <- get bh
@@ -1885,11 +1907,12 @@ instance Binary IfaceConDecl where
         a5 <- get bh
         a6 <- get bh
         a7 <- get bh
+        a8 <- get bh
         n_fields <- get bh
-        a8 <- replicateM n_fields (get bh)
-        a9 <- get bh
+        a9 <- replicateM n_fields (get bh)
         a10 <- get bh
-        return (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10)
+        a11 <- get bh
+        return (IfCon a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11)
 
 instance Binary IfaceBang where
     put_ bh IfNoBang        = putByte bh 0

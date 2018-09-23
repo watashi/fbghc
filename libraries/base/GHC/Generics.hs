@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds                  #-}
 {-# LANGUAGE DeriveFunctor              #-}
 {-# LANGUAGE DeriveGeneric              #-}
+{-# LANGUAGE EmptyDataDeriving          #-}
 {-# LANGUAGE FlexibleContexts           #-}
 {-# LANGUAGE FlexibleInstances          #-}
 {-# LANGUAGE GADTs                      #-}
@@ -14,7 +15,6 @@
 {-# LANGUAGE StandaloneDeriving         #-}
 {-# LANGUAGE Trustworthy                #-}
 {-# LANGUAGE TypeFamilies               #-}
-{-# LANGUAGE TypeInType                 #-}
 {-# LANGUAGE TypeOperators              #-}
 {-# LANGUAGE TypeSynonymInstances       #-}
 {-# LANGUAGE UndecidableInstances       #-}
@@ -105,7 +105,7 @@ module GHC.Generics  (
 -- This is a lot of information! However, most of it is actually merely meta-information
 -- that makes names of datatypes and constructors and more available on the type level.
 --
--- Here is a reduced representation for 'Tree' with nearly all meta-information removed,
+-- Here is a reduced representation for @Tree@ with nearly all meta-information removed,
 -- for now keeping only the most essential aspects:
 --
 -- @
@@ -189,7 +189,7 @@ module GHC.Generics  (
 --
 -- Here, 'R' is a type-level proxy that does not have any associated values.
 --
--- There used to be another variant of 'K1' (namely 'Par0'), but it has since
+-- There used to be another variant of 'K1' (namely @Par0@), but it has since
 -- been deprecated.
 
 -- *** Meta information: 'M1'
@@ -273,7 +273,7 @@ module GHC.Generics  (
 --       between the original value and its `Rep`-based representation and then invokes the
 --       generic instances.
 --
--- As an example, let us look at a function 'encode' that produces a naive, but lossless
+-- As an example, let us look at a function @encode@ that produces a naive, but lossless
 -- bit encoding of values of various datatypes. So we are aiming to define a function
 --
 -- @
@@ -367,18 +367,15 @@ module GHC.Generics  (
 -- @
 --
 -- The case for 'K1' is rather interesting. Here, we call the final function
--- 'encode' that we yet have to define, recursively. We will use another type
--- class 'Encode' for that function:
+-- @encode@ that we yet have to define, recursively. We will use another type
+-- class @Encode@ for that function:
 --
 -- @
 -- instance (Encode c) => Encode' ('K1' i c) where
 --   encode' ('K1' x) = encode x
 -- @
 --
--- Note how 'Par0' and 'Rec0' both being mapped to 'K1' allows us to define
--- a uniform instance here.
---
--- Similarly, we can define a uniform instance for 'M1', because we completely
+-- Note how we can define a uniform instance for 'M1', because we completely
 -- disregard all meta-information:
 --
 -- @
@@ -386,13 +383,13 @@ module GHC.Generics  (
 --   encode' ('M1' x) = encode' x
 -- @
 --
--- Unlike in 'K1', the instance for 'M1' refers to 'encode'', not 'encode'.
+-- Unlike in 'K1', the instance for 'M1' refers to @encode'@, not @encode@.
 
 -- *** The wrapper and generic default
 --
 -- |
 --
--- We now define class 'Encode' for the actual 'encode' function:
+-- We now define class @Encode@ for the actual @encode@ function:
 --
 -- @
 -- class Encode a where
@@ -401,9 +398,9 @@ module GHC.Generics  (
 --   encode x = encode' ('from' x)
 -- @
 --
--- The incoming 'x' is converted using 'from', then we dispatch to the
--- generic instances using 'encode''. We use this as a default definition
--- for 'encode'. We need the 'default encode' signature because ordinary
+-- The incoming @x@ is converted using 'from', then we dispatch to the
+-- generic instances using @encode'@. We use this as a default definition
+-- for @encode@. We need the @default encode@ signature because ordinary
 -- Haskell default methods must not introduce additional class constraints,
 -- but our generic default does.
 --
@@ -421,10 +418,10 @@ module GHC.Generics  (
 -- possible to use @deriving Encode@ as well, but GHC does not yet support
 -- that syntax for this situation.
 --
--- Having 'Encode' as a class has the advantage that we can define
+-- Having @Encode@ as a class has the advantage that we can define
 -- non-generic special cases, which is particularly useful for abstract
 -- datatypes that have no structural representation. For example, given
--- a suitable integer encoding function 'encodeInt', we can define
+-- a suitable integer encoding function @encodeInt@, we can define
 --
 -- @
 -- instance Encode Int where
@@ -457,7 +454,7 @@ module GHC.Generics  (
 --      any datatype where each constructor has at least one field.
 --
 -- An 'M1' instance is always required (but it can just ignore the
--- meta-information, as is the case for 'encode' above).
+-- meta-information, as is the case for @encode@ above).
 #if 0
 -- *** Using meta-information
 --
@@ -470,14 +467,15 @@ module GHC.Generics  (
 -- |
 --
 -- Datatype-generic functions as defined above work for a large class
--- of datatypes, including parameterized datatypes. (We have used 'Tree'
+-- of datatypes, including parameterized datatypes. (We have used @Tree@
 -- as our example above, which is of kind @* -> *@.) However, the
 -- 'Generic' class ranges over types of kind @*@, and therefore, the
--- resulting generic functions (such as 'encode') must be parameterized
+-- resulting generic functions (such as @encode@) must be parameterized
 -- by a generic type argument of kind @*@.
 --
 -- What if we want to define generic classes that range over type
--- constructors (such as 'Functor', 'Traversable', or 'Foldable')?
+-- constructors (such as 'Data.Functor.Functor',
+-- 'Data.Traversable.Traversable', or 'Data.Foldable.Foldable')?
 
 -- *** The 'Generic1' class
 --
@@ -491,7 +489,7 @@ module GHC.Generics  (
 -- The 'Generic1' class is also derivable.
 --
 -- The representation 'Rep1' is ever so slightly different from 'Rep'.
--- Let us look at 'Tree' as an example again:
+-- Let us look at @Tree@ as an example again:
 --
 -- @
 -- data Tree a = Leaf a | Node (Tree a) (Tree a)
@@ -731,6 +729,7 @@ module GHC.Generics  (
 -- We use some base types
 import Data.Either ( Either (..) )
 import Data.Maybe  ( Maybe(..), fromMaybe )
+import Data.Ord    ( Down(..) )
 import GHC.Integer ( Integer, integerToInt )
 import GHC.Prim    ( Addr#, Char#, Double#, Float#, Int#, Word# )
 import GHC.Ptr     ( Ptr )
@@ -739,10 +738,11 @@ import GHC.Types
 -- Needed for instances
 import GHC.Arr     ( Ix )
 import GHC.Base    ( Alternative(..), Applicative(..), Functor(..)
-                   , Monad(..), MonadPlus(..), String, coerce )
+                   , Monad(..), MonadPlus(..), NonEmpty(..), String, coerce
+                   , Semigroup(..), Monoid(..) )
 import GHC.Classes ( Eq(..), Ord(..) )
 import GHC.Enum    ( Bounded, Enum )
-import GHC.Read    ( Read(..), lex, readParen )
+import GHC.Read    ( Read(..) )
 import GHC.Show    ( Show(..), showString )
 
 -- Needed for metadata
@@ -755,28 +755,35 @@ import GHC.TypeLits ( Nat, Symbol, KnownSymbol, KnownNat, symbolVal, natVal )
 
 -- | Void: used for datatypes without constructors
 data V1 (p :: k)
-  deriving (Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Read     -- ^ @since 4.9.0.0
+           , Show     -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
-deriving instance Eq   (V1 p)
-deriving instance Ord  (V1 p)
-deriving instance Read (V1 p)
-deriving instance Show (V1 p)
+-- | @since 4.12.0.0
+instance Semigroup (V1 p) where
+  v <> _ = v
 
 -- | Unit: used for constructors without arguments
 data U1 (p :: k) = U1
-  deriving (Generic, Generic1)
+  deriving ( Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | @since 4.9.0.0
 instance Eq (U1 p) where
   _ == _ = True
 
--- | @since 4.9.0.0
+-- | @since 4.7.0.0
 instance Ord (U1 p) where
   compare _ _ = EQ
 
 -- | @since 4.9.0.0
-instance Read (U1 p) where
-  readsPrec d = readParen (d > 10) (\r -> [(U1, s) | ("U1",s) <- lex r ])
+deriving instance Read (U1 p)
 
 -- | @since 4.9.0.0
 instance Show (U1 p) where
@@ -804,9 +811,24 @@ instance Monad U1 where
 -- | @since 4.9.0.0
 instance MonadPlus U1
 
+-- | @since 4.12.0.0
+instance Semigroup (U1 p) where
+  _ <> _ = U1
+
+-- | @since 4.12.0.0
+instance Monoid (U1 p) where
+  mempty = U1
+
 -- | Used for marking occurrences of the parameter
 newtype Par1 p = Par1 { unPar1 :: p }
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | @since 4.9.0.0
 instance Applicative Par1 where
@@ -818,10 +840,23 @@ instance Applicative Par1 where
 instance Monad Par1 where
   Par1 x >>= f = f x
 
+-- | @since 4.12.0.0
+deriving instance Semigroup p => Semigroup (Par1 p)
+
+-- | @since 4.12.0.0
+deriving instance Monoid p => Monoid (Par1 p)
+
 -- | Recursive calls of kind @* -> *@ (or kind @k -> *@, when @PolyKinds@
 -- is enabled)
-newtype Rec1 (f :: k -> *) (p :: k) = Rec1 { unRec1 :: f p }
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+newtype Rec1 (f :: k -> Type) (p :: k) = Rec1 { unRec1 :: f p }
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | @since 4.9.0.0
 deriving instance Applicative f => Applicative (Rec1 f)
@@ -836,9 +871,34 @@ instance Monad f => Monad (Rec1 f) where
 -- | @since 4.9.0.0
 deriving instance MonadPlus f => MonadPlus (Rec1 f)
 
+-- | @since 4.12.0.0
+deriving instance Semigroup (f p) => Semigroup (Rec1 f p)
+
+-- | @since 4.12.0.0
+deriving instance Monoid (f p) => Monoid (Rec1 f p)
+
 -- | Constants, additional parameters and recursion of kind @*@
-newtype K1 (i :: *) c (p :: k) = K1 { unK1 :: c }
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+newtype K1 (i :: Type) c (p :: k) = K1 { unK1 :: c }
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
+
+-- | @since 4.12.0.0
+instance Monoid c => Applicative (K1 i c) where
+  pure _ = K1 mempty
+  liftA2 = \_ -> coerce (mappend :: c -> c -> c)
+  (<*>) = coerce (mappend :: c -> c -> c)
+
+-- | @since 4.12.0.0
+deriving instance Semigroup c => Semigroup (K1 i c p)
+
+-- | @since 4.12.0.0
+deriving instance Monoid c => Monoid (K1 i c p)
 
 -- | @since 4.9.0.0
 deriving instance Applicative f => Applicative (M1 i c f)
@@ -852,19 +912,47 @@ deriving instance Monad f => Monad (M1 i c f)
 -- | @since 4.9.0.0
 deriving instance MonadPlus f => MonadPlus (M1 i c f)
 
+-- | @since 4.12.0.0
+deriving instance Semigroup (f p) => Semigroup (M1 i c f p)
+
+-- | @since 4.12.0.0
+deriving instance Monoid (f p) => Monoid (M1 i c f p)
+
 -- | Meta-information (constructor names, etc.)
-newtype M1 (i :: *) (c :: Meta) (f :: k -> *) (p :: k) = M1 { unM1 :: f p }
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+newtype M1 (i :: Type) (c :: Meta) (f :: k -> Type) (p :: k) =
+    M1 { unM1 :: f p }
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Sums: encode choice between constructors
 infixr 5 :+:
-data (:+:) (f :: k -> *) (g :: k -> *) (p :: k) = L1 (f p) | R1 (g p)
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+data (:+:) (f :: k -> Type) (g :: k -> Type) (p :: k) = L1 (f p) | R1 (g p)
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Products: encode multiple arguments to constructors
 infixr 6 :*:
-data (:*:) (f :: k -> *) (g :: k -> *) (p :: k) = f p :*: g p
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+data (:*:) (f :: k -> Type) (g :: k -> Type) (p :: k) = f p :*: g p
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | @since 4.9.0.0
 instance (Applicative f, Applicative g) => Applicative (f :*: g) where
@@ -887,11 +975,26 @@ instance (Monad f, Monad g) => Monad (f :*: g) where
 -- | @since 4.9.0.0
 instance (MonadPlus f, MonadPlus g) => MonadPlus (f :*: g)
 
+-- | @since 4.12.0.0
+instance (Semigroup (f p), Semigroup (g p)) => Semigroup ((f :*: g) p) where
+  (x1 :*: y1) <> (x2 :*: y2) = (x1 <> x2) :*: (y1 <> y2)
+
+-- | @since 4.12.0.0
+instance (Monoid (f p), Monoid (g p)) => Monoid ((f :*: g) p) where
+  mempty = mempty :*: mempty
+
 -- | Composition of functors
 infixr 7 :.:
-newtype (:.:) (f :: k2 -> *) (g :: k1 -> k2) (p :: k1) =
+newtype (:.:) (f :: k2 -> Type) (g :: k1 -> k2) (p :: k1) =
     Comp1 { unComp1 :: f (g p) }
-  deriving (Eq, Ord, Read, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.7.0.0
+           , Ord      -- ^ @since 4.7.0.0
+           , Read     -- ^ @since 4.7.0.0
+           , Show     -- ^ @since 4.7.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | @since 4.9.0.0
 instance (Applicative f, Applicative g) => Applicative (f :.: g) where
@@ -905,46 +1008,85 @@ instance (Alternative f, Applicative g) => Alternative (f :.: g) where
   (<|>) = coerce ((<|>) :: f (g a) -> f (g a) -> f (g a)) ::
     forall a . (f :.: g) a -> (f :.: g) a -> (f :.: g) a
 
+-- | @since 4.12.0.0
+deriving instance Semigroup (f (g p)) => Semigroup ((f :.: g) p)
+
+-- | @since 4.12.0.0
+deriving instance Monoid (f (g p)) => Monoid ((f :.: g) p)
+
 -- | Constants of unlifted kinds
 --
 -- @since 4.9.0.0
-data family URec (a :: *) (p :: k)
+data family URec (a :: Type) (p :: k)
 
 -- | Used for marking occurrences of 'Addr#'
 --
 -- @since 4.9.0.0
 data instance URec (Ptr ()) (p :: k) = UAddr { uAddr# :: Addr# }
-  deriving (Eq, Ord, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Used for marking occurrences of 'Char#'
 --
 -- @since 4.9.0.0
 data instance URec Char (p :: k) = UChar { uChar# :: Char# }
-  deriving (Eq, Ord, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Show     -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Used for marking occurrences of 'Double#'
 --
 -- @since 4.9.0.0
 data instance URec Double (p :: k) = UDouble { uDouble# :: Double# }
-  deriving (Eq, Ord, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Show     -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Used for marking occurrences of 'Float#'
 --
 -- @since 4.9.0.0
 data instance URec Float (p :: k) = UFloat { uFloat# :: Float# }
-  deriving (Eq, Ord, Show, Functor, Generic, Generic1)
+  deriving ( Eq, Ord, Show
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Used for marking occurrences of 'Int#'
 --
 -- @since 4.9.0.0
 data instance URec Int (p :: k) = UInt { uInt# :: Int# }
-  deriving (Eq, Ord, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Show     -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Used for marking occurrences of 'Word#'
 --
 -- @since 4.9.0.0
 data instance URec Word (p :: k) = UWord { uWord# :: Word# }
-  deriving (Eq, Ord, Show, Functor, Generic, Generic1)
+  deriving ( Eq       -- ^ @since 4.9.0.0
+           , Ord      -- ^ @since 4.9.0.0
+           , Show     -- ^ @since 4.9.0.0
+           , Functor  -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.9.0.0
+           , Generic1 -- ^ @since 4.9.0.0
+           )
 
 -- | Type synonym for @'URec' 'Addr#'@
 --
@@ -975,10 +1117,10 @@ type UInt    = URec Int
 -- @since 4.9.0.0
 type UWord   = URec Word
 
--- | Tag for K1: recursion (of kind @*@)
+-- | Tag for K1: recursion (of kind @Type@)
 data R
 
--- | Type synonym for encoding recursion (of kind @*@)
+-- | Type synonym for encoding recursion (of kind @Type@)
 type Rec0  = K1 R
 
 -- | Tag for M1: datatype
@@ -1000,17 +1142,17 @@ type S1 = M1 S
 -- | Class for datatypes that represent datatypes
 class Datatype d where
   -- | The name of the datatype (unqualified)
-  datatypeName :: t d (f :: k -> *) (a :: k) -> [Char]
+  datatypeName :: t d (f :: k -> Type) (a :: k) -> [Char]
   -- | The fully-qualified name of the module where the type is declared
-  moduleName   :: t d (f :: k -> *) (a :: k) -> [Char]
+  moduleName   :: t d (f :: k -> Type) (a :: k) -> [Char]
   -- | The package name of the module where the type is declared
   --
   -- @since 4.9.0.0
-  packageName :: t d (f :: k -> *) (a :: k) -> [Char]
+  packageName :: t d (f :: k -> Type) (a :: k) -> [Char]
   -- | Marks if the datatype is actually a newtype
   --
   -- @since 4.7.0.0
-  isNewtype    :: t d (f :: k -> *) (a :: k) -> Bool
+  isNewtype    :: t d (f :: k -> Type) (a :: k) -> Bool
   isNewtype _ = False
 
 -- | @since 4.9.0.0
@@ -1024,14 +1166,14 @@ instance (KnownSymbol n, KnownSymbol m, KnownSymbol p, SingI nt)
 -- | Class for datatypes that represent data constructors
 class Constructor c where
   -- | The name of the constructor
-  conName :: t c (f :: k -> *) (a :: k) -> [Char]
+  conName :: t c (f :: k -> Type) (a :: k) -> [Char]
 
   -- | The fixity of the constructor
-  conFixity :: t c (f :: k -> *) (a :: k) -> Fixity
+  conFixity :: t c (f :: k -> Type) (a :: k) -> Fixity
   conFixity _ = Prefix
 
   -- | Marks if this constructor is a record
-  conIsRecord :: t c (f :: k -> *) (a :: k) -> Bool
+  conIsRecord :: t c (f :: k -> Type) (a :: k) -> Bool
   conIsRecord _ = False
 
 -- | @since 4.9.0.0
@@ -1044,7 +1186,12 @@ instance (KnownSymbol n, SingI f, SingI r)
 -- | Datatype to represent the fixity of a constructor. An infix
 -- | declaration directly corresponds to an application of 'Infix'.
 data Fixity = Prefix | Infix Associativity Int
-  deriving (Eq, Show, Ord, Read, Generic)
+  deriving ( Eq       -- ^ @since 4.6.0.0
+           , Show     -- ^ @since 4.6.0.0
+           , Ord      -- ^ @since 4.6.0.0
+           , Read     -- ^ @since 4.6.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           )
 
 -- | This variant of 'Fixity' appears at the type level.
 --
@@ -1060,7 +1207,15 @@ prec (Infix _ n) = n
 data Associativity = LeftAssociative
                    | RightAssociative
                    | NotAssociative
-  deriving (Eq, Show, Ord, Read, Enum, Bounded, Ix, Generic)
+  deriving ( Eq       -- ^ @since 4.6.0.0
+           , Show     -- ^ @since 4.6.0.0
+           , Ord      -- ^ @since 4.6.0.0
+           , Read     -- ^ @since 4.6.0.0
+           , Enum     -- ^ @since 4.9.0.0
+           , Bounded  -- ^ @since 4.9.0.0
+           , Ix       -- ^ @since 4.9.0.0
+           , Generic  -- ^ @since 4.7.0.0
+           )
 
 -- | The unpackedness of a field as the user wrote it in the source code. For
 -- example, in the following data type:
@@ -1078,7 +1233,15 @@ data Associativity = LeftAssociative
 data SourceUnpackedness = NoSourceUnpackedness
                         | SourceNoUnpack
                         | SourceUnpack
-  deriving (Eq, Show, Ord, Read, Enum, Bounded, Ix, Generic)
+  deriving ( Eq      -- ^ @since 4.9.0.0
+           , Show    -- ^ @since 4.9.0.0
+           , Ord     -- ^ @since 4.9.0.0
+           , Read    -- ^ @since 4.9.0.0
+           , Enum    -- ^ @since 4.9.0.0
+           , Bounded -- ^ @since 4.9.0.0
+           , Ix      -- ^ @since 4.9.0.0
+           , Generic -- ^ @since 4.9.0.0
+           )
 
 -- | The strictness of a field as the user wrote it in the source code. For
 -- example, in the following data type:
@@ -1094,7 +1257,15 @@ data SourceUnpackedness = NoSourceUnpackedness
 data SourceStrictness = NoSourceStrictness
                       | SourceLazy
                       | SourceStrict
-  deriving (Eq, Show, Ord, Read, Enum, Bounded, Ix, Generic)
+  deriving ( Eq      -- ^ @since 4.9.0.0
+           , Show    -- ^ @since 4.9.0.0
+           , Ord     -- ^ @since 4.9.0.0
+           , Read    -- ^ @since 4.9.0.0
+           , Enum    -- ^ @since 4.9.0.0
+           , Bounded -- ^ @since 4.9.0.0
+           , Ix      -- ^ @since 4.9.0.0
+           , Generic -- ^ @since 4.9.0.0
+           )
 
 -- | The strictness that GHC infers for a field during compilation. Whereas
 -- there are nine different combinations of 'SourceUnpackedness' and
@@ -1121,24 +1292,32 @@ data SourceStrictness = NoSourceStrictness
 data DecidedStrictness = DecidedLazy
                        | DecidedStrict
                        | DecidedUnpack
-  deriving (Eq, Show, Ord, Read, Enum, Bounded, Ix, Generic)
+  deriving ( Eq      -- ^ @since 4.9.0.0
+           , Show    -- ^ @since 4.9.0.0
+           , Ord     -- ^ @since 4.9.0.0
+           , Read    -- ^ @since 4.9.0.0
+           , Enum    -- ^ @since 4.9.0.0
+           , Bounded -- ^ @since 4.9.0.0
+           , Ix      -- ^ @since 4.9.0.0
+           , Generic -- ^ @since 4.9.0.0
+           )
 
 -- | Class for datatypes that represent records
 class Selector s where
   -- | The name of the selector
-  selName :: t s (f :: k -> *) (a :: k) -> [Char]
+  selName :: t s (f :: k -> Type) (a :: k) -> [Char]
   -- | The selector's unpackedness annotation (if any)
   --
   -- @since 4.9.0.0
-  selSourceUnpackedness :: t s (f :: k -> *) (a :: k) -> SourceUnpackedness
+  selSourceUnpackedness :: t s (f :: k -> Type) (a :: k) -> SourceUnpackedness
   -- | The selector's strictness annotation (if any)
   --
   -- @since 4.9.0.0
-  selSourceStrictness :: t s (f :: k -> *) (a :: k) -> SourceStrictness
+  selSourceStrictness :: t s (f :: k -> Type) (a :: k) -> SourceStrictness
   -- | The strictness that the compiler inferred for the selector
   --
   -- @since 4.9.0.0
-  selDecidedStrictness :: t s (f :: k -> *) (a :: k) -> DecidedStrictness
+  selDecidedStrictness :: t s (f :: k -> Type) (a :: k) -> DecidedStrictness
 
 -- | @since 4.9.0.0
 instance (SingI mn, SingI su, SingI ss, SingI ds)
@@ -1148,11 +1327,18 @@ instance (SingI mn, SingI su, SingI ss, SingI ds)
   selSourceStrictness   _ = fromSing (sing :: Sing ss)
   selDecidedStrictness  _ = fromSing (sing :: Sing ds)
 
--- | Representable types of kind *.
--- This class is derivable in GHC with the DeriveGeneric flag on.
+-- | Representable types of kind @*@.
+-- This class is derivable in GHC with the @DeriveGeneric@ flag on.
+--
+-- A 'Generic' instance must satisfy the following laws:
+--
+-- @
+-- 'from' . 'to' ≡ 'Prelude.id'
+-- 'to' . 'from' ≡ 'Prelude.id'
+-- @
 class Generic a where
   -- | Generic representation type
-  type Rep a :: * -> *
+  type Rep a :: Type -> Type
   -- | Convert from the datatype to its representation
   from  :: a -> (Rep a) x
   -- | Convert from the representation to the datatype
@@ -1162,9 +1348,16 @@ class Generic a where
 -- | Representable types of kind @* -> *@ (or kind @k -> *@, when @PolyKinds@
 -- is enabled).
 -- This class is derivable in GHC with the @DeriveGeneric@ flag on.
-class Generic1 (f :: k -> *) where
+--
+-- A 'Generic1' instance must satisfy the following laws:
+--
+-- @
+-- 'from1' . 'to1' ≡ 'Prelude.id'
+-- 'to1' . 'from1' ≡ 'Prelude.id'
+-- @
+class Generic1 (f :: k -> Type) where
   -- | Generic representation type
-  type Rep1 f :: k -> *
+  type Rep1 f :: k -> Type
   -- | Convert from the datatype to its representation
   from1  :: f a -> (Rep1 f) a
   -- | Convert from the representation to the datatype
@@ -1199,30 +1392,87 @@ data Meta = MetaData Symbol Symbol Symbol Bool
 -- Derived instances
 --------------------------------------------------------------------------------
 
+-- | @since 4.6.0.0
 deriving instance Generic [a]
+
+-- | @since 4.6.0.0
+deriving instance Generic (NonEmpty a)
+
+-- | @since 4.6.0.0
 deriving instance Generic (Maybe a)
+
+-- | @since 4.6.0.0
 deriving instance Generic (Either a b)
+
+-- | @since 4.6.0.0
 deriving instance Generic Bool
+
+-- | @since 4.6.0.0
 deriving instance Generic Ordering
+
+-- | @since 4.6.0.0
 deriving instance Generic (Proxy t)
+
+-- | @since 4.6.0.0
 deriving instance Generic ()
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,) a b)
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,,) a b c)
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,,,) a b c d)
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,,,,) a b c d e)
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,,,,,) a b c d e f)
+
+-- | @since 4.6.0.0
 deriving instance Generic ((,,,,,,) a b c d e f g)
 
+-- | @since 4.12.0.0
+deriving instance Generic (Down a)
+
+
+-- | @since 4.6.0.0
 deriving instance Generic1 []
+
+-- | @since 4.6.0.0
+deriving instance Generic1 NonEmpty
+
+-- | @since 4.6.0.0
 deriving instance Generic1 Maybe
+
+-- | @since 4.6.0.0
 deriving instance Generic1 (Either a)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 Proxy
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,) a)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,,) a b)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,,,) a b c)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,,,,) a b c d)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,,,,,) a b c d e)
+
+-- | @since 4.6.0.0
 deriving instance Generic1 ((,,,,,,) a b c d e f)
+
+-- | @since 4.12.0.0
+deriving instance Generic1 Down
 
 --------------------------------------------------------------------------------
 -- Copied from the singletons package
@@ -1232,8 +1482,6 @@ deriving instance Generic1 ((,,,,,,) a b c d e f)
 data family Sing (a :: k)
 
 -- | A 'SingI' constraint is essentially an implicitly-passed singleton.
--- If you need to satisfy this constraint with an explicit singleton, please
--- see 'withSingI'.
 class SingI (a :: k) where
   -- | Produce the singleton explicitly. You will likely need the @ScopedTypeVariables@
   -- extension to use this method the way you want.
@@ -1245,7 +1493,7 @@ class SingI (a :: k) where
 class SingKind k where
   -- | Get a base type from a proxy for the promoted kind. For example,
   -- @DemoteRep Bool@ will be the type @Bool@.
-  type DemoteRep k :: *
+  type DemoteRep k :: Type
 
   -- | Convert a singleton to its unrefined version.
   fromSing :: Sing (a :: k) -> DemoteRep k

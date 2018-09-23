@@ -200,6 +200,8 @@ necessary to the stack to accommodate it (e.g. 2).
 {
 module CmmParse ( parseCmmFile ) where
 
+import GhcPrelude
+
 import StgCmmExtCode
 import CmmCallConv
 import StgCmmProf
@@ -296,6 +298,10 @@ import qualified Data.Map as M
         '!='    { L _ (CmmT_Ne) }
         '&&'    { L _ (CmmT_BoolAnd) }
         '||'    { L _ (CmmT_BoolOr) }
+
+        'True'  { L _ (CmmT_True ) }
+        'False' { L _ (CmmT_False) }
+        'likely'{ L _ (CmmT_likely)}
 
         'CLOSURE'       { L _ (CmmT_CLOSURE) }
         'INFO_TABLE'    { L _ (CmmT_INFO_TABLE) }
@@ -396,8 +402,6 @@ statics :: { [CmmParse [CmmStatic]] }
         : {- empty -}                   { [] }
         | static statics                { $1 : $2 }
     
--- Strings aren't used much in the RTS HC code, so it doesn't seem
--- worth allowing inline strings.  C-- doesn't allow them anyway.
 static  :: { CmmParse [CmmStatic] }
         : type expr ';' { do e <- $2;
                              return [CmmStaticLit (getLit e)] }
@@ -466,7 +470,7 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       return (mkCmmEntryLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing, cit_clo = Nothing },
                               []) }
         
         | 'INFO_TABLE_FUN' '(' NAME ',' INT ',' INT ',' INT ',' STRING ',' STRING ',' INT ')'
@@ -482,7 +486,7 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       return (mkCmmEntryLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing, cit_clo = Nothing },
                               []) }
                 -- we leave most of the fields zero here.  This is only used
                 -- to generate the BCO info table in the RTS at the moment.
@@ -500,7 +504,7 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       return (mkCmmEntryLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing,cit_clo = Nothing },
                               []) }
 
                      -- If profiling is on, this string gets duplicated,
@@ -517,7 +521,7 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       return (mkCmmEntryLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing, cit_clo = Nothing },
                               []) }
 
         | 'INFO_TABLE_RET' '(' NAME ',' INT ')'
@@ -528,7 +532,7 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       return (mkCmmRetLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmRetInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing, cit_clo = Nothing },
                               []) }
 
         | 'INFO_TABLE_RET' '(' NAME ',' INT ',' formals0 ')'
@@ -538,12 +542,12 @@ info    :: { CmmParse (CLabel, Maybe CmmInfoTable, [LocalReg]) }
                       live <- sequence $7
                       let prof = NoProfilingInfo
                           -- drop one for the info pointer
-                          bitmap = mkLiveness dflags (map Just (drop 1 live))
+                          bitmap = mkLiveness dflags (drop 1 live)
                           rep  = mkRTSRep (fromIntegral $5) $ mkStackRep bitmap
                       return (mkCmmRetLabel pkg $3,
                               Just $ CmmInfoTable { cit_lbl = mkCmmRetInfoLabel pkg $3
                                            , cit_rep = rep
-                                           , cit_prof = prof, cit_srt = NoC_SRT },
+                                           , cit_prof = prof, cit_srt = Nothing, cit_clo = Nothing },
                               live) }
 
 body    :: { CmmParse () }
@@ -627,10 +631,10 @@ stmt    :: { CmmParse () }
                 { doCall $2 [] $4 }
         | '(' formals ')' '=' 'call' expr '(' exprs0 ')' ';'
                 { doCall $6 $2 $8 }
-        | 'if' bool_expr 'goto' NAME
-                { do l <- lookupLabel $4; cmmRawIf $2 l }
-        | 'if' bool_expr '{' body '}' else      
-                { cmmIfThenElse $2 (withSourceNote $3 $5 $4) $6 }
+        | 'if' bool_expr cond_likely 'goto' NAME
+                { do l <- lookupLabel $5; cmmRawIf $2 l $3 }
+        | 'if' bool_expr cond_likely '{' body '}' else
+                { cmmIfThenElse $2 (withSourceNote $4 $6 $5) $7 $3 }
         | 'push' '(' exprs0 ')' maybe_body
                 { pushStackFrame $3 $5 }
         | 'reserve' expr '=' lreg maybe_body
@@ -718,6 +722,12 @@ default :: { Maybe (CmmParse ()) }
 else    :: { CmmParse () }
         : {- empty -}                   { return () }
         | 'else' '{' body '}'           { withSourceNote $2 $4 $3 }
+
+cond_likely :: { Maybe Bool }
+        : '(' 'likely' ':' 'True'  ')'  { Just True  }
+        | '(' 'likely' ':' 'False' ')'  { Just False }
+        | {- empty -}                   { Nothing }
+
 
 -- we have to write this out longhand so that Happy's precedence rules
 -- can kick in.
@@ -992,6 +1002,7 @@ callishMachOps = listToUFM $
         ( "memcpy", memcpyLikeTweakArgs MO_Memcpy ),
         ( "memset", memcpyLikeTweakArgs MO_Memset ),
         ( "memmove", memcpyLikeTweakArgs MO_Memmove ),
+        ( "memcmp", memcpyLikeTweakArgs MO_Memcmp ),
 
         ("prefetch0", (,) $ MO_Prefetch_Data 0),
         ("prefetch1", (,) $ MO_Prefetch_Data 1),
@@ -1002,6 +1013,16 @@ callishMachOps = listToUFM $
         ( "popcnt16", (,) $ MO_PopCnt W16 ),
         ( "popcnt32", (,) $ MO_PopCnt W32 ),
         ( "popcnt64", (,) $ MO_PopCnt W64 ),
+
+        ( "pdep8",  (,) $ MO_Pdep W8  ),
+        ( "pdep16", (,) $ MO_Pdep W16 ),
+        ( "pdep32", (,) $ MO_Pdep W32 ),
+        ( "pdep64", (,) $ MO_Pdep W64 ),
+
+        ( "pext8",  (,) $ MO_Pext W8  ),
+        ( "pext16", (,) $ MO_Pext W16 ),
+        ( "pext32", (,) $ MO_Pext W32 ),
+        ( "pext64", (,) $ MO_Pext W64 ),
 
         ( "cmpxchg8",  (,) $ MO_Cmpxchg W8  ),
         ( "cmpxchg16", (,) $ MO_Cmpxchg W16 ),
@@ -1276,11 +1297,11 @@ data BoolExpr
 
 -- ToDo: smart constructors which simplify the boolean expression.
 
-cmmIfThenElse cond then_part else_part = do
+cmmIfThenElse cond then_part else_part likely = do
      then_id <- newBlockId
      join_id <- newBlockId
      c <- cond
-     emitCond c then_id
+     emitCond c then_id likely
      else_part
      emit (mkBranch join_id)
      emitLabel then_id
@@ -1288,38 +1309,38 @@ cmmIfThenElse cond then_part else_part = do
      -- fall through to join
      emitLabel join_id
 
-cmmRawIf cond then_id = do
+cmmRawIf cond then_id likely = do
     c <- cond
-    emitCond c then_id
+    emitCond c then_id likely
 
 -- 'emitCond cond true_id'  emits code to test whether the cond is true,
 -- branching to true_id if so, and falling through otherwise.
-emitCond (BoolTest e) then_id = do
+emitCond (BoolTest e) then_id likely = do
   else_id <- newBlockId
-  emit (mkCbranch e then_id else_id Nothing)
+  emit (mkCbranch e then_id else_id likely)
   emitLabel else_id
-emitCond (BoolNot (BoolTest (CmmMachOp op args))) then_id
+emitCond (BoolNot (BoolTest (CmmMachOp op args))) then_id likely
   | Just op' <- maybeInvertComparison op
-  = emitCond (BoolTest (CmmMachOp op' args)) then_id
-emitCond (BoolNot e) then_id = do
+  = emitCond (BoolTest (CmmMachOp op' args)) then_id (not <$> likely)
+emitCond (BoolNot e) then_id likely = do
   else_id <- newBlockId
-  emitCond e else_id
+  emitCond e else_id likely
   emit (mkBranch then_id)
   emitLabel else_id
-emitCond (e1 `BoolOr` e2) then_id = do
-  emitCond e1 then_id
-  emitCond e2 then_id
-emitCond (e1 `BoolAnd` e2) then_id = do
+emitCond (e1 `BoolOr` e2) then_id likely = do
+  emitCond e1 then_id likely
+  emitCond e2 then_id likely
+emitCond (e1 `BoolAnd` e2) then_id likely = do
         -- we'd like to invert one of the conditionals here to avoid an
         -- extra branch instruction, but we can't use maybeInvertComparison
         -- here because we can't look too closely at the expression since
         -- we're in a loop.
   and_id <- newBlockId
   else_id <- newBlockId
-  emitCond e1 and_id
+  emitCond e1 and_id likely
   emit (mkBranch else_id)
   emitLabel and_id
-  emitCond e2 then_id
+  emitCond e2 then_id likely
   emitLabel else_id
 
 -- -----------------------------------------------------------------------------

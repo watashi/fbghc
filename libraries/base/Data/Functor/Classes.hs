@@ -68,7 +68,9 @@ import Control.Applicative (Alternative((<|>)), Const(Const))
 
 import Data.Functor.Identity (Identity(Identity))
 import Data.Proxy (Proxy(Proxy))
+import Data.List.NonEmpty (NonEmpty(..))
 import Data.Monoid (mappend)
+import Data.Ord (Down(Down))
 
 import GHC.Read (expectP, list, paren)
 
@@ -452,6 +454,27 @@ instance Read1 [] where
 instance Show1 [] where
     liftShowsPrec _ sl _ = sl
 
+-- | @since 4.10.0.0
+instance Eq1 NonEmpty where
+  liftEq eq (a :| as) (b :| bs) = eq a b && liftEq eq as bs
+
+-- | @since 4.10.0.0
+instance Ord1 NonEmpty where
+  liftCompare cmp (a :| as) (b :| bs) = cmp a b `mappend` liftCompare cmp as bs
+
+-- | @since 4.10.0.0
+instance Read1 NonEmpty where
+  liftReadsPrec rdP rdL p s = readParen (p > 5) (\s' -> do
+    (a, s'') <- rdP 6 s'
+    (":|", s''') <- lex s''
+    (as, s'''') <- rdL s'''
+    return (a :| as, s'''')) s
+
+-- | @since 4.10.0.0
+instance Show1 NonEmpty where
+  liftShowsPrec shwP shwL p (a :| as) = showParen (p > 5) $
+    shwP 6 a . showString " :| " . shwL as
+
 -- | @since 4.9.0.0
 instance Eq2 (,) where
     liftEq2 e1 e2 (x1, y1) (x2, y2) = e1 x1 x2 && e2 y1 y2
@@ -621,6 +644,24 @@ instance Read1 Proxy where
 
   liftReadListPrec = liftReadListPrecDefault
   liftReadList     = liftReadListDefault
+
+-- | @since 4.12.0.0
+instance Eq1 Down where
+    liftEq eq (Down x) (Down y) = eq x y
+
+-- | @since 4.12.0.0
+instance Ord1 Down where
+    liftCompare comp (Down x) (Down y) = comp x y
+
+-- | @since 4.12.0.0
+instance Read1 Down where
+    liftReadsPrec rp _ = readsData $
+         readsUnaryWith rp "Down" Down
+
+-- | @since 4.12.0.0
+instance Show1 Down where
+    liftShowsPrec sp _ d (Down x) = showsUnaryWith sp "Down" d x
+
 
 -- Building blocks
 

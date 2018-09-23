@@ -537,7 +537,7 @@ now have,
   │ etc.    │
 
 Now consider what happens when TSO 1 runs its duplicate-computation check.
-Again, we start walking the stack from the top, where we we find the update
+Again, we start walking the stack from the top, where we find the update
 frame updating THUNK A. We will lock this thunk, replacing it with a BLACKHOLE
 owned by its TSO. We now have,
 
@@ -678,6 +678,11 @@ for:
   TICK_ENT_VIA_NODE();
 
   R1 = StgAP_STACK_fun(ap);
+
+  // Because of eager blackholing the closure no longer has correct size so
+  // threadPaused() can't correctly zero the slop, so we do it here. See #15571
+  // and Note [zeroing slop].
+  OVERWRITING_CLOSURE_SIZE(ap, BYTES_TO_WDS(SIZEOF_StgThunkHeader) + 2 + Words);
 
   ENTER_R1();
 }

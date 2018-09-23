@@ -380,8 +380,8 @@ checkClosure( const StgClosure* p )
 
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN:
-    case MUT_ARR_PTRS_FROZEN0:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         {
             StgMutArrPtrs* a = (StgMutArrPtrs *)p;
             uint32_t i;
@@ -389,6 +389,18 @@ checkClosure( const StgClosure* p )
                 ASSERT(LOOKS_LIKE_CLOSURE_PTR(a->payload[i]));
             }
             return mut_arr_ptrs_sizeW(a);
+        }
+
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
+        {
+            StgSmallMutArrPtrs *a = (StgSmallMutArrPtrs *)p;
+            for (uint32_t i = 0; i < a->ptrs; i++) {
+                ASSERT(LOOKS_LIKE_CLOSURE_PTR(a->payload[i]));
+            }
+            return small_mut_arr_ptrs_sizeW(a);
         }
 
     case TSO:
@@ -535,7 +547,8 @@ checkTSO(StgTSO *tso)
     ASSERT(next == END_TSO_QUEUE ||
            info == &stg_MVAR_TSO_QUEUE_info ||
            info == &stg_TSO_info ||
-           info == &stg_WHITEHOLE_info); // happens due to STM doing lockTSO()
+           info == &stg_WHITEHOLE_info); // used to happen due to STM doing
+                                         // lockTSO(), might not happen now
 
     if (   tso->why_blocked == BlockedOnMVar
         || tso->why_blocked == BlockedOnMVarRead
@@ -677,7 +690,7 @@ checkStaticObjects ( StgClosure* static_objects )
       break;
 
     case FUN_STATIC:
-      p = *FUN_STATIC_LINK((StgClosure *)p);
+      p = *STATIC_LINK(info,(StgClosure *)p);
       break;
 
     case CONSTR:
@@ -859,7 +872,7 @@ void findSlop(bdescr *bd)
         slop = (bd->blocks * BLOCK_SIZE_W) - (bd->free - bd->start);
         if (slop > (1024/sizeof(W_))) {
             debugBelch("block at %p (bdescr %p) has %" FMT_Word "KB slop\n",
-                       bd->start, bd, slop / (1024/sizeof(W_)));
+                       bd->start, bd, slop / (1024/(W_)sizeof(W_)));
         }
     }
 }

@@ -76,6 +76,10 @@ the :ghc-flag:`-threaded` option (see :ref:`options-linker`). Additionally, the
 following compiler options affect parallelism:
 
 .. ghc-flag:: -feager-blackholing
+    :shortdesc: Turn on :ref:`eager blackholing <parallel-compile-options>`
+    :type: dynamic
+    :category:
+    :noindex:
 
     Blackholing is the act of marking a thunk (lazy computation) as
     being under evaluation. It is useful for three reasons: firstly it
@@ -128,6 +132,8 @@ use the RTS :rts-flag:`-N ⟨x⟩` options.
     Omitting ⟨x⟩, i.e. ``+RTS -N -RTS``, lets the runtime choose the
     value of ⟨x⟩ itself based on how many processors are in your
     machine.
+
+    Omitting ``-N⟨x⟩`` entirely means ``-N1``.
 
     With ``-maxN⟨x⟩``, i.e. ``+RTS -maxN3 -RTS``, the runtime will choose
     at most (x), also limited by the number of processors on the system.

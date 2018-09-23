@@ -7,13 +7,19 @@ useable by most UNIX debugging tools.
 
 .. ghc-flag:: -g
               -g⟨n⟩
+    :shortdesc: Produce DWARF debug information in compiled object files.
+        ⟨n⟩ can be 0, 1, or 2, with higher numbers producing richer
+        output. If ⟨n⟩ is omitted, level 2 is assumed.
+    :type: dynamic
+    :category: debugging
 
     :since: 7.10, numeric levels since 8.0
 
     Emit debug information in object code. Currently only DWARF debug
     information is supported on x86-64 and i386. Currently debug levels 0
-    through 3 are accepted, with 0 disabling debug information production.
-    Levels 1 through 3 are functionally equivalent.
+    through 3 are accepted, with 0 disabling debug information production
+    and higher numbers producing richer output. If ⟨n⟩ is omitted, level 2
+    is assumed.
 
 
 Tutorial
@@ -180,16 +186,21 @@ Stack trace functionality is exposed for use by Haskell programs in the
 :base-ref:`GHC.ExecutionStack.` module. See the Haddock
 documentation in this module for details regarding usage.
 
-Requesting a stack trace with ``SIGUSR2``
+.. _backtrace-signal:
+
+Requesting a stack trace with ``SIGQUIT``
 -----------------------------------------
 
 On POSIX-compatible platforms GHC's runtime system (when built with ``libdw``
-support) will produce a stack trace on ``stderr`` when a ``SIGUSR2`` signal is
-received. For instance (using the same ``fib.hs`` as above),
+support) will produce a stack trace on ``stderr`` when a ``SIGQUIT`` signal is
+received (on many systems this signal can be sent using :kbd:`Ctrl-\\`). For
+instance (using the same ``fib.hs`` as above),
 
 .. code-block:: sh
 
-    $ ./fib  &  killall -SIGUSR2 fib
+    $ ./fib  &  killall -SIGQUIT fib
+
+    Caught SIGQUIT; Backtrace:
     0x7f3176b15dd8    dwfl_thread_getframes (/usr/lib/x86_64-linux-gnu/libdw-0.163.so)
     0x7f3176b1582f    (null) (/usr/lib/x86_64-linux-gnu/libdw-0.163.so)
     0x7f3176b15b57    dwfl_getthreads (/usr/lib/x86_64-linux-gnu/libdw-0.163.so)
@@ -258,10 +269,10 @@ GHC may produce the following standard DIEs in the ``.debug_info`` section,
   Represents a compilation unit (e.g. a Haskell module).
 
 ``DW_TAG_subprogram``
-  Represents a C-- top-level basic block.
+  Represents a C-\\- top-level basic block.
 
 ``DW_TAG_lexical_block``
-  Represents a C-- basic block. Note that this is a slight departure from the
+  Represents a C-\\- basic block. Note that this is a slight departure from the
   intended meaning of this DIE type as it does not necessarily reflect
   lexical scope in the source program.
 

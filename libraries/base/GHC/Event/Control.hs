@@ -57,7 +57,9 @@ data ControlMessage = CMsgWakeup
                     | CMsgDie
                     | CMsgSignal {-# UNPACK #-} !(ForeignPtr Word8)
                                  {-# UNPACK #-} !Signal
-    deriving (Eq, Show)
+    deriving ( Eq   -- ^ @since 4.4.0.0
+             , Show -- ^ @since 4.4.0.0
+             )
 
 -- | The structure used to tell the IO manager thread what to do.
 data Control = W {
@@ -124,7 +126,7 @@ newControl shouldRegister = allocaArray 2 $ \fds -> do
 -- file after it has been closed.
 closeControl :: Control -> IO ()
 closeControl w = do
-  atomicModifyIORef (controlIsDead w) (\_ -> (True, ()))
+  _ <- atomicSwapIORef (controlIsDead w) True
   _ <- c_close . fromIntegral . controlReadFd $ w
   _ <- c_close . fromIntegral . controlWriteFd $ w
   when (didRegisterWakeupFd w) $ c_setIOManagerWakeupFd (-1)

@@ -8,7 +8,7 @@ name:           rts
 version:        1.0
 id:             rts
 key:            rts
-license:        BSD3
+license:        BSD-3-Clause
 maintainer:     glasgow-haskell-users@haskell.org
 exposed:        True
 
@@ -45,6 +45,8 @@ extra-libraries:
                               ,"wsock32"    /* for the linker */
                               ,"gdi32"      /* for the linker */
                               ,"winmm"      /* for the linker */
+                              ,"dbghelp"    /* for crash dump */
+                              ,"psapi"      /* for process information.  */
 #endif
 #if NEED_PTHREAD_LIB
                               , "pthread"   /* for pthread_getthreadid_np, pthread_create, etc. */
@@ -91,6 +93,7 @@ ld-options:
          , "-Wl,-u,_base_GHCziIOziException_cannotCompactFunction_closure"
          , "-Wl,-u,_base_GHCziIOziException_cannotCompactPinned_closure"
          , "-Wl,-u,_base_GHCziIOziException_cannotCompactMutable_closure"
+         , "-Wl,-u,_base_ControlziExceptionziBase_absentSumFieldError_closure"
          , "-Wl,-u,_base_ControlziExceptionziBase_nonTermination_closure"
          , "-Wl,-u,_base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-Wl,-u,_base_GHCziEventziThread_blockedOnBadFD_closure"
@@ -171,6 +174,9 @@ ld-options:
 #if WORD_SIZE_IN_BITS == 64
          , "-Wl,-u,_hs_atomicwrite64"
 #endif
+          /* This symbol is useful in gdb, but not referred to anywhere,
+           * so we need to force it to be included in the binary. */
+         , "-Wl,-u,_findPtr"
 #else
            "-Wl,-u,base_GHCziTopHandler_runIO_closure"
          , "-Wl,-u,base_GHCziTopHandler_runNonIO_closure"
@@ -188,6 +194,7 @@ ld-options:
          , "-Wl,-u,base_GHCziIOziException_cannotCompactFunction_closure"
          , "-Wl,-u,base_GHCziIOziException_cannotCompactPinned_closure"
          , "-Wl,-u,base_GHCziIOziException_cannotCompactMutable_closure"
+         , "-Wl,-u,base_ControlziExceptionziBase_absentSumFieldError_closure"
          , "-Wl,-u,base_ControlziExceptionziBase_nonTermination_closure"
          , "-Wl,-u,base_ControlziExceptionziBase_nestedAtomically_closure"
          , "-Wl,-u,base_GHCziEventziThread_blockedOnBadFD_closure"
@@ -268,6 +275,9 @@ ld-options:
 #if WORD_SIZE_IN_BITS == 64
          , "-Wl,-u,hs_atomicwrite64"
 #endif
+          /* This symbol is useful in gdb, but not referred to anywhere,
+           * so we need to force it to be included in the binary. */
+         , "-Wl,-u,findPtr"
 #endif
 
 /*  Pick up static libraries in preference over dynamic if in earlier search

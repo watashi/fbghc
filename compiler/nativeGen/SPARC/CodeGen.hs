@@ -22,6 +22,8 @@ where
 #include "../includes/MachDeps.h"
 
 -- NCG stuff:
+import GhcPrelude
+
 import SPARC.Base
 import SPARC.CodeGen.Sanity
 import SPARC.CodeGen.Amode
@@ -58,7 +60,6 @@ import FastString
 import OrdList
 import Outputable
 import Platform
-import Unique
 
 import Control.Monad    ( mapAndUnzipM )
 
@@ -162,7 +163,7 @@ stmtToInstrs stmt = do
 
 
 {-
-Now, given a tree (the argument to an CmmLoad) that references memory,
+Now, given a tree (the argument to a CmmLoad) that references memory,
 produce a suitable addressing mode.
 
 A Rule of the Game (tm) for Amodes: use of the addr bit must
@@ -185,7 +186,7 @@ temporary, then do the other computation, and then use the temporary:
 jumpTableEntry :: DynFlags -> Maybe BlockId -> CmmStatic
 jumpTableEntry dflags Nothing = CmmStaticLit (CmmInt 0 (wordWidth dflags))
 jumpTableEntry _ (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
-    where blockLabel = mkAsmTempLabel (getUnique blockid)
+    where blockLabel = blockLbl blockid
 
 
 
@@ -313,7 +314,7 @@ genCondJump bid bool = do
 
 genSwitch :: DynFlags -> CmmExpr -> SwitchTargets -> NatM InstrBlock
 genSwitch dflags expr targets
-        | gopt Opt_PIC dflags
+        | positionIndependent dflags
         = error "MachCodeGen: sparc genSwitch PIC not finished\n"
 
         | otherwise
@@ -422,7 +423,10 @@ genCCall target dest_regs args
                         return (unitOL (CALL (Left (litToImm (CmmLabel lbl))) n_argRegs_used False))
 
                 ForeignTarget expr _
-                 -> do  (dyn_c, [dyn_r]) <- arg_to_int_vregs expr
+                 -> do  (dyn_c, dyn_rs) <- arg_to_int_vregs expr
+                        let dyn_r = case dyn_rs of
+                                      [dyn_r'] -> dyn_r'
+                                      _ -> panic "SPARC.CodeGen.genCCall: arg_to_int"
                         return (dyn_c `snocOL` CALL (Right dyn_r) n_argRegs_used False)
 
                 PrimTarget mop
@@ -432,7 +436,10 @@ genCCall target dest_regs args
                                         return (unitOL (CALL (Left (litToImm (CmmLabel lbl))) n_argRegs_used False))
 
                                 Right mopExpr -> do
-                                        (dyn_c, [dyn_r]) <- arg_to_int_vregs mopExpr
+                                        (dyn_c, dyn_rs) <- arg_to_int_vregs mopExpr
+                                        let dyn_r = case dyn_rs of
+                                                      [dyn_r'] -> dyn_r'
+                                                      _ -> panic "SPARC.CodeGen.genCCall: arg_to_int"
                                         return (dyn_c `snocOL` CALL (Right dyn_r) n_argRegs_used False)
 
                         return lblOrMopExpr
@@ -626,6 +633,10 @@ outOfLineMachOp_table mop
         MO_F32_Cosh   -> fsLit "coshf"
         MO_F32_Tanh   -> fsLit "tanhf"
 
+        MO_F32_Asinh  -> fsLit "asinhf"
+        MO_F32_Acosh  -> fsLit "acoshf"
+        MO_F32_Atanh  -> fsLit "atanhf"
+
         MO_F64_Exp    -> fsLit "exp"
         MO_F64_Log    -> fsLit "log"
         MO_F64_Sqrt   -> fsLit "sqrt"
@@ -644,14 +655,21 @@ outOfLineMachOp_table mop
         MO_F64_Cosh   -> fsLit "cosh"
         MO_F64_Tanh   -> fsLit "tanh"
 
+        MO_F64_Asinh  -> fsLit "asinh"
+        MO_F64_Acosh  -> fsLit "acosh"
+        MO_F64_Atanh  -> fsLit "atanh"
+
         MO_UF_Conv w -> fsLit $ word2FloatLabel w
 
         MO_Memcpy _  -> fsLit "memcpy"
         MO_Memset _  -> fsLit "memset"
         MO_Memmove _ -> fsLit "memmove"
+        MO_Memcmp _  -> fsLit "memcmp"
 
         MO_BSwap w   -> fsLit $ bSwapLabel w
         MO_PopCnt w  -> fsLit $ popCntLabel w
+        MO_Pdep w    -> fsLit $ pdepLabel w
+        MO_Pext w    -> fsLit $ pextLabel w
         MO_Clz w     -> fsLit $ clzLabel w
         MO_Ctz w     -> fsLit $ ctzLabel w
         MO_AtomicRMW w amop -> fsLit $ atomicRMWLabel w amop
@@ -663,6 +681,7 @@ outOfLineMachOp_table mop
         MO_U_QuotRem {}  -> unsupported
         MO_U_QuotRem2 {} -> unsupported
         MO_Add2 {}       -> unsupported
+        MO_AddWordC {}   -> unsupported
         MO_SubWordC {}   -> unsupported
         MO_AddIntC {}    -> unsupported
         MO_SubIntC {}    -> unsupported

@@ -28,6 +28,11 @@
 -- table is known as the Static Pointer Table. The reference can then be
 -- dereferenced to obtain the value.
 --
+-- The various communicating processes need to aggree on the keys used to refer
+-- to the values in the Static Pointer Table, or lookups will fail. Only
+-- processes launched from the same program binary are guaranteed to use the
+-- same set of keys.
+--
 -----------------------------------------------------------------------------
 
 module GHC.StaticPtr
@@ -54,7 +59,7 @@ import GHC.Word            (Word64(..))
 
 #include "MachDeps.h"
 
--- | A reference to a value of type 'a'.
+-- | A reference to a value of type @a@.
 #if WORD_SIZE_IN_BITS < 64
 data StaticPtr a = StaticPtr Word64# Word64# -- The flattened Fingerprint is
                                              -- convenient in the compiler.
@@ -67,7 +72,7 @@ data StaticPtr a = StaticPtr Word# Word#
 deRefStaticPtr :: StaticPtr a -> a
 deRefStaticPtr (StaticPtr _ _ _ v) = v
 
--- | A key for `StaticPtrs` that can be serialized and used with
+-- | A key for 'StaticPtr's that can be serialized and used with
 -- 'unsafeLookupStaticPtr'.
 type StaticKey = Fingerprint
 
@@ -110,7 +115,7 @@ data StaticPtrInfo = StaticPtrInfo
       -- @(Line, Column)@ pair.
     , spInfoSrcLoc     :: (Int, Int)
     }
-  deriving (Show)
+  deriving Show -- ^ @since 4.8.0.0
 
 -- | 'StaticPtrInfo' of the given 'StaticPtr'.
 staticPtrInfo :: StaticPtr a -> StaticPtrInfo

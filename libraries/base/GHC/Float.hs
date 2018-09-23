@@ -64,6 +64,13 @@ infixr 8  **
 ------------------------------------------------------------------------
 
 -- | Trigonometric and hyperbolic functions and related functions.
+--
+-- The Haskell Report defines no laws for 'Floating'. However, '(+)', '(*)'
+-- and 'exp' are customarily expected to define an exponential field and have
+-- the following properties:
+--
+-- * @exp (a + b)@ = @exp a * exp b
+-- * @exp (fromInteger 0)@ = @fromInteger 1@
 class  (Fractional a) => Floating a  where
     pi                  :: a
     exp, log, sqrt      :: a -> a
@@ -159,7 +166,7 @@ class  (RealFrac a, Floating a) => RealFloat a  where
     decodeFloat         :: a -> (Integer,Int)
     -- | 'encodeFloat' performs the inverse of 'decodeFloat' in the
     -- sense that for finite @x@ with the exception of @-0.0@,
-    -- @'uncurry' 'encodeFloat' ('decodeFloat' x) = x@.
+    -- @'Prelude.uncurry' 'encodeFloat' ('decodeFloat' x) = x@.
     -- @'encodeFloat' m n@ is one of the two closest representable
     -- floating-point numbers to @m*b^^n@ (or @&#177;Infinity@ if overflow
     -- occurs); usually the closer, but if @m@ contains too many bits,
@@ -245,7 +252,18 @@ class  (RealFrac a, Floating a) => RealFloat a  where
 ------------------------------------------------------------------------
 
 -- | @since 2.01
-instance  Num Float  where
+-- Note that due to the presence of @NaN@, not all elements of 'Float' have an
+-- additive inverse.
+--
+-- >>> 0/0 + (negate 0/0 :: Float)
+-- NaN
+--
+-- Also note that due to the presence of -0, `Float`'s 'Num' instance doesn't
+-- have an additive identity
+--
+-- >>> 0 + (-0 :: Float)
+-- 0.0
+instance Num Float where
     (+)         x y     =  plusFloat x y
     (-)         x y     =  minusFloat x y
     negate      x       =  negateFloat x
@@ -272,6 +290,11 @@ instance  Real Float  where
                     smallInteger m# :% shiftLInteger 1 (negateInt# e#)
 
 -- | @since 2.01
+-- Note that due to the presence of @NaN@, not all elements of 'Float' have an
+-- multiplicative inverse.
+--
+-- >>> 0/0 * (recip 0/0 :: Float)
+-- NaN
 instance  Fractional Float  where
     (/) x y             =  divideFloat x y
     {-# INLINE fromRational #-}
@@ -367,9 +390,9 @@ instance  Floating Float  where
     (**) x y            =  powerFloat x y
     logBase x y         =  log y / log x
 
-    asinh x = log (x + sqrt (1.0+x*x))
-    acosh x = log (x + (x+1.0) * sqrt ((x-1.0)/(x+1.0)))
-    atanh x = 0.5 * log ((1.0+x) / (1.0-x))
+    asinh x             =  asinhFloat x
+    acosh x             =  acoshFloat x
+    atanh x             =  atanhFloat x
 
     log1p = log1pFloat
     expm1 = expm1Float
@@ -425,6 +448,17 @@ instance  Show Float  where
 ------------------------------------------------------------------------
 
 -- | @since 2.01
+-- Note that due to the presence of @NaN@, not all elements of 'Double' have an
+-- additive inverse.
+--
+-- >>> 0/0 + (negate 0/0 :: Double)
+-- NaN
+--
+-- Also note that due to the presence of -0, `Double`'s 'Num' instance doesn't
+-- have an additive identity
+--
+-- >>> 0 + (-0 :: Double)
+-- 0.0
 instance  Num Double  where
     (+)         x y     =  plusDouble x y
     (-)         x y     =  minusDouble x y
@@ -454,6 +488,11 @@ instance  Real Double  where
                 m :% shiftLInteger 1 (negateInt# e#)
 
 -- | @since 2.01
+-- Note that due to the presence of @NaN@, not all elements of 'Double' have an
+-- multiplicative inverse.
+--
+-- >>> 0/0 * (recip 0/0 :: Double)
+-- NaN
 instance  Fractional Double  where
     (/) x y             =  divideDouble x y
     {-# INLINE fromRational #-}
@@ -492,9 +531,9 @@ instance  Floating Double  where
     (**) x y            =  powerDouble x y
     logBase x y         =  log y / log x
 
-    asinh x = log (x + sqrt (1.0+x*x))
-    acosh x = log (x + (x+1.0) * sqrt ((x-1.0)/(x+1.0)))
-    atanh x = 0.5 * log ((1.0+x) / (1.0-x))
+    asinh x             =  asinhDouble x
+    acosh x             =  acoshDouble x
+    atanh x             =  atanhDouble x
 
     log1p = log1pDouble
     expm1 = expm1Double
@@ -682,6 +721,18 @@ formatRealFloatAlt fmt decs alt x
           [d]     -> d : ".0e" ++ show_e'
           (d:ds') -> d : '.' : ds' ++ "e" ++ show_e'
           []      -> errorWithoutStackTrace "formatRealFloat/doFmt/FFExponent: []"
+       Just d | d <= 0 ->
+        -- handle this case specifically since we need to omit the
+        -- decimal point as well (#15115).
+        -- Note that this handles negative precisions as well for consistency
+        -- (see #15509).
+        case is of
+          [0] -> "0e0"
+          _ ->
+           let
+             (ei,is') = roundTo base 1 is
+             n:_ = map intToDigit (if ei > 0 then init is' else is')
+           in n : 'e' : show (e-1+ei)
        Just dec ->
         let dec' = max dec 1 in
         case is of
@@ -1092,6 +1143,7 @@ expFloat, logFloat, sqrtFloat, fabsFloat :: Float -> Float
 sinFloat, cosFloat, tanFloat  :: Float -> Float
 asinFloat, acosFloat, atanFloat  :: Float -> Float
 sinhFloat, coshFloat, tanhFloat  :: Float -> Float
+asinhFloat, acoshFloat, atanhFloat  :: Float -> Float
 expFloat    (F# x) = F# (expFloat# x)
 logFloat    (F# x) = F# (logFloat# x)
 sqrtFloat   (F# x) = F# (sqrtFloat# x)
@@ -1105,6 +1157,9 @@ atanFloat   (F# x) = F# (atanFloat# x)
 sinhFloat   (F# x) = F# (sinhFloat# x)
 coshFloat   (F# x) = F# (coshFloat# x)
 tanhFloat   (F# x) = F# (tanhFloat# x)
+asinhFloat  (F# x) = F# (asinhFloat# x)
+acoshFloat  (F# x) = F# (acoshFloat# x)
+atanhFloat  (F# x) = F# (atanhFloat# x)
 
 powerFloat :: Float -> Float -> Float
 powerFloat  (F# x) (F# y) = F# (powerFloat# x y)
@@ -1137,6 +1192,7 @@ expDouble, logDouble, sqrtDouble, fabsDouble :: Double -> Double
 sinDouble, cosDouble, tanDouble  :: Double -> Double
 asinDouble, acosDouble, atanDouble  :: Double -> Double
 sinhDouble, coshDouble, tanhDouble  :: Double -> Double
+asinhDouble, acoshDouble, atanhDouble  :: Double -> Double
 expDouble    (D# x) = D# (expDouble# x)
 logDouble    (D# x) = D# (logDouble# x)
 sqrtDouble   (D# x) = D# (sqrtDouble# x)
@@ -1150,6 +1206,9 @@ atanDouble   (D# x) = D# (atanDouble# x)
 sinhDouble   (D# x) = D# (sinhDouble# x)
 coshDouble   (D# x) = D# (coshDouble# x)
 tanhDouble   (D# x) = D# (tanhDouble# x)
+asinhDouble  (D# x) = D# (asinhDouble# x)
+acoshDouble  (D# x) = D# (acoshDouble# x)
+atanhDouble  (D# x) = D# (atanhDouble# x)
 
 powerDouble :: Double -> Double -> Double
 powerDouble  (D# x) (D# y) = D# (x **## y)

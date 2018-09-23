@@ -10,21 +10,24 @@ module CSE (cseProgram, cseOneExpr) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import CoreSubst
 import Var              ( Var )
-import VarEnv           ( elemInScopeSet )
-import Id               ( Id, idType, idInlineActivation, isDeadBinder
+import VarEnv           ( elemInScopeSet, mkInScopeSet )
+import Id               ( Id, idType, isDeadBinder
+                        , idInlineActivation, setInlineActivation
                         , zapIdOccInfo, zapIdUsageInfo, idInlinePragma
-                        , isJoinId )
+                        , isJoinId, isJoinId_maybe )
 import CoreUtils        ( mkAltExpr, eqExpr
-                        , exprIsLiteralString
+                        , exprIsTickedString
                         , stripTicksE, stripTicksT, mkTicks )
+import CoreFVs          ( exprFreeVars )
 import Type             ( tyConAppArgs )
 import CoreSyn
 import Outputable
-import BasicTypes       ( TopLevelFlag(..), isTopLevel
-                        , isAlwaysActive, isAnyInlinePragma )
-import TrieMap
+import BasicTypes
+import CoreMap
 import Util             ( filterOut )
 import Data.List        ( mapAccumL )
 
@@ -204,8 +207,12 @@ is small).  The conclusion here is this:
   might replace <rhs> by 'bar', and then later be unable to see that it
   really was <rhs>.
 
+An except to the rule is when the INLINE pragma is not from the user, e.g. from
+WorkWrap (see Note [Wrapper activation]). We can tell because noUserInlineSpec
+is then true.
+
 Note that we do not (currently) do CSE on the unfolding stored inside
-an Id, even if is a 'stable' unfolding.  That means that when an
+an Id, even if it is a 'stable' unfolding.  That means that when an
 unfolding happens, it is always faithful to what the stable unfolding
 originally was.
 
@@ -266,7 +273,28 @@ compiling ppHtml in Haddock.Backends.Xhtml).
 
 We could try and be careful by tracking which join points are still valid at
 each subexpression, but since join points aren't allocated or shared, there's
-less to gain by trying to CSE them.
+less to gain by trying to CSE them. (#13219)
+
+Note [Look inside join-point binders]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Another way how CSE for joint points is tricky is
+
+  let join foo x = (x, 42)
+      join bar x = (x, 42)
+  in … jump foo 1 … jump bar 2 …
+
+naively, CSE would turn this into
+
+  let join foo x = (x, 42)
+      join bar = foo
+  in … jump foo 1 … jump bar 2 …
+
+but now bar is a join point that claims arity one, but its right-hand side
+is not a lambda, breaking the join-point invariant (this was #15002).
+
+So `cse_bind` must zoom past the lambdas of a join point (using
+`collectNBinders`) and resume searching for CSE opportunities only in
+the body of the join point.
 
 Note [CSE for recursive bindings]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -306,14 +334,16 @@ cseBind toplevel env (NonRec b e)
     (env1, b1)       = addBinder env b
     (env2, (b2, e2)) = cse_bind toplevel env1 (b,e) b1
 
-cseBind _ env (Rec [(in_id, rhs)])
+cseBind toplevel env (Rec [(in_id, rhs)])
   | noCSE in_id
   = (env1, Rec [(out_id, rhs')])
 
   -- See Note [CSE for recursive bindings]
   | Just previous <- lookupCSRecEnv env out_id rhs''
   , let previous' = mkTicks ticks previous
-  = (extendCSSubst env1 in_id previous', NonRec out_id previous')
+        out_id'   = delayInlining toplevel out_id
+  = -- We have a hit in the recursive-binding cache
+    (extendCSSubst env1 in_id previous', NonRec out_id' previous')
 
   | otherwise
   = (extendCSRecEnv env1 out_id rhs'' id_expr', Rec [(zapped_id, rhs')])
@@ -341,15 +371,33 @@ cseBind toplevel env (Rec pairs)
 -- which are equal to @out_rhs@.
 cse_bind :: TopLevelFlag -> CSEnv -> (InId, InExpr) -> OutId -> (CSEnv, (OutId, OutExpr))
 cse_bind toplevel env (in_id, in_rhs) out_id
-  | isTopLevel toplevel, exprIsLiteralString in_rhs
+  | isTopLevel toplevel, exprIsTickedString in_rhs
       -- See Note [Take care with literal strings]
-  = (env', (out_id, in_rhs))
+  = (env', (out_id', in_rhs))
+
+  | Just arity <- isJoinId_maybe in_id
+      -- See Note [Look inside join-point binders]
+  = let (params, in_body) = collectNBinders arity in_rhs
+        (env', params') = addBinders env params
+        out_body = tryForCSE env' in_body
+    in (env, (out_id, mkLams params' out_body))
 
   | otherwise
-  = (env', (out_id', out_rhs))
+  = (env', (out_id'', out_rhs))
   where
-    out_rhs         = tryForCSE env in_rhs
     (env', out_id') = addBinding env in_id out_id out_rhs
+    (cse_done, out_rhs) = try_for_cse env in_rhs
+    out_id'' | cse_done  = delayInlining toplevel out_id'
+             | otherwise = out_id'
+
+delayInlining :: TopLevelFlag -> Id -> Id
+-- Add a NOINLINE[2] if the Id doesn't have an INLNE pragma already
+delayInlining top_lvl bndr
+  | isTopLevel top_lvl
+  , isAlwaysActive (idInlineActivation bndr)
+  = bndr `setInlineActivation` activeAfterInitial
+  | otherwise
+  = bndr
 
 addBinding :: CSEnv                      -- Includes InId->OutId cloning
            -> InVar                      -- Could be a let-bound type
@@ -384,8 +432,11 @@ addBinding env in_id out_id rhs'
                    Var {} -> True
                    _      -> False
 
+-- | Given a binder `let x = e`, this function
+-- determines whether we should add `e -> x` to the cs_map
 noCSE :: InId -> Bool
-noCSE id =  not (isAlwaysActive (idInlineActivation id))
+noCSE id =  not (isAlwaysActive (idInlineActivation id)) &&
+            not (noUserInlineSpec (inlinePragmaSpec (idInlinePragma id)))
              -- See Note [CSE for INLINE and NOINLINE]
          || isAnyInlinePragma (idInlinePragma id)
              -- See Note [CSE for stable unfoldings]
@@ -425,12 +476,46 @@ The net effect is that for the y-binding we want to
   - but leave the original binding for y undisturbed
 
 This is done by cse_bind.  I got it wrong the first time (Trac #13367).
+
+Note [Delay inlining after CSE]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose (Trac #15445) we have
+   f,g :: Num a => a -> a
+   f x = ...f (x-1).....
+   g y = ...g (y-1) ....
+
+and we make some specialisations of 'g', either automatically, or via
+a SPECIALISE pragma.  Then CSE kicks in and notices that the RHSs of
+'f' and 'g' are identical, so we get
+   f x = ...f (x-1)...
+   g = f
+   {-# RULES g @Int _ = $sg #-}
+
+Now there is terrible danger that, in an importing module, we'll inline
+'g' before we have a chance to run its specialisation!
+
+Solution: during CSE, when adding a top-level
+  g = f
+binding after a "hit" in the CSE cache, add a NOINLINE[2] activation
+to it, to ensure it's not inlined right away.
+
+Why top level only?  Because for nested bindings we are already past
+phase 2 and will never return there.
 -}
 
 tryForCSE :: CSEnv -> InExpr -> OutExpr
-tryForCSE env expr
-  | Just e <- lookupCSEnv env expr'' = mkTicks ticks e
-  | otherwise                        = expr'
+tryForCSE env expr = snd (try_for_cse env expr)
+
+try_for_cse :: CSEnv -> InExpr -> (Bool, OutExpr)
+-- (False, e') => We did not CSE the entire expression,
+--                but we might have CSE'd some sub-expressions,
+--                yielding e'
+--
+-- (True, te') => We CSE'd the entire expression,
+--                yielding the trivial expression te'
+try_for_cse env expr
+  | Just e <- lookupCSEnv env expr'' = (True,  mkTicks ticks e)
+  | otherwise                        = (False, expr')
     -- The varToCoreExpr is needed if we have
     --   case e of xco { ...case e of yco { ... } ... }
     -- Then CSE will substitute yco -> xco;
@@ -444,8 +529,13 @@ tryForCSE env expr
     -- top of the replaced sub-expression. This is probably not too
     -- useful in practice, but upholds our semantics.
 
+-- | Runs CSE on a single expression.
+--
+-- This entry point is not used in the compiler itself, but is provided
+-- as a convenient entry point for users of the GHC API.
 cseOneExpr :: InExpr -> OutExpr
-cseOneExpr = cseExpr emptyCSEnv
+cseOneExpr e = cseExpr env e
+  where env = emptyCSEnv {cs_subst = mkEmptySubst (mkInScopeSet (exprFreeVars e)) }
 
 cseExpr :: CSEnv -> InExpr -> OutExpr
 cseExpr env (Type t)              = Type (substTy (csEnvSubst env) t)
@@ -454,7 +544,7 @@ cseExpr _   (Lit lit)             = Lit lit
 cseExpr env (Var v)               = lookupSubst env v
 cseExpr env (App f a)             = App (cseExpr env f) (tryForCSE env a)
 cseExpr env (Tick t e)            = Tick t (cseExpr env e)
-cseExpr env (Cast e co)           = Cast (cseExpr env e) (substCo (csEnvSubst env) co)
+cseExpr env (Cast e co)           = Cast (tryForCSE env e) (substCo (csEnvSubst env) co)
 cseExpr env (Lam b e)             = let (env', b') = addBinder env b
                                     in Lam b' (cseExpr env' e)
 cseExpr env (Let bind e)          = let (env', bind') = cseBind NotTopLevel env bind
@@ -530,9 +620,9 @@ to transform
    W y z   -> e2
 
 In the simplifier we use cheapEqExpr, because it is called a lot.
-But here in CSE we use the full eqExpr.  After all, two alterantives usually
+But here in CSE we use the full eqExpr.  After all, two alternatives usually
 differ near the root, so it probably isn't expensive to compare the full
-alternative.  It seems like the the same kind of thing that CSE is supposed
+alternative.  It seems like the same kind of thing that CSE is supposed
 to be doing, which is why I put it here.
 
 I acutally saw some examples in the wild, where some inlining made e1 too

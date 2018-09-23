@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 module CmmMachOp
     ( MachOp(..)
     , pprMachOp, isCommutableMachOp, isAssociativeMachOp
@@ -28,7 +26,7 @@ module CmmMachOp
    )
 where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import CmmType
 import Outputable
@@ -136,9 +134,12 @@ data MachOp
   -- Floating point vector operations
   | MO_VF_Add  Length Width
   | MO_VF_Sub  Length Width
-  | MO_VF_Neg  Length Width             -- unary -
+  | MO_VF_Neg  Length Width      -- unary negation
   | MO_VF_Mul  Length Width
   | MO_VF_Quot Length Width
+
+  -- Alignment check (for -falignment-sanitisation)
+  | MO_AlignmentCheck Int Width
   deriving (Eq, Show)
 
 pprMachOp :: MachOp -> SDoc
@@ -417,6 +418,8 @@ machOpResultType dflags mop tys =
     MO_VF_Mul  l w      -> cmmVec l (cmmFloat w)
     MO_VF_Quot l w      -> cmmVec l (cmmFloat w)
     MO_VF_Neg  l w      -> cmmVec l (cmmFloat w)
+
+    MO_AlignmentCheck _ _ -> ty1
   where
     (ty1:_) = tys
 
@@ -507,6 +510,8 @@ machOpArgReps dflags op =
     MO_VF_Quot _ r      -> [r,r]
     MO_VF_Neg  _ r      -> [r]
 
+    MO_AlignmentCheck _ r -> [r]
+
 -----------------------------------------------------------------------------
 -- CallishMachOp
 -----------------------------------------------------------------------------
@@ -526,6 +531,9 @@ data CallishMachOp
   | MO_F64_Asin
   | MO_F64_Acos
   | MO_F64_Atan
+  | MO_F64_Asinh
+  | MO_F64_Acosh
+  | MO_F64_Atanh
   | MO_F64_Log
   | MO_F64_Exp
   | MO_F64_Fabs
@@ -540,6 +548,9 @@ data CallishMachOp
   | MO_F32_Asin
   | MO_F32_Acos
   | MO_F32_Atan
+  | MO_F32_Asinh
+  | MO_F32_Acosh
+  | MO_F32_Atanh
   | MO_F32_Log
   | MO_F32_Exp
   | MO_F32_Fabs
@@ -551,6 +562,7 @@ data CallishMachOp
   | MO_U_QuotRem Width
   | MO_U_QuotRem2 Width
   | MO_Add2      Width
+  | MO_AddWordC  Width
   | MO_SubWordC  Width
   | MO_AddIntC   Width
   | MO_SubIntC   Width
@@ -575,8 +587,11 @@ data CallishMachOp
   | MO_Memcpy Int
   | MO_Memset Int
   | MO_Memmove Int
+  | MO_Memcmp Int
 
   | MO_PopCnt Width
+  | MO_Pdep Width
+  | MO_Pext Width
   | MO_Clz Width
   | MO_Ctz Width
 
@@ -607,6 +622,7 @@ callishMachOpHints op = case op of
   MO_Memcpy _  -> ([], [AddrHint,AddrHint,NoHint])
   MO_Memset _  -> ([], [AddrHint,NoHint,NoHint])
   MO_Memmove _ -> ([], [AddrHint,AddrHint,NoHint])
+  MO_Memcmp _  -> ([], [AddrHint, AddrHint, NoHint])
   _            -> ([],[])
   -- empty lists indicate NoHint
 
@@ -616,4 +632,5 @@ machOpMemcpyishAlign op = case op of
   MO_Memcpy  align -> Just align
   MO_Memset  align -> Just align
   MO_Memmove align -> Just align
+  MO_Memcmp  align -> Just align
   _                -> Nothing

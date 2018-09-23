@@ -4,11 +4,6 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE BangPatterns #-}
-#if __GLASGOW_HASKELL__ < 800
--- For CallStack business
-{-# LANGUAGE ImplicitParams #-}
-{-# LANGUAGE FlexibleContexts #-}
-#endif
 
 -- | Highly random utility functions
 --
@@ -30,7 +25,7 @@ module Util (
 
         mapFst, mapSnd, chkAppend,
         mapAndUnzip, mapAndUnzip3, mapAccumL2,
-        nOfThem, filterOut, partitionWith, splitEithers,
+        nOfThem, filterOut, partitionWith,
 
         dropWhileEndLE, spanEnd,
 
@@ -94,6 +89,7 @@ module Util (
 
         -- * Floating point
         readRational,
+        readHexRational,
 
         -- * read helpers
         maybeRead, maybeReadFuzzy,
@@ -102,7 +98,6 @@ module Util (
         doesDirNameExist,
         getModificationUTCTime,
         modificationTimeIfExists,
-        hSetTranslit,
 
         global, consIORef, globalM,
         sharedGlobal, sharedGlobalM,
@@ -124,12 +119,8 @@ module Util (
         hashString,
 
         -- * Call stacks
-#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-        GHC.Stack.CallStack,
-#endif
         HasCallStack,
         HasDebugCallStack,
-        prettyCurrentCallStack,
 
         -- * Utils for flags
         OverridingBool(..),
@@ -137,6 +128,8 @@ module Util (
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Exception
 import Panic
@@ -147,18 +140,17 @@ import System.IO.Unsafe ( unsafePerformIO )
 import Data.List        hiding (group)
 
 import GHC.Exts
-import qualified GHC.Stack
+import GHC.Stack (HasCallStack)
 
 import Control.Applicative ( liftA2 )
-import Control.Monad    ( liftM )
-import GHC.IO.Encoding (mkTextEncoding, textEncodingName)
+import Control.Monad    ( liftM, guard )
 import GHC.Conc.Sync ( sharedCAF )
-import System.IO (Handle, hGetEncoding, hSetEncoding)
 import System.IO.Error as IO ( isDoesNotExistError )
 import System.Directory ( doesDirectoryExist, getModificationTime )
 import System.FilePath
 
-import Data.Char        ( isUpper, isAlphaNum, isSpace, chr, ord, isDigit, toUpper)
+import Data.Char        ( isUpper, isAlphaNum, isSpace, chr, ord, isDigit, toUpper
+                        , isHexDigit, digitToInt )
 import Data.Int
 import Data.Ratio       ( (%) )
 import Data.Ord         ( comparing )
@@ -300,14 +292,6 @@ partitionWith f (x:xs) = case f x of
                          Left  b -> (b:bs, cs)
                          Right c -> (bs, c:cs)
     where (bs,cs) = partitionWith f xs
-
-splitEithers :: [Either a b] -> ([a], [b])
--- ^ Teases a list of 'Either's apart into two lists
-splitEithers [] = ([],[])
-splitEithers (e : es) = case e of
-                        Left x -> (x:xs, ys)
-                        Right y -> (xs, y:ys)
-    where (xs,ys) = splitEithers es
 
 chkAppend :: [a] -> [a] -> [a]
 -- Checks for the second argument being empty
@@ -1147,11 +1131,17 @@ readRational__ r = do
 
      lexDecDigits = nonnull isDigit
 
-     lexDotDigits ('.':s) = return (span isDigit s)
+     lexDotDigits ('.':s) = return (span' isDigit s)
      lexDotDigits s       = return ("",s)
 
-     nonnull p s = do (cs@(_:_),t) <- return (span p s)
+     nonnull p s = do (cs@(_:_),t) <- return (span' p s)
                       return (cs,t)
+
+     span' _ xs@[]         =  (xs, xs)
+     span' p xs@(x:xs')
+               | x == '_'  = span' p xs'   -- skip "_" (#14473)
+               | p x       =  let (ys,zs) = span' p xs' in (x:ys,zs)
+               | otherwise =  ([],xs)
 
 readRational :: String -> Rational -- NB: *does* handle a leading "-"
 readRational top_s
@@ -1164,6 +1154,64 @@ readRational top_s
           [x] -> x
           []  -> error ("readRational: no parse:"        ++ top_s)
           _   -> error ("readRational: ambiguous parse:" ++ top_s)
+
+
+readHexRational :: String -> Rational
+readHexRational str =
+  case str of
+    '-' : xs -> - (readMe xs)
+    xs       -> readMe xs
+  where
+  readMe as =
+    case readHexRational__ as of
+      Just n -> n
+      _      -> error ("readHexRational: no parse:" ++ str)
+
+
+readHexRational__ :: String -> Maybe Rational
+readHexRational__ ('0' : x : rest)
+  | x == 'X' || x == 'x' =
+  do let (front,rest2) = span' isHexDigit rest
+     guard (not (null front))
+     let frontNum = steps 16 0 front
+     case rest2 of
+       '.' : rest3 ->
+          do let (back,rest4) = span' isHexDigit rest3
+             guard (not (null back))
+             let backNum = steps 16 frontNum back
+                 exp1    = -4 * length back
+             case rest4 of
+               p : ps | isExp p -> fmap (mk backNum . (+ exp1)) (getExp ps)
+               _ -> return (mk backNum exp1)
+       p : ps | isExp p -> fmap (mk frontNum) (getExp ps)
+       _ -> Nothing
+
+  where
+  isExp p = p == 'p' || p == 'P'
+
+  getExp ('+' : ds) = dec ds
+  getExp ('-' : ds) = fmap negate (dec ds)
+  getExp ds         = dec ds
+
+  mk :: Integer -> Int -> Rational
+  mk n e = fromInteger n * 2^^e
+
+  dec cs = case span' isDigit cs of
+             (ds,"") | not (null ds) -> Just (steps 10 0 ds)
+             _ -> Nothing
+
+  steps base n ds = foldl' (step base) n ds
+  step  base n d  = base * n + fromIntegral (digitToInt d)
+
+  span' _ xs@[]         =  (xs, xs)
+  span' p xs@(x:xs')
+            | x == '_'  = span' p xs'   -- skip "_"  (#14473)
+            | p x       =  let (ys,zs) = span' p xs' in (x:ys,zs)
+            | otherwise =  ([],xs)
+
+readHexRational__ _ = Nothing
+
+
 
 
 -----------------------------------------------------------------------------
@@ -1205,18 +1253,6 @@ modificationTimeIfExists f = do
                         else ioError e
 
 -- --------------------------------------------------------------
--- Change the character encoding of the given Handle to transliterate
--- on unsupported characters instead of throwing an exception
-
-hSetTranslit :: Handle -> IO ()
-hSetTranslit h = do
-    menc <- hGetEncoding h
-    case fmap textEncodingName menc of
-        Just name | '/' `notElem` name -> do
-            enc' <- mkTextEncoding $ name ++ "//TRANSLIT"
-            hSetEncoding h enc'
-        _ -> return ()
-
 -- split a string at the last character where 'pred' is True,
 -- returning a pair of strings. The first component holds the string
 -- up (but not including) the last character for which 'pred' returned
@@ -1368,33 +1404,11 @@ mulHi a b = fromIntegral (r `shiftR` 32)
    where r :: Int64
          r = fromIntegral a * fromIntegral b
 
--- | A compatibility wrapper for the @GHC.Stack.HasCallStack@ constraint.
-#if __GLASGOW_HASKELL__ >= 800
-type HasCallStack = GHC.Stack.HasCallStack
-#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-type HasCallStack = (?callStack :: GHC.Stack.CallStack)
--- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
-#else
-type HasCallStack = (() :: Constraint)
-#endif
-
 -- | A call stack constraint, but only when 'isDebugOn'.
 #if defined(DEBUG)
 type HasDebugCallStack = HasCallStack
 #else
 type HasDebugCallStack = (() :: Constraint)
-#endif
-
--- | Pretty-print the current callstack
-#if __GLASGOW_HASKELL__ >= 800
-prettyCurrentCallStack :: HasCallStack => String
-prettyCurrentCallStack = GHC.Stack.prettyCallStack GHC.Stack.callStack
-#elif MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-prettyCurrentCallStack :: (?callStack :: GHC.Stack.CallStack) => String
-prettyCurrentCallStack = GHC.Stack.showCallStack ?callStack
-#else
-prettyCurrentCallStack :: HasCallStack => String
-prettyCurrentCallStack = "Call stack unavailable"
 #endif
 
 data OverridingBool

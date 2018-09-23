@@ -12,7 +12,6 @@
 # The repos are of several kinds:
 #    - The main GHC source repo
 #    - Each boot package lives in a repo
-#    - DPH is a repo that contains several packages
 #    - Haddock and hsc2hs are applications, built on top of GHC,
 #        and in turn needed to bootstrap GHC
 #    - ghc-tarballs is need to build GHC
@@ -29,7 +28,7 @@
 #     GitHub and GHC developers are granted push-rights for are denoted by
 #     being specified with the `ssh://` scheme. Thus, `https://`
 #     repo urls denote read-only access.
-#   * 'tag', in combination with the variables BUILD_DPH and BUILD_EXTRA_PKGS,
+#   * 'tag', in combination with the variable BUILD_EXTRA_PKGS,
 #     determines which packages are build by default.
 #
 # Lines that start with a '#' are comments.
@@ -39,22 +38,27 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ghc-tarballs                 windows     ghc-tarballs.git                -
 libffi-tarballs              -           -                               -
-utils/hsc2hs                 -           -                               -
+utils/hsc2hs                 -           -                               ssh://git@github.com/haskell/hsc2hs.git
 utils/haddock                -           -                               ssh://git@github.com/haskell/haddock.git
 libraries/array              -           -                               -
 libraries/binary             -           -                               https://github.com/kolmodin/binary.git
 libraries/bytestring         -           -                               https://github.com/haskell/bytestring.git
 libraries/Cabal              -           -                               https://github.com/haskell/cabal.git
 libraries/ghc-compact        -           -                               -
+libraries/ghc-heap           -           -                               -
 libraries/containers         -           -                               https://github.com/haskell/containers.git
 libraries/deepseq            -           -                               ssh://git@github.com/haskell/deepseq.git
 libraries/directory          -           -                               ssh://git@github.com/haskell/directory.git
 libraries/filepath           -           -                               ssh://git@github.com/haskell/filepath.git
 libraries/haskeline          -           -                               https://github.com/judah/haskeline.git
 libraries/hpc                -           -                               -
+libraries/libiserv           -           -                               -
+libraries/mtl                -           -                               https://github.com/haskell/mtl.git
+libraries/parsec             -           -                               https://github.com/haskell/parsec.git
 libraries/pretty             -           -                               https://github.com/haskell/pretty.git
 libraries/process            -           -                               ssh://git@github.com/haskell/process.git
 libraries/terminfo           -           -                               https://github.com/judah/terminfo.git
+libraries/text               -           -                               https://github.com/haskell/text.git
 libraries/time               -           -                               https://github.com/haskell/time.git
 libraries/transformers       -           -                               https://git.haskell.org/darcs-mirrors/transformers.git
 libraries/unix               -           -                               ssh://git@github.com/haskell/unix.git
@@ -62,9 +66,5 @@ libraries/Win32              -           -                               https:/
 libraries/xhtml              -           -                               https://github.com/haskell/xhtml.git
 nofib                        nofib       -                               -
 libraries/parallel           extra       -                               ssh://git@github.com/haskell/parallel.git
-libraries/stm                extra       -                               -
-libraries/random             extra       -                               https://github.com/haskell/random.git
-libraries/primitive          dph         -                               https://github.com/haskell/primitive.git
-libraries/vector             dph         -                               https://github.com/haskell/vector.git
-libraries/dph                dph         -                               -
+libraries/stm                -           -                               ssh://git@github.com/haskell/stm.git
 .                            -           ghc.git                         -

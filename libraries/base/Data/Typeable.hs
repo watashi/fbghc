@@ -86,8 +86,6 @@ module Data.Typeable
 
       -- * For backwards compatibility
     , typeOf1, typeOf2, typeOf3, typeOf4, typeOf5, typeOf6, typeOf7
-    , Typeable1, Typeable2, Typeable3, Typeable4
-    , Typeable5, Typeable6, Typeable7
     ) where
 
 import qualified Data.Typeable.Internal as I
@@ -200,44 +198,30 @@ rnfTypeRep = I.rnfSomeTypeRep
 
 
 -- Keeping backwards-compatibility
-typeOf1 :: forall t (a :: *). Typeable t => t a -> TypeRep
+typeOf1 :: forall t (a :: Type). Typeable t => t a -> TypeRep
 typeOf1 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf2 :: forall t (a :: *) (b :: *). Typeable t => t a b -> TypeRep
+typeOf2 :: forall t (a :: Type) (b :: Type). Typeable t => t a b -> TypeRep
 typeOf2 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf3 :: forall t (a :: *) (b :: *) (c :: *). Typeable t
-        => t a b c -> TypeRep
+typeOf3 :: forall t (a :: Type) (b :: Type) (c :: Type).
+           Typeable t => t a b c -> TypeRep
 typeOf3 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf4 :: forall t (a :: *) (b :: *) (c :: *) (d :: *). Typeable t
-        => t a b c d -> TypeRep
+typeOf4 :: forall t (a :: Type) (b :: Type) (c :: Type) (d :: Type).
+           Typeable t => t a b c d -> TypeRep
 typeOf4 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf5 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *). Typeable t
-        => t a b c d e -> TypeRep
+typeOf5 :: forall t (a :: Type) (b :: Type) (c :: Type) (d :: Type) (e :: Type).
+           Typeable t => t a b c d e -> TypeRep
 typeOf5 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf6 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *) (f :: *).
-                Typeable t => t a b c d e f -> TypeRep
+typeOf6 :: forall t (a :: Type) (b :: Type) (c :: Type)
+                    (d :: Type) (e :: Type) (f :: Type).
+           Typeable t => t a b c d e f -> TypeRep
 typeOf6 _ = I.someTypeRep (Proxy :: Proxy t)
 
-typeOf7 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *) (f :: *)
-                (g :: *). Typeable t => t a b c d e f g -> TypeRep
+typeOf7 :: forall t (a :: Type) (b :: Type) (c :: Type)
+                    (d :: Type) (e :: Type) (f :: Type) (g :: Type).
+           Typeable t => t a b c d e f g -> TypeRep
 typeOf7 _ = I.someTypeRep (Proxy :: Proxy t)
-
-type Typeable1 (a :: * -> *)                               = Typeable a
-type Typeable2 (a :: * -> * -> *)                          = Typeable a
-type Typeable3 (a :: * -> * -> * -> *)                     = Typeable a
-type Typeable4 (a :: * -> * -> * -> * -> *)                = Typeable a
-type Typeable5 (a :: * -> * -> * -> * -> * -> *)           = Typeable a
-type Typeable6 (a :: * -> * -> * -> * -> * -> * -> *)      = Typeable a
-type Typeable7 (a :: * -> * -> * -> * -> * -> * -> * -> *) = Typeable a
-
-{-# DEPRECATED Typeable1 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable2 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable3 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable4 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable5 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable6 "renamed to 'Typeable'" #-} -- deprecated in 7.8
-{-# DEPRECATED Typeable7 "renamed to 'Typeable'" #-} -- deprecated in 7.8

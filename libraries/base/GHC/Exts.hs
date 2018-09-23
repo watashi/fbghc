@@ -34,6 +34,9 @@ module GHC.Exts
         uncheckedIShiftL64#, uncheckedIShiftRA64#,
         isTrue#,
 
+        -- * Compat wrapper
+        atomicModifyMutVar#,
+
         -- * Fusion
         build, augment,
 
@@ -46,7 +49,7 @@ module GHC.Exts
         -- * Ids with special behaviour
         lazy, inline, oneShot,
 
-        -- * Running 'RealWorld' state transformers
+        -- * Running 'RealWorld' state thread
         runRW#,
 
         -- * Safe coercions
@@ -154,7 +157,9 @@ traceEvent = Debug.Trace.traceEventIO
 -- entire ghc package at runtime
 
 data SpecConstrAnnotation = NoSpecConstr | ForceSpecConstr
-                deriving( Data, Eq )
+                deriving ( Data -- ^ @since 4.3.0.0
+                         , Eq   -- ^ @since 4.3.0.0
+                         )
 
 
 {- **********************************************************************
@@ -194,6 +199,15 @@ instance IsList [a] where
   fromList = id
   toList = id
 
+-- | @since 4.9.0.0
+instance IsList (NonEmpty a) where
+  type Item (NonEmpty a) = a
+
+  fromList (a:as) = a :| as
+  fromList [] = errorWithoutStackTrace "NonEmpty.fromList: empty list"
+
+  toList ~(a :| as) = a : as
+
 -- | @since 4.8.0.0
 instance IsList Version where
   type (Item Version) = Int
@@ -208,3 +222,27 @@ instance IsList CallStack where
   type (Item CallStack) = (String, SrcLoc)
   fromList = fromCallSiteList
   toList   = getCallStack
+
+-- | An implementation of the old @atomicModifyMutVar#@ primop in
+-- terms of the new 'atomicModifyMutVar2#' primop, for backwards
+-- compatibility. The type of this function is a bit bogus. It's
+-- best to think of it as having type
+--
+-- @
+-- atomicModifyMutVar#
+--   :: MutVar# s a
+--   -> (a -> (a, b))
+--   -> State# s
+--   -> (# State# s, b #)
+-- @
+--
+-- but there may be code that uses this with other two-field record
+-- types.
+atomicModifyMutVar#
+  :: MutVar# s a
+  -> (a -> b)
+  -> State# s
+  -> (# State# s, c #)
+atomicModifyMutVar# mv f s =
+  case unsafeCoerce# (atomicModifyMutVar2# mv f s) of
+    (# s', _, ~(_, res) #) -> (# s', res #)

@@ -44,9 +44,9 @@ test('T3016', when(fast(), skip), compile, [''])
 test('T1647', normal, compile, ['-fdicts-strict -dcore-lint'])
 
 test('T3234',
-     only_ways(['optasm']),
-     compile,
-     ['-ddump-simpl-stats -dsuppress-uniques'])
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T3234'])
 
 test('T3717', only_ways(['optasm']),
               compile,
@@ -113,7 +113,7 @@ test('T5168',
      ['$MAKE -s --no-print-directory T5168'])
 
 test('T5329', normal, compile, [''])
-test('T5303', reqlib('mtl'), compile, [''])   # Coercion-optimiation test
+test('T5303', normal, compile, [''])   # Coercion-optimisation test
 test('T5342', normal, compile, [''])   # Lint error with -prof
 test('T5359a', normal, compile, [''])  # Lint error with -O (OccurAnal)
 test('T5359b', normal, compile, [''])  # Lint error with -O (OccurAnal)
@@ -148,7 +148,6 @@ test('T7785', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T7702',
      [extra_files(['T7702plugin']),
       pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702 TOP={top}'),
-      clean_cmd('$MAKE -s --no-print-directory -C T7702plugin clean.T7702'),
       # we say 18mb peak allocated +/- 70% because other compiler flags have
       # a large effect on allocation which is hard to separate from the
       # allocation done by the plugin... but a regression allocates > 90mb
@@ -158,7 +157,16 @@ test('T7702',
      compile,
      ['-v0 -package-db T7702plugin/pkg.T7702/local.package.conf -fplugin T7702Plugin -package T7702plugin ' + config.plugin_way_flags])
 
-test('T7944', normal, compile, ['-O2'])
+# we omit profasm because it doesn't bring much to the table but
+# introduces its share of complexity, as the test as it is fails with
+# profasm:
+# T7944.hs:7:1: fatal:
+#     Cannot load -prof objects when GHC is built with -dynamic
+#     To fix this, either:
+#       (1) Use -fexternal-interpreter, or
+#       (2) Build the program twice: once with -dynamic, and then
+#           with -prof using -osuf to set a different object file suffix.
+test('T7944', omit_ways(['profasm']), compile, ['-O2'])
 test('T7995',
      # RULE doesn't seem to fire unless optimizations are turned on.
      # This seems reasonable, so I've required it for the test. -- EZY 20130720
@@ -188,6 +196,9 @@ test('T8848a', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T8331', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T6056', only_ways(['optasm']), multimod_compile, ['T6056', '-v0 -ddump-rule-firings'])
 test('T9400', only_ways(['optasm']), compile, ['-O0 -ddump-simpl -dsuppress-uniques'])
+test('T9441a', [only_ways(['optasm']), check_errmsg(r'f1 = f2') ], compile, ['-ddump-simpl'])
+test('T9441b', [only_ways(['optasm']), check_errmsg(r'Rec {') ], compile, ['-ddump-simpl'])
+test('T9441c', [only_ways(['optasm']), check_errmsg(r'Rec {') ], compile, ['-ddump-simpl'])
 test('T9583', only_ways(['optasm']), compile, [''])
 test('T9565', only_ways(['optasm']), compile, [''])
 test('T5821', only_ways(['optasm']), compile, [''])
@@ -258,7 +269,7 @@ test('T13468',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T13468'])
-test('T13543', normal, compile, ['-ddump-str-signatures'])
+test('T13543', only_ways(['optasm']), compile, ['-ddump-str-signatures'])
 test('T11272',
      normal,
      run_command,
@@ -267,5 +278,51 @@ test('T12600',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T12600'])
-test('T13658', normal, compile, ['-dcore-lint'])
+test('T13658',
+     [when((arch('powerpc64') or arch('powerpc64le')), expect_broken(11261))],
+     compile, ['-dcore-lint'])
+test('T14779a',
+     [when((arch('powerpc64') or arch('powerpc64le')), expect_broken(11261))],
+     compile, ['-dcore-lint'])
+test('T14779b',
+     [when((arch('powerpc64') or arch('powerpc64le')), expect_broken(11261))],
+     compile, ['-dcore-lint'])
 test('T13708', normal, compile, [''])
+
+# thunk should inline here, so check whether or not it appears in the Core
+# (we skip profasm because it might not inline there)
+test('T14137', [ check_errmsg(r'thunk'), omit_ways(['profasm']) ], compile, ['-dsuppress-uniques -ddump-simpl'])
+# bar and foo should CSEd here, so check for that in the Core
+test('T14186', [ only_ways(['optasm']), check_errmsg(r'bar = foo') ], compile, ['-ddump-simpl'])
+
+test('T14140',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T14140'])
+
+test('T14272', normal, compile, [''])
+test('T14270a', normal, compile, [''])
+test('T14152', [ only_ways(['optasm']), check_errmsg(r'dead code') ], compile, ['-ddump-simpl'])
+test('T14152a', [extra_files(['T14152.hs']), pre_cmd('cp T14152.hs T14152a.hs'),
+                 only_ways(['optasm']), check_errmsg(r'dead code') ],
+                compile, ['-fno-exitification -ddump-simpl'])
+test('T13990', normal, compile, ['-dcore-lint -O'])
+test('T14650', normal, compile, ['-O2'])
+test('T14959', normal, compile, ['-O'])
+test('T14978',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T14978'])
+test('T15002', [ req_profiling ], compile, ['-O -fprof-auto -prof'])
+test('T15005', normal, compile, ['-O'])
+# we omit profiling because it affects the optimiser and makes the test fail
+test('T15056', [extra_files(['T15056a.hs']), omit_ways(['profasm'])], multimod_compile, ['T15056', '-O -v0 -ddump-rule-firings'])
+test('T15186', normal, multimod_compile, ['T15186', '-v0'])
+test('T15517', normal, compile, ['-O0'])
+test('T15517a', normal, compile, ['-O0'])
+test('T15453', normal, compile, ['-dcore-lint -O1'])
+test('T15445', normal, multimod_compile, ['T15445', '-v0 -O -ddump-rule-firings'])
+test('T15631',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T15631'])

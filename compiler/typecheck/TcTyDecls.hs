@@ -19,18 +19,20 @@ module TcTyDecls(
         checkClassCycles,
 
         -- * Implicits
-        tcAddImplicits, mkDefaultMethodType,
+        addTyConsToGblEnv, mkDefaultMethodType,
 
         -- * Record selectors
-        mkRecSelBinds, mkOneRecordSelector
+        tcRecSelBinds, mkRecSelBinds, mkOneRecordSelector
     ) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TcRnMonad
 import TcEnv
-import TcBinds( tcRecSelBinds )
-import TyCoRep( Type(..), Coercion(..), UnivCoProvenance(..) )
+import TcBinds( tcValBinds, addTypecheckedBinds )
+import TyCoRep( Type(..), Coercion(..), MCoercion(..), UnivCoProvenance(..) )
 import TcType
 import TysWiredIn( unitTy )
 import MkCore( rEC_SEL_ERROR_ID )
@@ -109,20 +111,24 @@ synonymTyConsOfType ty
      -- in the same recursive group.  Possibly this restriction will be
      -- lifted in the future but for now, this code is "just for completeness
      -- sake".
-     go_co (Refl _ ty)            = go ty
+     go_mco MRefl    = emptyNameEnv
+     go_mco (MCo co) = go_co co
+
+     go_co (Refl ty)              = go ty
+     go_co (GRefl _ ty mco)       = go ty `plusNameEnv` go_mco mco
      go_co (TyConAppCo _ tc cs)   = go_tc tc `plusNameEnv` go_co_s cs
      go_co (AppCo co co')         = go_co co `plusNameEnv` go_co co'
      go_co (ForAllCo _ co co')    = go_co co `plusNameEnv` go_co co'
      go_co (FunCo _ co co')       = go_co co `plusNameEnv` go_co co'
      go_co (CoVarCo _)            = emptyNameEnv
+     go_co (HoleCo {})            = emptyNameEnv
      go_co (AxiomInstCo _ _ cs)   = go_co_s cs
      go_co (UnivCo p _ ty ty')    = go_prov p `plusNameEnv` go ty `plusNameEnv` go ty'
      go_co (SymCo co)             = go_co co
      go_co (TransCo co co')       = go_co co `plusNameEnv` go_co co'
-     go_co (NthCo _ co)           = go_co co
+     go_co (NthCo _ _ co)         = go_co co
      go_co (LRCo _ co)            = go_co co
      go_co (InstCo co co')        = go_co co `plusNameEnv` go_co co'
-     go_co (CoherenceCo co co')   = go_co co `plusNameEnv` go_co co'
      go_co (KindCo co)            = go_co co
      go_co (SubCo co)             = go_co co
      go_co (AxiomRuleCo _ cs)     = go_co_s cs
@@ -131,7 +137,6 @@ synonymTyConsOfType ty
      go_prov (PhantomProv co)     = go_co co
      go_prov (ProofIrrelProv co)  = go_co co
      go_prov (PluginProv _)       = emptyNameEnv
-     go_prov (HoleProv _)         = emptyNameEnv
 
      go_tc tc | isTypeSynonymTyCon tc = unitNameEnv (tyConName tc) tc
               | otherwise             = emptyNameEnv
@@ -479,7 +484,7 @@ initialRoleEnv1 hsc_src annots_env tc
           -- is wrong, just ignore it. We check this in the validity check.
         role_annots
           = case lookupRoleAnnot annots_env name of
-              Just (L _ (RoleAnnotDecl _ annots))
+              Just (L _ (RoleAnnotDecl _ _ annots))
                 | annots `lengthIs` num_exps -> map unLoc annots
               _                              -> replicate num_exps Nothing
         default_roles = build_default_roles argflags role_annots
@@ -580,6 +585,8 @@ irDataCon datacon
 irType :: VarSet -> Type -> RoleM ()
 irType = go
   where
+    go lcls ty                 | Just ty' <- coreView ty -- #14101
+                               = go lcls ty'
     go lcls (TyVarTy tv)       = unless (tv `elemVarSet` lcls) $
                                  updateRole Representational tv
     go lcls (AppTy t1 t2)      = go lcls t1 >> markNominal lcls t2
@@ -739,23 +746,24 @@ updateRoleEnv name n role
 *                                                                      *
 ********************************************************************* -}
 
-tcAddImplicits :: [TyCon] -> TcM TcGblEnv
+addTyConsToGblEnv :: [TyCon] -> TcM TcGblEnv
 -- Given a [TyCon], add to the TcGblEnv
+--   * extend the TypeEnv with the tycons
 --   * extend the TypeEnv with their implicitTyThings
 --   * extend the TypeEnv with any default method Ids
 --   * add bindings for record selectors
---   * add bindings for type representations for the TyThings
-tcAddImplicits tycons
-  = discardWarnings $
+addTyConsToGblEnv tyclss
+  = tcExtendTyConEnv tyclss                    $
     tcExtendGlobalEnvImplicit implicit_things  $
     tcExtendGlobalValEnv def_meth_ids          $
-    do { traceTc "tcAddImplicits" $ vcat
-            [ text "tycons" <+> ppr tycons
+    do { traceTc "tcAddTyCons" $ vcat
+            [ text "tycons" <+> ppr tyclss
             , text "implicits" <+> ppr implicit_things ]
-       ; tcRecSelBinds (mkRecSelBinds tycons) }
+       ; gbl_env <- tcRecSelBinds (mkRecSelBinds tyclss)
+       ; return gbl_env }
  where
-   implicit_things = concatMap implicitTyConThings tycons
-   def_meth_ids    = mkDefaultMethodIds tycons
+   implicit_things = concatMap implicitTyConThings tyclss
+   def_meth_ids    = mkDefaultMethodIds tyclss
 
 mkDefaultMethodIds :: [TyCon] -> [Id]
 -- We want to put the default-method Ids (both vanilla and generic)
@@ -771,10 +779,18 @@ mkDefaultMethodIds tycons
 mkDefaultMethodType :: Class -> Id -> DefMethSpec Type -> Type
 -- Returns the top-level type of the default method
 mkDefaultMethodType _ sel_id VanillaDM        = idType sel_id
-mkDefaultMethodType cls _   (GenericDM dm_ty) = mkSpecSigmaTy cls_tvs [pred] dm_ty
+mkDefaultMethodType cls _   (GenericDM dm_ty) = mkSigmaTy tv_bndrs [pred] dm_ty
    where
-     cls_tvs = classTyVars cls
-     pred    = mkClassPred cls (mkTyVarTys cls_tvs)
+     pred      = mkClassPred cls (mkTyVarTys (binderVars cls_bndrs))
+     cls_bndrs = tyConBinders (classTyCon cls)
+     tv_bndrs  = tyConTyVarBinders cls_bndrs
+     -- NB: the Class doesn't have TyConBinders; we reach into its
+     --     TyCon to get those.  We /do/ need the TyConBinders because
+     --     we need the correct visibility: these default methods are
+     --     used in code generated by the fill-in for missing
+     --     methods in instances (TcInstDcls.mkDefMethBind), and
+     --     then typechecked.  So we need the right visibilty info
+     --     (Trac #13998)
 
 {-
 ************************************************************************
@@ -810,30 +826,37 @@ when typechecking the [d| .. |] quote, and typecheck them later.
 ************************************************************************
 -}
 
-mkRecSelBinds :: [TyCon] -> HsValBinds GhcRn
+tcRecSelBinds :: [(Id, LHsBind GhcRn)] -> TcM TcGblEnv
+tcRecSelBinds sel_bind_prs
+  = tcExtendGlobalValEnv [sel_id | L _ (IdSig _ sel_id) <- sigs] $
+    do { (rec_sel_binds, tcg_env) <- discardWarnings $
+                                     tcValBinds TopLevel binds sigs getGblEnv
+       ; return (tcg_env `addTypecheckedBinds` map snd rec_sel_binds) }
+  where
+    sigs = [ L loc (IdSig noExt sel_id)   | (sel_id, _) <- sel_bind_prs
+                                          , let loc = getSrcSpan sel_id ]
+    binds = [(NonRecursive, unitBag bind) | (_, bind) <- sel_bind_prs]
+
+mkRecSelBinds :: [TyCon] -> [(Id, LHsBind GhcRn)]
 -- NB We produce *un-typechecked* bindings, rather like 'deriving'
 --    This makes life easier, because the later type checking will add
 --    all necessary type abstractions and applications
 mkRecSelBinds tycons
-  = ValBindsOut binds sigs
-  where
-    (sigs, binds) = unzip rec_sels
-    rec_sels = map mkRecSelBind [ (tc,fld)
-                                | tc <- tycons
+  = map mkRecSelBind [ (tc,fld) | tc <- tycons
                                 , fld <- tyConFieldLabels tc ]
 
-mkRecSelBind :: (TyCon, FieldLabel) -> (LSig GhcRn, (RecFlag, LHsBinds GhcRn))
+mkRecSelBind :: (TyCon, FieldLabel) -> (Id, LHsBind GhcRn)
 mkRecSelBind (tycon, fl)
   = mkOneRecordSelector all_cons (RecSelData tycon) fl
   where
     all_cons = map RealDataCon (tyConDataCons tycon)
 
 mkOneRecordSelector :: [ConLike] -> RecSelParent -> FieldLabel
-                    -> (LSig GhcRn, (RecFlag, LHsBinds GhcRn))
+                    -> (Id, LHsBind GhcRn)
 mkOneRecordSelector all_cons idDetails fl
-  = (L loc (IdSig sel_id), (NonRecursive, unitBag (L loc sel_bind)))
+  = (sel_id, L loc sel_bind)
   where
-    loc    = getSrcSpan sel_name
+    loc      = getSrcSpan sel_name
     lbl      = flLabel fl
     sel_name = flSelector fl
 
@@ -870,13 +893,14 @@ mkOneRecordSelector all_cons idDetails fl
              | otherwise =  map mk_match cons_w_field ++ deflt
     mk_match con = mkSimpleMatch (mkPrefixFunRhs sel_lname)
                                  [L loc (mk_sel_pat con)]
-                                 (L loc (HsVar (L loc field_var)))
+                                 (L loc (HsVar noExt (L loc field_var)))
     mk_sel_pat con = ConPatIn (L loc (getName con)) (RecCon rec_fields)
     rec_fields = HsRecFields { rec_flds = [rec_field], rec_dotdot = Nothing }
     rec_field  = noLoc (HsRecField
                         { hsRecFieldLbl
-                           = L loc (FieldOcc (L loc $ mkVarUnqual lbl) sel_name)
-                        , hsRecFieldArg = L loc (VarPat (L loc field_var))
+                           = L loc (FieldOcc sel_name (L loc $ mkVarUnqual lbl))
+                        , hsRecFieldArg
+                           = L loc (VarPat noExt (L loc field_var))
                         , hsRecPun = False })
     sel_lname = L loc sel_name
     field_var = mkInternalName (mkBuiltinUnique 1) (getOccName sel_name) loc
@@ -886,10 +910,10 @@ mkOneRecordSelector all_cons idDetails fl
     -- mentions this particular record selector
     deflt | all dealt_with all_cons = []
           | otherwise = [mkSimpleMatch CaseAlt
-                            [L loc (WildPat placeHolderType)]
-                            (mkHsApp (L loc (HsVar
+                            [L loc (WildPat noExt)]
+                            (mkHsApp (L loc (HsVar noExt
                                             (L loc (getName rEC_SEL_ERROR_ID))))
-                                     (L loc (HsLit msg_lit)))]
+                                     (L loc (HsLit noExt msg_lit)))]
 
         -- Do not add a default case unless there are unmatched
         -- constructors.  We must take account of GADTs, else we

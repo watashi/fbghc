@@ -1,7 +1,21 @@
+import string
+import re
 
+#--------------------------------------
+# Python normalization functions
+#--------------------------------------
+
+def normalise_quotes (str):
+  str = re.sub(r'"',r'', str, flags=re.MULTILINE)
+  return str
+
+#--------------------------------------
+# Test functions
+#--------------------------------------
 test('readFloat', exit_code(1), compile_and_run, [''])
 test('enumDouble', normal, compile_and_run, [''])
 test('enumRatio', normal, compile_and_run, [''])
+test('enumNumeric', normal, compile_and_run, [''])
 test('tempfiles', normal, compile_and_run, [''])
 test('fixed', normal, compile_and_run, [''])
 test('quotOverflow', normal, compile_and_run, [''])
@@ -121,7 +135,9 @@ test('T2528', normal, compile_and_run, [''])
 # Seems to be a known problem, e.g.
 #     http://mingw-users.1079350.n2.nabble.com/Bug-re-Unicode-on-the-console-td3121717.html
 # May 2014: seems to work on msys2
-test('T4006', normal, compile_and_run, [''])
+# May 2018: The behavior of printf seems very implementation dependent.
+#     so let's normalise the output.
+test('T4006', normalise_fun(normalise_quotes), compile_and_run, [''])
 
 test('T5943', normal, compile_and_run, [''])
 test('T5962', normal, compile_and_run, [''])
@@ -201,9 +217,11 @@ test('T9848',
 test('T10149', normal, compile_and_run, [''])
 test('T11334a', normal, compile_and_run, [''])
 test('T11555', normal, compile_and_run, [''])
+test('T12494', normal, compile_and_run, [''])
 test('T12852', when(opsys('mingw32'), skip), compile_and_run, [''])
 test('lazySTexamples', normal, compile_and_run, [''])
 test('T11760', normal, compile_and_run, ['-threaded -with-rtsopts=-N2'])
+test('T12874', normal, compile_and_run, [''])
 test('T13191',
         [ stats_num_field('bytes allocated',
                           [ (wordsize(64), 185943272, 5) ])
@@ -214,3 +232,13 @@ test('T13191',
       ['-O'])
 test('T13525', when(opsys('mingw32'), skip), compile_and_run, [''])
 test('T13097', normal, compile_and_run, [''])
+test('functorOperators', normal, compile_and_run, [''])
+test('T3474',
+     [stats_num_field('max_bytes_used', [ (wordsize(64), 44504, 5) ]),
+      only_ways(['normal'])],
+     compile_and_run, ['-O'])
+test('T14425', normal, compile_and_run, [''])
+test('T10412', normal, compile_and_run, [''])
+test('T13896', normal, compile_and_run, [''])
+test('T13167', normal, compile_and_run, [''])
+test('T15349', [exit_code(1)], compile_and_run, [''])

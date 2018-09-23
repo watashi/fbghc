@@ -17,6 +17,8 @@ module MatchLit ( dsLit, dsOverLit, dsOverLit', hsLitKey
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} Match  ( match )
 import {-# SOURCE #-} DsExpr ( dsExpr, dsSyntaxExpr )
 
@@ -75,30 +77,32 @@ See also below where we look for @DictApps@ for \tr{plusInt}, etc.
 -}
 
 dsLit :: HsLit GhcRn -> DsM CoreExpr
-dsLit (HsStringPrim _ s) = return (Lit (MachStr s))
-dsLit (HsCharPrim   _ c) = return (Lit (MachChar c))
-dsLit (HsIntPrim    _ i) = return (Lit (MachInt i))
-dsLit (HsWordPrim   _ w) = return (Lit (MachWord w))
-dsLit (HsInt64Prim  _ i) = return (Lit (MachInt64 i))
-dsLit (HsWord64Prim _ w) = return (Lit (MachWord64 w))
-dsLit (HsFloatPrim  _ f) = return (Lit (MachFloat (fl_value f)))
-dsLit (HsDoublePrim _ d) = return (Lit (MachDouble (fl_value d)))
-dsLit (HsChar _ c)       = return (mkCharExpr c)
-dsLit (HsString _ str)   = mkStringExprFS str
-dsLit (HsInteger _ i _)  = mkIntegerExpr i
-dsLit (HsInt _ i)        = do dflags <- getDynFlags
-                              return (mkIntExpr dflags (il_value i))
-
-dsLit (HsRat _ (FL _ _ val) ty) = do
-  num   <- mkIntegerExpr (numerator val)
-  denom <- mkIntegerExpr (denominator val)
-  return (mkCoreConApps ratio_data_con [Type integer_ty, num, denom])
-  where
-    (ratio_data_con, integer_ty)
-        = case tcSplitTyConApp ty of
-                (tycon, [i_ty]) -> ASSERT(isIntegerTy i_ty && tycon `hasKey` ratioTyConKey)
-                                   (head (tyConDataCons tycon), i_ty)
-                x -> pprPanic "dsLit" (ppr x)
+dsLit l = do
+  dflags <- getDynFlags
+  case l of
+    HsStringPrim _ s -> return (Lit (MachStr s))
+    HsCharPrim   _ c -> return (Lit (MachChar c))
+    HsIntPrim    _ i -> return (Lit (mkMachIntWrap dflags i))
+    HsWordPrim   _ w -> return (Lit (mkMachWordWrap dflags w))
+    HsInt64Prim  _ i -> return (Lit (mkMachInt64Wrap dflags i))
+    HsWord64Prim _ w -> return (Lit (mkMachWord64Wrap dflags w))
+    HsFloatPrim  _ f -> return (Lit (MachFloat (fl_value f)))
+    HsDoublePrim _ d -> return (Lit (MachDouble (fl_value d)))
+    HsChar _ c       -> return (mkCharExpr c)
+    HsString _ str   -> mkStringExprFS str
+    HsInteger _ i _  -> mkIntegerExpr i
+    HsInt _ i        -> return (mkIntExpr dflags (il_value i))
+    XLit x           -> pprPanic "dsLit" (ppr x)
+    HsRat _ (FL _ _ val) ty -> do
+      num   <- mkIntegerExpr (numerator val)
+      denom <- mkIntegerExpr (denominator val)
+      return (mkCoreConApps ratio_data_con [Type integer_ty, num, denom])
+      where
+        (ratio_data_con, integer_ty)
+            = case tcSplitTyConApp ty of
+                    (tycon, [i_ty]) -> ASSERT(isIntegerTy i_ty && tycon `hasKey` ratioTyConKey)
+                                       (head (tyConDataCons tycon), i_ty)
+                    x -> pprPanic "dsLit" (ppr x)
 
 dsOverLit :: HsOverLit GhcTc -> DsM CoreExpr
 dsOverLit lit = do { dflags <- getDynFlags
@@ -108,12 +112,12 @@ dsOverLit lit = do { dflags <- getDynFlags
 dsOverLit' :: DynFlags -> HsOverLit GhcTc -> DsM CoreExpr
 -- Post-typechecker, the HsExpr field of an OverLit contains
 -- (an expression for) the literal value itself
-dsOverLit' dflags (OverLit { ol_val = val, ol_rebindable = rebindable
-                           , ol_witness = witness, ol_type = ty })
+dsOverLit' dflags (OverLit { ol_val = val, ol_ext = OverLitTc rebindable ty
+                           , ol_witness = witness })
   | not rebindable
   , Just expr <- shortCutLit dflags val ty = dsExpr expr        -- Note [Literal short cut]
   | otherwise                              = dsExpr witness
-
+dsOverLit' _ XOverLit{} = panic "dsOverLit'"
 {-
 Note [Literal short cut]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -157,20 +161,30 @@ warnAboutOverflowedLiterals :: DynFlags -> HsOverLit GhcTc -> DsM ()
 warnAboutOverflowedLiterals dflags lit
  | wopt Opt_WarnOverflowedLiterals dflags
  , Just (i, tc) <- getIntegralLit lit
-  = if      tc == intTyConName    then check i tc (Proxy :: Proxy Int)
-    else if tc == int8TyConName   then check i tc (Proxy :: Proxy Int8)
-    else if tc == int16TyConName  then check i tc (Proxy :: Proxy Int16)
-    else if tc == int32TyConName  then check i tc (Proxy :: Proxy Int32)
-    else if tc == int64TyConName  then check i tc (Proxy :: Proxy Int64)
-    else if tc == wordTyConName   then check i tc (Proxy :: Proxy Word)
-    else if tc == word8TyConName  then check i tc (Proxy :: Proxy Word8)
-    else if tc == word16TyConName then check i tc (Proxy :: Proxy Word16)
-    else if tc == word32TyConName then check i tc (Proxy :: Proxy Word32)
-    else if tc == word64TyConName then check i tc (Proxy :: Proxy Word64)
+  = if      tc == intTyConName     then check i tc (Proxy :: Proxy Int)
+    else if tc == int8TyConName    then check i tc (Proxy :: Proxy Int8)
+    else if tc == int16TyConName   then check i tc (Proxy :: Proxy Int16)
+    else if tc == int32TyConName   then check i tc (Proxy :: Proxy Int32)
+    else if tc == int64TyConName   then check i tc (Proxy :: Proxy Int64)
+    else if tc == wordTyConName    then check i tc (Proxy :: Proxy Word)
+    else if tc == word8TyConName   then check i tc (Proxy :: Proxy Word8)
+    else if tc == word16TyConName  then check i tc (Proxy :: Proxy Word16)
+    else if tc == word32TyConName  then check i tc (Proxy :: Proxy Word32)
+    else if tc == word64TyConName  then check i tc (Proxy :: Proxy Word64)
+    else if tc == naturalTyConName then checkPositive i tc
     else return ()
 
   | otherwise = return ()
   where
+    checkPositive :: Integer -> Name -> DsM ()
+    checkPositive i tc
+      = when (i < 0) $ do
+        warnDs (Reason Opt_WarnOverflowedLiterals)
+               (vcat [ text "Literal" <+> integer i
+                       <+> text "is negative but" <+> ppr tc
+                       <+> ptext (sLit "only supports positive numbers")
+                     ])
+
     check :: forall a. (Bounded a, Integral a) => Integer -> Name -> Proxy a -> DsM ()
     check i tc _proxy
       = when (i < minB || i > maxB) $ do
@@ -237,14 +251,14 @@ warnAboutEmptyEnumerations dflags fromExpr mThnExpr toExpr
 getLHsIntegralLit :: LHsExpr GhcTc -> Maybe (Integer, Name)
 -- See if the expression is an Integral literal
 -- Remember to look through automatically-added tick-boxes! (Trac #8384)
-getLHsIntegralLit (L _ (HsPar e))            = getLHsIntegralLit e
-getLHsIntegralLit (L _ (HsTick _ e))         = getLHsIntegralLit e
-getLHsIntegralLit (L _ (HsBinTick _ _ e))    = getLHsIntegralLit e
-getLHsIntegralLit (L _ (HsOverLit over_lit)) = getIntegralLit over_lit
+getLHsIntegralLit (L _ (HsPar _ e))            = getLHsIntegralLit e
+getLHsIntegralLit (L _ (HsTick _ _ e))         = getLHsIntegralLit e
+getLHsIntegralLit (L _ (HsBinTick _ _ _ e))    = getLHsIntegralLit e
+getLHsIntegralLit (L _ (HsOverLit _ over_lit)) = getIntegralLit over_lit
 getLHsIntegralLit _ = Nothing
 
 getIntegralLit :: HsOverLit GhcTc -> Maybe (Integer, Name)
-getIntegralLit (OverLit { ol_val = HsIntegral i, ol_type = ty })
+getIntegralLit (OverLit { ol_val = HsIntegral i, ol_ext = OverLitTc _ ty })
   | Just tc <- tyConAppTyCon_maybe ty
   = Just (il_value i, tyConName tc)
 getIntegralLit _ = Nothing
@@ -271,18 +285,13 @@ tidyLitPat (HsString src s)
                   (mkNilPat charTy) (unpackFS s)
         -- The stringTy is the type of the whole pattern, not
         -- the type to instantiate (:) or [] with!
-tidyLitPat lit = LitPat lit
+tidyLitPat lit = LitPat noExt lit
 
 ----------------
-tidyNPat :: (HsLit GhcTc -> Pat GhcTc)   -- How to tidy a LitPat
-                 -- We need this argument because tidyNPat is called
-                 -- both by Match and by Check, but they tidy LitPats
-                 -- slightly differently; and we must desugar
-                 -- literals consistently (see Trac #5117)
-         -> HsOverLit GhcTc -> Maybe (SyntaxExpr GhcTc) -> SyntaxExpr GhcTc
+tidyNPat :: HsOverLit GhcTc -> Maybe (SyntaxExpr GhcTc) -> SyntaxExpr GhcTc
          -> Type
          -> Pat GhcTc
-tidyNPat tidy_lit_pat (OverLit val False _ ty) mb_neg _eq outer_ty
+tidyNPat (OverLit (OverLitTc False ty) val _) mb_neg _eq outer_ty
         -- False: Take short cuts only if the literal is not using rebindable syntax
         --
         -- Once that is settled, look for cases where the type of the
@@ -298,7 +307,7 @@ tidyNPat tidy_lit_pat (OverLit val False _ ty) mb_neg _eq outer_ty
   | not type_change, isWordTy ty,   Just int_lit <- mb_int_lit
                  = mk_con_pat wordDataCon   (HsWordPrim   NoSourceText int_lit)
   | not type_change, isStringTy ty, Just str_lit <- mb_str_lit
-                 = tidy_lit_pat (HsString NoSourceText str_lit)
+                 = tidyLitPat (HsString NoSourceText str_lit)
      -- NB: do /not/ convert Float or Double literals to F# 3.8 or D# 5.3
      -- If we do convert to the constructor form, we'll generate a case
      -- expression on a Float# or Double# and that's not allowed in Core; see
@@ -311,7 +320,8 @@ tidyNPat tidy_lit_pat (OverLit val False _ ty) mb_neg _eq outer_ty
     type_change = not (outer_ty `eqType` ty)
 
     mk_con_pat :: DataCon -> HsLit GhcTc -> Pat GhcTc
-    mk_con_pat con lit = unLoc (mkPrefixConPat con [noLoc $ LitPat lit] [])
+    mk_con_pat con lit
+      = unLoc (mkPrefixConPat con [noLoc $ LitPat noExt lit] [])
 
     mb_int_lit :: Maybe Integer
     mb_int_lit = case (mb_neg, val) of
@@ -324,8 +334,8 @@ tidyNPat tidy_lit_pat (OverLit val False _ ty) mb_neg _eq outer_ty
                    (Nothing, HsIsString _ s) -> Just s
                    _ -> Nothing
 
-tidyNPat _ over_lit mb_neg eq outer_ty
-  = NPat (noLoc over_lit) mb_neg eq outer_ty
+tidyNPat over_lit mb_neg eq outer_ty
+  = NPat outer_ty (noLoc over_lit) mb_neg eq
 
 {-
 ************************************************************************
@@ -359,7 +369,7 @@ matchLiterals (var:vars) ty sub_groups
     match_group :: [EquationInfo] -> DsM (Literal, MatchResult)
     match_group eqns
         = do dflags <- getDynFlags
-             let LitPat hs_lit = firstPat (head eqns)
+             let LitPat _ hs_lit = firstPat (head eqns)
              match_result <- match vars ty (shiftEqns eqns)
              return (hsLitKey dflags hs_lit, match_result)
 
@@ -389,8 +399,8 @@ hsLitKey :: DynFlags -> HsLit GhcTc -> Literal
 -- HsLit does not.
 hsLitKey dflags (HsIntPrim    _ i) = mkMachIntWrap  dflags i
 hsLitKey dflags (HsWordPrim   _ w) = mkMachWordWrap dflags w
-hsLitKey _      (HsInt64Prim  _ i) = mkMachInt64Wrap       i
-hsLitKey _      (HsWord64Prim _ w) = mkMachWord64Wrap      w
+hsLitKey dflags (HsInt64Prim  _ i) = mkMachInt64Wrap  dflags i
+hsLitKey dflags (HsWord64Prim _ w) = mkMachWord64Wrap dflags w
 hsLitKey _      (HsCharPrim   _ c) = mkMachChar            c
 hsLitKey _      (HsFloatPrim  _ f) = mkMachFloat           (fl_value f)
 hsLitKey _      (HsDoublePrim _ d) = mkMachDouble          (fl_value d)
@@ -407,7 +417,7 @@ hsLitKey _      l                  = pprPanic "hsLitKey" (ppr l)
 
 matchNPats :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 matchNPats (var:vars) ty (eqn1:eqns)    -- All for the same literal
-  = do  { let NPat (L _ lit) mb_neg eq_chk _ = firstPat eqn1
+  = do  { let NPat _ (L _ lit) mb_neg eq_chk = firstPat eqn1
         ; lit_expr <- dsOverLit lit
         ; neg_lit <- case mb_neg of
                             Nothing  -> return lit_expr
@@ -438,7 +448,7 @@ We generate:
 matchNPlusKPats :: [Id] -> Type -> [EquationInfo] -> DsM MatchResult
 -- All NPlusKPats, for the *same* literal k
 matchNPlusKPats (var:vars) ty (eqn1:eqns)
-  = do  { let NPlusKPat (L _ n1) (L _ lit1) lit2 ge minus _ = firstPat eqn1
+  = do  { let NPlusKPat _ (L _ n1) (L _ lit1) lit2 ge minus = firstPat eqn1
         ; lit1_expr   <- dsOverLit lit1
         ; lit2_expr   <- dsOverLit lit2
         ; pred_expr   <- dsSyntaxExpr ge    [Var var, lit1_expr]
@@ -450,7 +460,7 @@ matchNPlusKPats (var:vars) ty (eqn1:eqns)
                    adjustMatchResult (foldr1 (.) wraps)         $
                    match_result) }
   where
-    shift n1 eqn@(EqnInfo { eqn_pats = NPlusKPat (L _ n) _ _ _ _ _ : pats })
+    shift n1 eqn@(EqnInfo { eqn_pats = NPlusKPat _ (L _ n) _ _ _ _ : pats })
         = (wrapBind n n1, eqn { eqn_pats = pats })
         -- The wrapBind is a no-op for the first equation
     shift _ e = pprPanic "matchNPlusKPats/shift" (ppr e)

@@ -113,16 +113,33 @@
 /* -----------------------------------------------------------------------------
    How large is the stack frame saved by StgRun?
    world.  Used in StgCRun.c.
+
+   The size has to be enough to save the registers (see StgCRun)
+   plus padding if the result is not 16 byte aligned.
+   See the Note [Stack Alignment on X86] in StgCRun.c for details.
+
    -------------------------------------------------------------------------- */
 #if defined(x86_64_HOST_ARCH)
 #  if defined(mingw32_HOST_OS)
-/* 8 larger than necessary to make the alignment right*/
-#    define STG_RUN_STACK_FRAME_SIZE 80
+#    define STG_RUN_STACK_FRAME_SIZE 144
 #  else
 #    define STG_RUN_STACK_FRAME_SIZE 48
 #  endif
 #endif
 
+/* -----------------------------------------------------------------------------
+   StgRun related labels shared between StgCRun.c and StgStartup.cmm.
+   -------------------------------------------------------------------------- */
+
+#if defined(LEADING_UNDERSCORE)
+#define STG_RUN "_StgRun"
+#define STG_RUN_JMP _StgRunJmp
+#define STG_RETURN "_StgReturn"
+#else
+#define STG_RUN "StgRun"
+#define STG_RUN_JMP StgRunJmp
+#define STG_RETURN "StgReturn"
+#endif
 
 /* -----------------------------------------------------------------------------
    How much Haskell stack space to reserve for the saving of registers

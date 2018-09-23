@@ -7,7 +7,7 @@
 -- and newtypes
 
 module CoAxiom (
-       BranchFlag, Branched, Unbranched, BranchIndex, Branches,
+       BranchFlag, Branched, Unbranched, BranchIndex, Branches(..),
        manyBranches, unbranched,
        fromBranches, numBranches,
        mapAccumBranches,
@@ -28,6 +28,8 @@ module CoAxiom (
        CoAxiomRule(..), TypeEqn,
        BuiltInSynFamily(..), trivialBuiltInFamily
        ) where
+
+import GhcPrelude
 
 import {-# SOURCE #-} TyCoRep ( Type, pprType )
 import {-# SOURCE #-} TyCon ( TyCon )
@@ -220,6 +222,8 @@ data CoAxBranch
                                     -- See Note [CoAxiom locations]
     , cab_tvs      :: [TyVar]       -- Bound type variables; not necessarily fresh
                                     -- See Note [CoAxBranch type variables]
+                                    -- May be eta-reduded; see FamInstEnv
+                                    -- Note [Eta reduction for data families]
     , cab_cvs      :: [CoVar]       -- Bound coercion variables
                                     -- Always empty, for now.
                                     -- See Note [Constraints in patterns]

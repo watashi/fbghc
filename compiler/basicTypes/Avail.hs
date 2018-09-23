@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 --
 -- (c) The University of Glasgow
 --
@@ -15,6 +16,8 @@ module Avail (
     availName, availNames, availNonFldNames,
     availNamesWithSelectors,
     availFlds,
+    availsNamesWithOccs,
+    availNamesWithOccs,
     stableAvailCmp,
     plusAvail,
     trimAvail,
@@ -24,6 +27,8 @@ module Avail (
 
 
   ) where
+
+import GhcPrelude
 
 import Name
 import NameEnv
@@ -35,6 +40,7 @@ import ListSetOps
 import Outputable
 import Util
 
+import Data.Data ( Data )
 import Data.List ( find )
 import Data.Function
 
@@ -59,7 +65,7 @@ data AvailInfo = Avail Name      -- ^ An ordinary identifier in scope
                                  --     to be in scope, it must be
                                  --     *first* in this list.  Thus,
                                  --     typically: @AvailTC Eq [Eq, ==, \/=]@
-                deriving( Eq )
+                deriving( Eq, Data )
                         -- Equality used when deciding if the
                         -- interface has changed
 
@@ -76,7 +82,7 @@ datatype like
 
 gives rise to the AvailInfo
 
-  AvailTC T [T, MkT] [FieldLabel "foo" False foo],
+  AvailTC T [T, MkT] [FieldLabel "foo" False foo]
 
 whereas if -XDuplicateRecordFields is enabled it gives
 
@@ -94,8 +100,9 @@ multiple distinct fields with the same label. For example,
 
 gives rise to
 
-  AvailTC F [F, MkFInt, MkFBool]
-    [FieldLabel "foo" True $sel:foo:MkFInt, FieldLabel "foo" True $sel:foo:MkFBool].
+  AvailTC F [ F, MkFInt, MkFBool ]
+            [ FieldLabel "foo" True $sel:foo:MkFInt
+            , FieldLabel "foo" True $sel:foo:MkFBool ]
 
 Moreover, note that the flIsOverloaded flag need not be the same for
 all the elements of the list.  In the example above, this occurs if
@@ -103,8 +110,9 @@ the two data instances are defined in different modules, one with
 `-XDuplicateRecordFields` enabled and one with it disabled.  Thus it
 is possible to have
 
-  AvailTC F [F, MkFInt, MkFBool]
-    [FieldLabel "foo" True $sel:foo:MkFInt, FieldLabel "foo" False foo].
+  AvailTC F [ F, MkFInt, MkFBool ]
+            [ FieldLabel "foo" True $sel:foo:MkFInt
+            , FieldLabel "foo" False foo ]
 
 If the two data instances are defined in different modules, both
 without `-XDuplicateRecordFields`, it will be impossible to export
@@ -169,6 +177,22 @@ availFlds :: AvailInfo -> [FieldLabel]
 availFlds (AvailTC _ _ fs) = fs
 availFlds _                = []
 
+availsNamesWithOccs :: [AvailInfo] -> [(Name, OccName)]
+availsNamesWithOccs = concatMap availNamesWithOccs
+
+-- | 'Name's made available by the availability information, paired with
+-- the 'OccName' used to refer to each one.
+--
+-- When @DuplicateRecordFields@ is in use, the 'Name' may be the
+-- mangled name of a record selector (e.g. @$sel:foo:MkT@) while the
+-- 'OccName' will be the label of the field (e.g. @foo@).
+--
+-- See Note [Representing fields in AvailInfo].
+availNamesWithOccs :: AvailInfo -> [(Name, OccName)]
+availNamesWithOccs (Avail n) = [(n, nameOccName n)]
+availNamesWithOccs (AvailTC _ ns fs)
+  = [ (n, nameOccName n) | n <- ns ] ++
+    [ (flSelector fl, mkVarOccFS (flLabel fl)) | fl <- fs ]
 
 -- -----------------------------------------------------------------------------
 -- Utility
@@ -225,7 +249,7 @@ filterAvail keep ie rest =
 -- will give Ix(Ix,index,range) and Ix(index)
 -- We want to combine these; addAvail does that
 nubAvails :: [AvailInfo] -> [AvailInfo]
-nubAvails avails = nameEnvElts (foldl add emptyNameEnv avails)
+nubAvails avails = nameEnvElts (foldl' add emptyNameEnv avails)
   where
     add env avail = extendNameEnv_C plusAvail env (availName avail) avail
 

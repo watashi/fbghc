@@ -38,6 +38,11 @@ EXTERN_INLINE void unlockClosure(StgClosure *p, const StgInfoTable *info);
 
 #if defined(THREADED_RTS)
 
+#if defined(PROF_SPIN)
+extern volatile StgWord64 whitehole_lockClosure_spin;
+extern volatile StgWord64 whitehole_lockClosure_yield;
+#endif
+
 /* -----------------------------------------------------------------------------
  * Locking/unlocking closures
  *
@@ -56,7 +61,14 @@ EXTERN_INLINE StgInfoTable *reallyLockClosure(StgClosure *p)
         do {
             info = xchg((P_)(void *)&p->header.info, (W_)&stg_WHITEHOLE_info);
             if (info != (W_)&stg_WHITEHOLE_info) return (StgInfoTable *)info;
+#if defined(PROF_SPIN)
+            ++whitehole_lockClosure_spin;
+#endif
+            busy_wait_nop();
         } while (++i < SPIN_COUNT);
+#if defined(PROF_SPIN)
+        ++whitehole_lockClosure_yield;
+#endif
         yieldThread();
     } while (1);
 }
@@ -111,15 +123,6 @@ EXTERN_INLINE void unlockClosure(StgClosure *p, const StgInfoTable *info)
     write_barrier();
     p->header.info = info;
 }
-
-// Handy specialised versions of lockClosure()/unlockClosure()
-INLINE_HEADER void lockTSO(StgTSO *tso);
-INLINE_HEADER void lockTSO(StgTSO *tso)
-{ lockClosure((StgClosure *)tso); }
-
-INLINE_HEADER void unlockTSO(StgTSO *tso);
-INLINE_HEADER void unlockTSO(StgTSO *tso)
-{ unlockClosure((StgClosure*)tso, (const StgInfoTable *)&stg_TSO_info); }
 
 #endif /* CMINUSMINUS */
 

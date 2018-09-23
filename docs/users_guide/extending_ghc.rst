@@ -130,10 +130,10 @@ when invoked:
 
     import GHC
     import GHC.Paths ( libdir )
-    import DynFlags ( defaultLogAction )
-     
-    main = 
-        defaultErrorHandler defaultLogAction $ do
+    import DynFlags ( defaultFatalMessager, defaultFlushOut )
+
+    main =
+        defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
           runGhc (Just libdir) $ do
             dflags <- getSessionDynFlags
             setSessionDynFlags dflags
@@ -157,7 +157,7 @@ Compiling it results in:
     [1 of 1] Compiling Main             ( simple_ghc_api.hs, simple_ghc_api.o )
     Linking simple_ghc_api ...
     $ ./simple_ghc_api
-    $ ./test_main 
+    $ ./test_main
     hi
     $
 
@@ -179,11 +179,14 @@ GHC's intermediate language, Core. Plugins are suitable for experimental
 analysis or optimization, and require no changes to GHC's source code to
 use.
 
-Plugins cannot optimize/inspect C--, nor can they implement things like
+Plugins cannot optimize/inspect C-\\-, nor can they implement things like
 parser/front-end modifications like GCC, apart from limited changes to
 the constraint solver. If you feel strongly that any of these
 restrictions are too onerous,
 :ghc-wiki:`please give the GHC team a shout <MailingListsAndIRC>`.
+
+Plugins do not work with ``-fexternal-interpreter``. If you need to run plugins
+with ``-fexternal-interpreter`` let GHC developers know in :ghc-ticket:`14335`.
 
 .. _using-compiler-plugins:
 
@@ -196,13 +199,22 @@ module in a registered package that exports a plugin. Arguments can be given to
 plugins with the :ghc-flag:`-fplugin-opt=⟨module⟩:⟨args⟩` option.
 
 .. ghc-flag:: -fplugin=⟨module⟩
+    :shortdesc: Load a plugin exported by a given module
+    :type: dynamic
+    :category: plugins
 
     Load the plugin in the given module. The module must be a member of a
     package registered in GHC's package database.
 
 .. ghc-flag:: -fplugin-opt=⟨module⟩:⟨args⟩
+    :shortdesc: Give arguments to a plugin module; module must be specified with
+        :ghc-flag:`-fplugin=⟨module⟩`
+    :type: dynamic
+    :category: plugins
 
-    Pass arguments ⟨args⟩ to the given plugin.
+    Give arguments to a plugin module; module must be specified with
+    :ghc-flag:`-fplugin=⟨module⟩`.
+
 
 As an example, in order to load the plugin exported by ``Foo.Plugin`` in
 the package ``foo-ghc-plugin``, and give it the parameter "baz", we
@@ -221,12 +233,27 @@ would invoke GHC like this:
     Linking Test ...
     $
 
+Alternatively, core plugins can be specified with Template Haskell.
+
+::
+
+   addCorePlugin "Foo.Plugin"
+
+This inserts the plugin as a core-to-core pass. Unlike `-fplugin=(module)`,
+the plugin module can't reside in the same package as the module calling
+:th-ref:`Language.Haskell.TH.Syntax.addCorePlugin`. This way, the
+implementation can expect the plugin to be built by the time
+it is needed.
+
 Plugin modules live in a separate namespace from
 the user import namespace.  By default, these two namespaces are
 the same; however, there are a few command line options which
 control specifically plugin packages:
 
 .. ghc-flag:: -plugin-package ⟨pkg⟩
+    :shortdesc: Expose ⟨pkg⟩ for plugins
+    :type: dynamic
+    :category: plugins
 
     This option causes the installed package ⟨pkg⟩ to be exposed for plugins,
     such as :ghc-flag:`-fplugin=⟨module⟩`. The package ⟨pkg⟩ can be specified
@@ -241,6 +268,9 @@ control specifically plugin packages:
     to be linked into the resulting executable or shared object.
 
 .. ghc-flag:: -plugin-package-id ⟨pkg-id⟩
+    :shortdesc: Expose ⟨pkg-id⟩ for plugins
+    :type: dynamic
+    :category: plugins
 
     Exposes a package in the plugin namespace like :ghc-flag:`-plugin-package
     ⟨pkg⟩`, but the package is named by its installed package ID rather than by
@@ -251,6 +281,9 @@ control specifically plugin packages:
     described in :ref:`package-thinning-and-renaming`.
 
 .. ghc-flag:: -hide-all-plugin-packages
+    :shortdesc: Hide all packages for plugins by default
+    :type: dynamic
+    :category: plugins
 
     By default, all exposed packages in the normal, source import namespace are
     also available for plugins.  This causes those packages to be hidden by
@@ -319,7 +352,7 @@ Core plugins in more detail
 
 ``CoreToDo`` is effectively a data type that describes all the kinds of
 optimization passes GHC does on Core. There are passes for
-simplification, CSE, vectorisation, etc. There is a specific case for
+simplification, CSE, etc. There is a specific case for
 plugins, ``CoreDoPluginPass :: String -> PluginPass -> CoreToDo`` which
 should be what you always use when inserting your own pass into the
 pipeline. The first parameter is the name of the plugin, and the second
@@ -392,7 +425,7 @@ in a module it compiles:
       where printBind :: DynFlags -> CoreBind -> CoreM CoreBind
             printBind dflags bndr@(NonRec b _) = do
               putMsgS $ "Non-recursive binding named " ++ showSDoc dflags (ppr b)
-              return bndr 
+              return bndr
             printBind _ bndr = return bndr
 
 .. _getting-annotations:
@@ -566,6 +599,276 @@ typechecking, and can be checked by ``-dcore-lint``. It is possible for
 the plugin to create equality axioms for use in evidence terms, but GHC
 does not check their consistency, and inconsistent axiom sets may lead
 to segfaults or other runtime misbehaviour.
+
+.. _source-plugins:
+
+Source plugins
+~~~~~~~~~~~~~~
+
+In addition to core and type checker plugins, you can install plugins that can
+access different representations of the source code. The main purpose of these
+plugins is to make it easier to implement development tools.
+
+There are several different access points that you can use for defining plugins
+that access the representations. All these fields receive the list of
+``CommandLineOption`` strings that are passed to the compiler using the
+:ghc-flag:`-fplugin-opt` flags.
+
+::
+
+    plugin :: Plugin
+    plugin = defaultPlugin {
+        parsedResultAction = parsed
+      , typeCheckResultAction = typechecked
+      , spliceRunAction = spliceRun
+      , interfaceLoadAction = interfaceLoad
+      , renamedResultAction = renamed
+      }
+
+Parsed representation
+^^^^^^^^^^^^^^^^^^^^^
+
+When you want to define a plugin that uses the syntax tree of the source code,
+you would like to override the ``parsedResultAction`` field. This access point
+enables you to get access to information about the lexical tokens and comments
+in the source code as well as the original syntax tree of the compiled module.
+
+::
+
+    parsed :: [CommandLineOption] -> ModSummary -> HsParsedModule
+                -> Hsc HsParsedModule
+
+The ``ModSummary`` contains useful
+meta-information about the compiled module. The ``HsParsedModule`` contains the
+lexical and syntactical information we mentioned before. The result that you
+return will change the result of the parsing. If you don't want to change the
+result, just return the ``HsParsedModule`` that you received as the argument.
+
+Type checked representation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When you want to define a plugin that needs semantic information about the
+source code, use the ``typeCheckResultAction`` field. For example, if your
+plugin have to decide if two names are referencing the same definition or it has
+to check the type of a function it is using semantic information. In this case
+you need to access the renamed or type checked version of the syntax tree with
+``typeCheckResultAction`` or ``renamedResultAction``.
+
+::
+
+    typechecked :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
+    renamed :: [CommandLineOption] -> TcGblEnv -> HsGroup GhcRn -> TcM (TcGblEnv, HsGroup GhcRn)
+
+By overriding the ``renamedResultAction`` field we can modify each ``HsGroup``
+after it has been renamed. A source file is seperated into groups depending on
+the location of template haskell splices so the contents of these groups may
+not be intuitive. In order to save the entire renamed AST for inspection
+at the end of typechecking you can set ``renamedResultAction`` to ``keepRenamedSource``
+which is provided by the ``Plugins`` module.
+This is important because some parts of the renamed
+syntax tree (for example, imports) are not found in the typechecked one.
+
+
+
+Evaluated code
+^^^^^^^^^^^^^^
+
+When the compiler type checks the source code, :ref:`template-haskell` Splices
+and :ref:`th-quasiquotation` will be replaced by the syntax tree fragments
+generated from them. However for tools that operate on the source code the
+code generator is usually more interesting than the generated code. For this
+reason we included ``spliceRunAction``. This field is invoked on each expression
+before they are evaluated. The input is type checked, so semantic information is
+available for these syntax tree fragments. If you return a different expression
+you can change the code that is generated.
+
+
+::
+
+    spliceRun :: [CommandLineOption] -> LHsExpr GhcTc -> TcM (LHsExpr GhcTc)
+
+
+However take care that the generated definitions are still in the input of
+``typeCheckResultAction``. If your don't take care to filter the typechecked
+input, the behavior of your tool might be inconsistent.
+
+Interface files
+^^^^^^^^^^^^^^^
+
+Sometimes when you are writing a tool, knowing the source code is not enough,
+you also have to know details about the modules that you import. In this case we
+suggest using the ``interfaceLoadAction``. This will be called each time when
+the code of an already compiled module is loaded. It will be invoked for modules
+from installed packages and even modules that are installed with GHC. It will
+NOT be invoked with your own modules.
+
+::
+
+    interfaceLoad :: forall lcl . [CommandLineOption] -> ModIface
+                                    -> IfM lcl ModIface
+
+In the ``ModIface`` datatype you can find lots of useful information, including
+the exported definitions and type class instances.
+
+
+Source plugin example
+^^^^^^^^^^^^^^^^^^^^^
+
+In this example, we inspect all available details of the compiled source code.
+We don't change any of the representation, but write out the details to the
+standard output. The pretty printed representation of the parsed, renamed and
+type checked syntax tree will be in the output as well as the evaluated splices
+and quasi quotes. The name of the interfaces that are loaded will also be
+displayed.
+
+::
+
+    module SourcePlugin where
+
+    import Control.Monad.IO.Class
+    import DynFlags (getDynFlags)
+    import Plugins
+    import HscTypes
+    import TcRnTypes
+    import HsExtension
+    import HsDecls
+    import HsExpr
+    import HsImpExp
+    import Avail
+    import Outputable
+    import HsDoc
+
+    plugin :: Plugin
+    plugin = defaultPlugin { parsedResultAction = parsedPlugin
+                           , renamedResultAction = Just renamedAction
+                           , typeCheckResultAction = typecheckPlugin
+                           , spliceRunAction = metaPlugin
+                           , interfaceLoadAction = interfaceLoadPlugin
+                           }
+
+    parsedPlugin :: [CommandLineOption] -> ModSummary -> HsParsedModule -> Hsc HsParsedModule
+    parsedPlugin _ _ pm
+      = do dflags <- getDynFlags
+           liftIO $ putStrLn $ "parsePlugin: \n" ++ (showSDoc dflags $ ppr $ hpm_module pm)
+           return pm
+
+    renamedAction :: [CommandLineOption] -> ModSummary
+                        -> ( HsGroup GhcRn, [LImportDecl GhcRn]
+                           , Maybe [(LIE GhcRn, Avails)], Maybe LHsDocString )
+                        -> TcM ()
+    renamedAction _ _ ( gr, _, _, _ )
+      = do dflags <- getDynFlags
+           liftIO $ putStrLn $ "typeCheckPlugin (rn): " ++ (showSDoc dflags $ ppr gr)
+
+    typecheckPlugin :: [CommandLineOption] -> ModSummary -> TcGblEnv -> TcM TcGblEnv
+    typecheckPlugin _ _ tc
+      = do dflags <- getDynFlags
+           liftIO $ putStrLn $ "typeCheckPlugin (rn): \n" ++ (showSDoc dflags $ ppr $ tcg_rn_decls tc)
+           liftIO $ putStrLn $ "typeCheckPlugin (tc): \n" ++ (showSDoc dflags $ ppr $ tcg_binds tc)
+           return tc
+
+    metaPlugin :: [CommandLineOption] -> LHsExpr GhcTc -> TcM (LHsExpr GhcTc)
+    metaPlugin _ meta
+      = do dflags <- getDynFlags
+           liftIO $ putStrLn $ "meta: " ++ (showSDoc dflags $ ppr meta)
+           return meta
+
+    interfaceLoadPlugin :: [CommandLineOption] -> ModIface -> IfM lcl ModIface
+    interfaceLoadPlugin _ iface
+      = do dflags <- getDynFlags
+           liftIO $ putStrLn $ "interface loaded: " ++ (showSDoc dflags $ ppr $ mi_module iface)
+           return iface
+
+When you compile a simple module that contains Template Haskell splice
+
+::
+
+    {-# LANGUAGE TemplateHaskell #-}
+    module A where
+
+    a = ()
+
+    $(return [])
+
+with the compiler flags ``-fplugin SourcePlugin`` it will give the following
+output:
+
+.. code-block:: none
+
+    parsePlugin:
+    module A where
+    a = ()
+    $(return [])
+    interface loaded: Prelude
+    interface loaded: GHC.Float
+    interface loaded: GHC.Base
+    interface loaded: Language.Haskell.TH.Lib.Internal
+    interface loaded: Language.Haskell.TH.Syntax
+    interface loaded: GHC.Types
+    meta: return []
+    interface loaded: GHC.Integer.Type
+    typeCheckPlugin (rn):
+    Just a = ()
+    typeCheckPlugin (tc):
+    {$trModule = Module (TrNameS "main"#) (TrNameS "A"#), a = ()}
+
+
+.. _plugin_recompilation:
+
+Controlling Recompilation
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, modules compiled with plugins are always recompiled even if the source file is
+unchanged. This most conservative option is taken due to the ability of plugins
+to perform arbitrary IO actions. In order to control the recompilation behaviour
+you can modify the ``pluginRecompile`` field in ``Plugin``. ::
+
+    plugin :: Plugin
+    plugin = defaultPlugin {
+      installCoreToDos = install,
+      pluginRecompile = purePlugin
+      }
+
+By inspecting the example ``plugin`` defined above, we can see that it is pure. This
+means that if the two modules have the same fingerprint then the plugin
+will always return the same result. Declaring a plugin as pure means that
+the plugin will never cause a module to be recompiled.
+
+In general, the ``pluginRecompile`` field has the following type::
+
+    pluginRecompile :: [CommandLineOption] -> IO PluginRecompile
+
+The ``PluginRecompile`` data type is an enumeration determining how the plugin
+should affect recompilation. ::
+    data PluginRecompile = ForceRecompile | NoForceRecompile | MaybeRecompile Fingerprint
+
+A plugin which declares itself impure using ``ForceRecompile`` will always
+trigger a recompilation of the current module. ``NoForceRecompile`` is used
+for "pure" plugins which don't need to be rerun unless a module would ordinarily
+be recompiled. ``MaybeRecompile`` computes a ``Fingerprint`` and if this ``Fingerprint``
+is different to a previously computed ``Fingerprint`` for the plugin, then
+we recompile the module.
+
+As such, ``purePlugin`` is defined as a function which always returns ``NoForceRecompile``. ::
+
+  purePlugin :: [CommandLineOption] -> IO PluginRecompile
+  purePlugin _ = return NoForceRecompile
+
+Users can use the same functions that GHC uses internally to compute fingerprints.
+The `GHC.Fingerprint
+<https://hackage.haskell.org/package/base-4.10.1.0/docs/GHC-Fingerprint.html>`_ module provides useful functions for constructing fingerprints. For example, combining
+together ``fingerprintFingerprints`` and ``fingerprintString`` provides an easy to
+to naively fingerprint the arguments to a plugin. ::
+
+    pluginFlagRecompile :: [CommandLineOption] -> IO PluginRecompile
+    pluginFlagRecompile =
+      return . MaybeRecompile . fingerprintFingerprints . map fingerprintString . sort
+
+``defaultPlugin`` defines ``pluginRecompile`` to be ``impurePlugin`` which
+is the most conservative and backwards compatible option. ::
+
+    impurePlugin :: [CommandLineOption] -> IO PluginRecompile
+    impurePlugin _ = return ForceRecompile
 
 .. _frontend_plugins:
 

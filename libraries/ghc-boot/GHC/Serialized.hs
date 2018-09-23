@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RankNTypes, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
@@ -19,6 +18,7 @@ module GHC.Serialized (
     serializeWithData, deserializeWithData,
   ) where
 
+import Prelude -- See note [Why do we import Prelude here?]
 import Data.Bits
 import Data.Word        ( Word8 )
 import Data.Data
@@ -34,16 +34,10 @@ toSerialized serialize what = Serialized (typeOf what) (serialize what)
 -- | If the 'Serialized' value contains something of the given type, then use the specified deserializer to return @Just@ that.
 -- Otherwise return @Nothing@.
 fromSerialized :: forall a. Typeable a => ([Word8] -> a) -> Serialized -> Maybe a
-#if MIN_VERSION_base(4,10,0)
 fromSerialized deserialize (Serialized the_type bytes)
   | the_type == rep = Just (deserialize bytes)
   | otherwise       = Nothing
   where rep = typeRep (Proxy :: Proxy a)
-#else
-fromSerialized deserialize (Serialized the_type bytes)
-  | the_type == typeOf (undefined :: a) = Just (deserialize bytes)
-  | otherwise                           = Nothing
-#endif
 
 -- | Use a 'Data' instance to implement a serialization scheme dual to that of 'deserializeWithData'
 serializeWithData :: Data a => a -> [Word8]

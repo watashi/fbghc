@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, GADTs, RankNTypes #-}
+{-# LANGUAGE GADTs, RankNTypes #-}
 
 -----------------------------------------------------------------------------
 --
@@ -35,7 +35,10 @@ module CmmUtils(
         cmmSubWord, cmmAddWord, cmmMulWord, cmmQuotWord,
         cmmToWord,
 
-        isTrivialCmmExpr, hasNoGlobalRegs,
+        isTrivialCmmExpr, hasNoGlobalRegs, isLit, isComparisonExpr,
+
+        baseExpr, spExpr, hpExpr, spLimExpr, hpLimExpr,
+        currentTSOExpr, currentNurseryExpr, cccsExpr,
 
         -- Statics
         blankWord,
@@ -53,16 +56,16 @@ module CmmUtils(
         -- * Operations that probably don't belong here
         modifyGraph,
 
-        ofBlockMap, toBlockMap, insertBlock,
+        ofBlockMap, toBlockMap,
         ofBlockList, toBlockList, bodyToBlockList,
         toBlockListEntryFirst, toBlockListEntryFirstFalseFallthrough,
-        foldGraphBlocks, mapGraphNodes, postorderDfs, mapGraphNodes1,
+        foldlGraphBlocks, mapGraphNodes, revPostorder, mapGraphNodes1,
 
         -- * Ticks
         blockTicks
   ) where
 
-#include "HsVersions.h"
+import GhcPrelude
 
 import TyCon    ( PrimRep(..), PrimElemRep(..) )
 import RepType  ( UnaryType, SlotTy (..), typePrimRep1 )
@@ -73,11 +76,9 @@ import BlockId
 import CLabel
 import Outputable
 import DynFlags
-import Util
 import CodeGen.Platform
 
 import Data.Word
-import Data.Maybe
 import Data.Bits
 import Hoopl.Graph
 import Hoopl.Label
@@ -252,8 +253,8 @@ cmmRegOff reg byte_off = CmmRegOff reg byte_off
 cmmOffsetLit :: CmmLit -> Int -> CmmLit
 cmmOffsetLit (CmmLabel l)      byte_off = cmmLabelOff l byte_off
 cmmOffsetLit (CmmLabelOff l m) byte_off = cmmLabelOff l (m+byte_off)
-cmmOffsetLit (CmmLabelDiffOff l1 l2 m) byte_off
-                                        = CmmLabelDiffOff l1 l2 (m+byte_off)
+cmmOffsetLit (CmmLabelDiffOff l1 l2 m w) byte_off
+                                        = CmmLabelDiffOff l1 l2 (m+byte_off) w
 cmmOffsetLit (CmmInt m rep)    byte_off = CmmInt (m + fromIntegral byte_off) rep
 cmmOffsetLit _                 byte_off = pprPanic "cmmOffsetLit" (ppr byte_off)
 
@@ -340,7 +341,6 @@ cmmEqWord dflags  e1 e2 = CmmMachOp (mo_wordEq dflags)  [e1, e2]
 cmmULtWord dflags e1 e2 = CmmMachOp (mo_wordULt dflags) [e1, e2]
 cmmUGeWord dflags e1 e2 = CmmMachOp (mo_wordUGe dflags) [e1, e2]
 cmmUGtWord dflags e1 e2 = CmmMachOp (mo_wordUGt dflags) [e1, e2]
---cmmShlWord dflags e1 e2 = CmmMachOp (mo_wordShl dflags) [e1, e2]
 cmmSLtWord dflags e1 e2 = CmmMachOp (mo_wordSLt dflags) [e1, e2]
 cmmUShrWord dflags e1 e2 = CmmMachOp (mo_wordUShr dflags) [e1, e2]
 cmmAddWord dflags e1 e2 = CmmMachOp (mo_wordAdd dflags) [e1, e2]
@@ -385,6 +385,14 @@ hasNoGlobalRegs (CmmReg (CmmLocal _))      = True
 hasNoGlobalRegs (CmmRegOff (CmmLocal _) _) = True
 hasNoGlobalRegs _ = False
 
+isLit :: CmmExpr -> Bool
+isLit (CmmLit _) = True
+isLit _          = False
+
+isComparisonExpr :: CmmExpr -> Bool
+isComparisonExpr (CmmMachOp op _) = isComparisonMachOp op
+isComparisonExpr _                  = False
+
 ---------------------------------------------------
 --
 --      Tagging
@@ -392,23 +400,20 @@ hasNoGlobalRegs _ = False
 ---------------------------------------------------
 
 -- Tag bits mask
---cmmTagBits = CmmLit (mkIntCLit tAG_BITS)
 cmmTagMask, cmmPointerMask :: DynFlags -> CmmExpr
 cmmTagMask dflags = mkIntExpr dflags (tAG_MASK dflags)
 cmmPointerMask dflags = mkIntExpr dflags (complement (tAG_MASK dflags))
 
 -- Used to untag a possibly tagged pointer
 -- A static label need not be untagged
-cmmUntag :: DynFlags -> CmmExpr -> CmmExpr
+cmmUntag, cmmIsTagged, cmmConstrTag1 :: DynFlags -> CmmExpr -> CmmExpr
 cmmUntag _ e@(CmmLit (CmmLabel _)) = e
 -- Default case
 cmmUntag dflags e = cmmAndWord dflags e (cmmPointerMask dflags)
 
 -- Test if a closure pointer is untagged
-cmmIsTagged :: DynFlags -> CmmExpr -> CmmExpr
 cmmIsTagged dflags e = cmmNeWord dflags (cmmAndWord dflags e (cmmTagMask dflags)) (zeroExpr dflags)
 
-cmmConstrTag1 :: DynFlags -> CmmExpr -> CmmExpr
 -- Get constructor tag, but one based.
 cmmConstrTag1 dflags e = cmmAndWord dflags e (cmmTagMask dflags)
 
@@ -451,20 +456,17 @@ regUsedIn dflags = regUsedIn_ where
 --
 ---------------------------------------------
 
-mkLiveness :: DynFlags -> [Maybe LocalReg] -> Liveness
+mkLiveness :: DynFlags -> [LocalReg] -> Liveness
 mkLiveness _      [] = []
 mkLiveness dflags (reg:regs)
-  = take sizeW bits ++ mkLiveness dflags regs
+  = bits ++ mkLiveness dflags regs
   where
-    sizeW = case reg of
-              Nothing -> 1
-              Just r -> (widthInBytes (typeWidth (localRegType r)) + wORD_SIZE dflags - 1)
-                        `quot` wORD_SIZE dflags
-                        -- number of words, rounded up
-    bits = repeat $ is_non_ptr reg -- True <=> Non Ptr
+    sizeW = (widthInBytes (typeWidth (localRegType reg)) + wORD_SIZE dflags - 1)
+            `quot` wORD_SIZE dflags
+            -- number of words, rounded up
+    bits = replicate sizeW is_non_ptr -- True <=> Non Ptr
 
-    is_non_ptr Nothing    = True
-    is_non_ptr (Just reg) = not $ isGcPtrType (localRegType reg)
+    is_non_ptr = not $ isGcPtrType (localRegType reg)
 
 
 -- ============================================== -
@@ -485,12 +487,6 @@ toBlockMap (CmmGraph {g_graph=GMany NothingO body NothingO}) = body
 
 ofBlockMap :: BlockId -> LabelMap CmmBlock -> CmmGraph
 ofBlockMap entry bodyMap = CmmGraph {g_entry=entry, g_graph=GMany NothingO bodyMap NothingO}
-
-insertBlock :: CmmBlock -> LabelMap CmmBlock -> LabelMap CmmBlock
-insertBlock block map =
-  ASSERT(isNothing $ mapLookup id map)
-  mapInsert id block map
-  where id = entryLabel block
 
 toBlockList :: CmmGraph -> [CmmBlock]
 toBlockList g = mapElems $ toBlockMap g
@@ -554,11 +550,12 @@ mapGraphNodes1 :: (forall e x. CmmNode e x -> CmmNode e x) -> CmmGraph -> CmmGra
 mapGraphNodes1 f = modifyGraph (mapGraph f)
 
 
-foldGraphBlocks :: (CmmBlock -> a -> a) -> a -> CmmGraph -> a
-foldGraphBlocks k z g = mapFold k z $ toBlockMap g
+foldlGraphBlocks :: (a -> CmmBlock -> a) -> a -> CmmGraph -> a
+foldlGraphBlocks k z g = mapFoldl k z $ toBlockMap g
 
-postorderDfs :: CmmGraph -> [CmmBlock]
-postorderDfs g = {-# SCC "postorderDfs" #-} postorder_dfs_from (toBlockMap g) (g_entry g)
+revPostorder :: CmmGraph -> [CmmBlock]
+revPostorder g = {-# SCC "revPostorder" #-}
+    revPostorderFrom (toBlockMap g) (g_entry g)
 
 -------------------------------------------------
 -- Tick utilities
@@ -569,3 +566,18 @@ blockTicks b = reverse $ foldBlockNodesF goStmt b []
   where goStmt :: CmmNode e x -> [CmmTickish] -> [CmmTickish]
         goStmt  (CmmTick t) ts = t:ts
         goStmt  _other      ts = ts
+
+
+-- -----------------------------------------------------------------------------
+-- Access to common global registers
+
+baseExpr, spExpr, hpExpr, currentTSOExpr, currentNurseryExpr,
+  spLimExpr, hpLimExpr, cccsExpr :: CmmExpr
+baseExpr = CmmReg baseReg
+spExpr = CmmReg spReg
+spLimExpr = CmmReg spLimReg
+hpExpr = CmmReg hpReg
+hpLimExpr = CmmReg hpLimReg
+currentTSOExpr = CmmReg currentTSOReg
+currentNurseryExpr = CmmReg currentNurseryReg
+cccsExpr = CmmReg cccsReg

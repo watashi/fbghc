@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.3], [glasgow-haskell-bugs@haskell.org], [ghc-AC_PACKAGE_VERSION])
+AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.7], [glasgow-haskell-bugs@haskell.org], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -27,7 +27,7 @@ AC_INIT([The Glorious Glasgow Haskell Compilation System], [8.3], [glasgow-haske
 # when the source distribution was created.
 
 if test ! -f mk/config.h.in; then
-   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'perl boot'?"
+   echo "mk/config.h.in doesn't exist: perhaps you haven't run 'python3 boot'?"
    exit 1
 fi
 
@@ -55,13 +55,14 @@ AC_SUBST([release], [1])
 # First off, a distrib sanity check..
 AC_CONFIG_SRCDIR([mk/config.mk.in])
 
-dnl * We require autoconf version 2.60
-dnl We need 2.50 due to the use of AC_SYS_LARGEFILE and AC_MSG_NOTICE.
-dnl We need 2.52 due to the use of AS_TR_CPP and AS_TR_SH.
-dnl Using autoconf 2.59 started to give nonsense like this
-dnl  #define SIZEOF_CHAR 0
-dnl recently.
-AC_PREREQ([2.60])
+dnl * We require autoconf version 2.69 due to
+dnl   https://bugs.ruby-lang.org/issues/8179. Also see #14910.
+dnl * We need 2.50 due to the use of AC_SYS_LARGEFILE and AC_MSG_NOTICE.
+dnl * We need 2.52 due to the use of AS_TR_CPP and AS_TR_SH.
+dnl * Using autoconf 2.59 started to give nonsense like this
+dnl     #define SIZEOF_CHAR 0
+dnl   recently.
+AC_PREREQ([2.69])
 
 # -------------------------------------------------------------------------
 # Prepare to generate the following header files
@@ -131,6 +132,11 @@ AC_ARG_VAR(CC_STAGE0, [C compiler command (bootstrap)])
 if test "$WithGhc" != ""; then
   FPTOOLS_GHC_VERSION([GhcVersion], [GhcMajVersion], [GhcMinVersion], [GhcPatchLevel])dnl
 
+  # See #15281
+  if test "$GhcMajVersion" = "8" && test "$GhcMinVersion" = "2" && test "$GhcPatchLevel" = "1"; then
+     AC_MSG_ERROR([GHC 8.2.1 is known to be buggy and cannot bootstrap this GHC release (See Trac 15281); please use GHC 8.2.2 or later.])
+  fi
+
   if test "$GhcMajVersion" = "unknown" || test "$GhcMinVersion" = "unknown"; then
      AC_MSG_ERROR([Cannot determine the version of $WithGhc.  Is it really GHC?])
   fi
@@ -158,8 +164,8 @@ if test "$WithGhc" = ""
 then
     AC_MSG_ERROR([GHC is required.])
 fi
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.10],
-    [AC_MSG_ERROR([GHC version 7.10 or later is required to compile GHC.])])
+FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[8.2],
+    [AC_MSG_ERROR([GHC version 8.2 or later is required to compile GHC.])])
 
 if test `expr $GhcMinVersion % 2` = "1"
 then
@@ -175,11 +181,6 @@ fi
 
 GHC_PACKAGE_DB_FLAG=package-db
 AC_SUBST(GHC_PACKAGE_DB_FLAG)
-
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.11],
-                    SUPPORTS_THIS_UNIT_ID=NO,
-                    SUPPORTS_THIS_UNIT_ID=YES)
-AC_SUBST(SUPPORTS_THIS_UNIT_ID)
 
 # GHC is passed to Cabal, so we need a native path
 if test "${WithGhc}" != ""
@@ -391,6 +392,8 @@ then
     OBJDUMP="${mingwbin}objdump.exe"
     fp_prog_ar="${mingwbin}ar.exe"
 
+    AC_PATH_PROG([Genlib],[genlib])
+
     # NB. Download the perl binaries if required
     if ! test -d inplace/perl ||
          test inplace/perl -ot ghc-tarballs/perl/ghc-perl*.tar.gz
@@ -420,13 +423,29 @@ then
     AC_PATH_PROG([OBJDUMP],[objdump])
     AC_PATH_PROG([DllWrap],[dllwrap])
     AC_PATH_PROG([Windres],[windres])
+    AC_PATH_PROG([Genlib],[genlib])
+else
+    AC_CHECK_TARGET_TOOL([Windres],[windres])
+    AC_CHECK_TARGET_TOOL([DllWrap],[dllwrap])
+    AC_CHECK_TARGET_TOOL([OBJDUMP],[objdump])
 fi
 
 DllWrapCmd="$DllWrap"
 WindresCmd="$Windres"
 
+HAVE_GENLIB=False
+if test "$HostOS" = "mingw32"
+then
+    if test "$Genlib" != ""; then
+        GenlibCmd="$(cygpath -m $Genlib)"
+        HAVE_GENLIB=True
+    fi
+fi
+
 AC_SUBST([DllWrapCmd])
 AC_SUBST([WindresCmd])
+AC_SUBST([GenlibCmd])
+AC_SUBST([HAVE_GENLIB])
 
 FP_ICONV
 FP_GMP
@@ -529,14 +548,21 @@ FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
-dnl ** Choose a linker
+dnl ** Which ld to use
 dnl --------------------------------------------------------------
 FIND_LD([$target],[GccUseLdOpt])
 CONF_GCC_LINKER_OPTS_STAGE1="$CONF_GCC_LINKER_OPTS_STAGE1 $GccUseLdOpt"
 CONF_GCC_LINKER_OPTS_STAGE2="$CONF_GCC_LINKER_OPTS_STAGE2 $GccUseLdOpt"
 LdCmd="$LD"
+LdNoGoldCmd="$LD_NO_GOLD"
 CFLAGS="$CFLAGS $GccUseLdOpt"
 AC_SUBST([LdCmd])
+AC_SUBST([LdNoGoldCmd])
+
+FP_PROG_LD_IS_GNU
+FP_PROG_LD_BUILD_ID
+FP_PROG_LD_NO_COMPACT_UNWIND
+FP_PROG_LD_FILELIST
 
 dnl ** Which nm to use?
 dnl --------------------------------------------------------------
@@ -587,18 +613,6 @@ esac
 ObjdumpCmd="$OBJDUMP"
 AC_SUBST([ObjdumpCmd])
 
-dnl ** Which ar to use?
-dnl --------------------------------------------------------------
-if test "$HostOS" != "mingw32"; then
-    AC_CHECK_TARGET_TOOL([AR], [ar])
-    if test "$AR" = ":"; then
-        AC_MSG_ERROR([cannot find ar in your PATH])
-    fi
-fi
-ArCmd="$AR"
-fp_prog_ar="$AR"
-AC_SUBST([ArCmd])
-
 dnl ** Which ranlib to use?
 dnl --------------------------------------------------------------
 AC_PROG_RANLIB
@@ -606,22 +620,44 @@ if test "$RANLIB" = ":"; then
     AC_MSG_ERROR([cannot find ranlib in your PATH])
 fi
 RanlibCmd="$RANLIB"
-RANLIB="$RanlibCmd"
+AC_SUBST([RanlibCmd])
+
+dnl ** which strip to use?
+dnl --------------------------------------------------------------
+AC_CHECK_TARGET_TOOL([STRIP], [strip])
+StripCmd="$STRIP"
+AC_SUBST([StripCmd])
+
 
 dnl ** which libtool to use?
 dnl --------------------------------------------------------------
-AC_CHECK_TARGET_TOOL([LIBTOOL], [libtool])
-LibtoolCmd="$LIBTOOL"
-LIBTOOL="$LibtoolCmd"
+# The host normalization on Windows breaks autoconf, it no longer
+# thinks that target == host so it never checks the unqualified
+# tools for Windows. See #14274.
+if test "$HostOS" = "mingw32"
+then
+    AC_PATH_PROG([LIBTOOL],[libtool])
+    LibtoolCmd="$(cygpath -m $LIBTOOL)"
+else
+    AC_CHECK_TARGET_TOOL([LIBTOOL], [libtool])
+    LibtoolCmd="$LIBTOOL"
+fi
+AC_SUBST([LibtoolCmd])
 
 # Here is where we re-target which specific version of the LLVM
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=4.0
+LlvmVersion=6.0
 AC_SUBST([LlvmVersion])
 sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
 AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])
+
+dnl ** Which LLVM clang to use?
+dnl --------------------------------------------------------------
+AC_CHECK_TARGET_TOOL([CLANG], [clang])
+ClangCmd="$CLANG"
+AC_SUBST([ClangCmd])
 
 dnl ** Which LLVM llc to use?
 dnl --------------------------------------------------------------
@@ -639,6 +675,15 @@ dnl --------------------------------------------------------------
 dnl End of configure script option section
 dnl --------------------------------------------------------------
 
+dnl ** Copy the files from the "fs" utility into the right folders.
+dnl --------------------------------------------------------------
+AC_MSG_NOTICE([Creating links for in-tree file handling routines.])
+ln -f -v utils/fs/fs.* utils/lndir/
+ln -f -v utils/fs/fs.* utils/unlit/
+ln -f -v utils/fs/fs.* rts/
+ln -f -v utils/fs/fs.h libraries/base/include/
+ln -f -v utils/fs/fs.c libraries/base/cbits/
+AC_MSG_NOTICE([Routines in place. Packages can now be build normally.])
 
 dnl --------------------------------------------------------------
 dnl ** Can the unix package be built?
@@ -665,6 +710,12 @@ cygwin32|mingw32)
   else
     AC_PATH_PROG([PerlCmd],[perl])
   fi
+  # because of Trac #15051 SplitObjs is useless on Windows.  It regresses
+  # build times to days for a build, and this effect is also there for end users
+  # of GHC.  So unfortunately we have to disable it, even without having
+  # split-sections.  Though the compile time hit for split-sections should be
+  # tiny compared to this so maybe we should enable it for x86_64.
+  SplitObjsBroken=YES
   ;;
 *)
     AC_PATH_PROG([PerlCmd],[perl])
@@ -688,22 +739,22 @@ FP_GCC_VERSION
 dnl ** See whether gcc supports -no-pie
 FP_GCC_SUPPORTS_NO_PIE
 
+dnl ** Used to determine how to compile ghc-prim's atomics.c, used by
+dnl    unregisterised, Sparc, and PPC backends.
+FP_GCC_SUPPORTS__ATOMICS
+AC_DEFINE([HAVE_C11_ATOMICS], [$CONF_GCC_SUPPORTS__ATOMICS], [Does GCC support __atomic primitives?])
+
+FP_GCC_EXTRA_FLAGS
+
 dnl ** look to see if we have a C compiler using an llvm back end.
 dnl
 FP_CC_LLVM_BACKEND
-
-FP_PROG_LD_IS_GNU
-FP_PROG_LD_BUILD_ID
-FP_PROG_LD_NO_COMPACT_UNWIND
-FP_PROG_LD_FILELIST
 
 FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS],[IGNORE_LINKER_LD_FLAGS],[CPPFLAGS])
 FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_GCC_LINKER_OPTS_STAGE0],[CONF_LD_LINKER_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_GCC_LINKER_OPTS_STAGE1],[CONF_LD_LINKER_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_GCC_LINKER_OPTS_STAGE2],[CONF_LD_LINKER_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 # Stage 3 won't be supported by cross-compilation
-
-FP_GCC_EXTRA_FLAGS
 
 # See rules/distdir-way-opts.mk for details.
 # Flags passed to the C compiler
@@ -771,11 +822,23 @@ dnl if GNU patch is named gpatch, look for it first
 AC_PATH_PROGS(PatchCmd,gpatch patch, patch)
 
 dnl ** check for dtrace (currently only implemented for Mac OS X)
+AC_ARG_ENABLE(dtrace,
+    [AC_HELP_STRING([--enable-dtrace],
+        [Enable DTrace])],
+    EnableDtrace=$enableval,
+    EnableDtrace=yes
+)
+
 HaveDtrace=NO
+
 AC_PATH_PROG(DtraceCmd,dtrace)
-if test -n "$DtraceCmd"; then
-  if test "x$TargetOS_CPP-$TargetVendor_CPP" = "xdarwin-apple" -o "x$TargetOS_CPP-$TargetVendor_CPP" = "xsolaris2-unknown"; then
-    HaveDtrace=YES
+if test "x$EnableDtrace" = "xyes"; then
+  if test -n "$DtraceCmd"; then
+    if test "x$TargetOS_CPP-$TargetVendor_CPP" = "xdarwin-apple" \
+      -o "x$TargetOS_CPP-$TargetVendor_CPP" = "xfreebsd-portbld" \
+      -o "x$TargetOS_CPP-$TargetVendor_CPP" = "xsolaris2-unknown"; then
+      HaveDtrace=YES
+    fi
   fi
 fi
 AC_SUBST(HaveDtrace)
@@ -795,7 +858,7 @@ AC_PATH_PROG(SPHINXBUILD,sphinx-build)
 AC_CACHE_CHECK([for version of sphinx-build], fp_cv_sphinx_version,
 changequote(, )dnl
 [if test -n "$SPHINXBUILD"; then
-  fp_cv_sphinx_version=`"$SPHINXBUILD" --version 2>&1 | sed 's/Sphinx\( (sphinx-build)\)\? v\?\([0-9]\.[0-9]\.[0-9]\)/\2/' | head -n1`;
+  fp_cv_sphinx_version=`"$SPHINXBUILD" --version 2>&1 | sed 's/.* v\?\([0-9]\.[0-9]\.[0-9]\)/\1/' | head -n1`;
 fi;
 changequote([, ])dnl
 ])
@@ -876,6 +939,11 @@ FP_CHECK_SIZEOF_AND_ALIGNMENT(uint64_t)
 
 dnl for use in settings.in
 TargetWordSize=$ac_cv_sizeof_void_p
+if test "x$TargetWordSize" == 8; then
+  AC_SUBST([Cabal64bit],[True])
+else
+  AC_SUBST([Cabal64bit],[False])
+fi
 AC_SUBST(TargetWordSize)
 FP_CHECK_FUNC([WinExec],
   [@%:@include <windows.h>], [WinExec("",0)])
@@ -895,8 +963,11 @@ AC_CHECK_DECLS([ctime_r], , ,
 #include <time.h>])
 
 dnl ** check for mingwex library
-AC_CHECK_LIB(mingwex, closedir, HaveLibMingwEx=YES, HaveLibMingwEx=NO)
-AC_SUBST(HaveLibMingwEx)
+AC_CHECK_LIB(
+  [mingwex],
+  [closedir],
+  [AC_SUBST([HaveLibMingwEx],[YES])] [AC_SUBST([CabalMingwex],[True])],
+  [AC_SUBST([HaveLibMingwEx],[NO])] [AC_SUBST([CabalMingwex],[False])])
 
 if test $HaveLibMingwEx = YES ; then
   AC_DEFINE([HAVE_MINGWEX], [1], [Define to 1 if you have the mingwex library.])
@@ -911,6 +982,9 @@ AC_CHECK_LIB(m, atan, HaveLibM=YES, HaveLibM=NO)
 if test $HaveLibM = YES
 then
   AC_DEFINE([HAVE_LIBM], [1], [Define to 1 if you need to link with libm])
+  AC_SUBST([CabalHaveLibm],[True])
+else
+  AC_SUBST([CabalHaveLibm],[False])
 fi
 
 FP_BFD_SUPPORT
@@ -962,6 +1036,7 @@ AC_ARG_WITH([ffi-libraries],
 
 AC_SUBST(FFILibDir)
 
+AC_SUBST([CabalHaveLibffi],[False])
 AS_IF([test "$UseSystemLibFFI" = "YES"], [
  CFLAGS2="$CFLAGS"
  CFLAGS="$LIBFFI_CFLAGS $CFLAGS"
@@ -978,14 +1053,16 @@ AS_IF([test "$UseSystemLibFFI" = "YES"], [
  fi
  AC_CHECK_LIB(ffi, ffi_call,
   [AC_CHECK_HEADERS([ffi.h], [break], [])
-   AC_DEFINE([HAVE_LIBFFI], [1], [Define to 1 if you have libffi.])],
+   AC_DEFINE([HAVE_LIBFFI], [1], [Define to 1 if you have libffi.])]
+   AC_SUBST([CabalHaveLibffi],[True]),
   [AC_MSG_ERROR([Cannot find system libffi])])
  CFLAGS="$CFLAGS2"
  LDFLAGS="$LDFLAGS2"
 ])
 
 dnl ** check whether we need -ldl to get dlopen()
-AC_CHECK_LIB(dl, dlopen)
+AC_CHECK_LIB([dl], [dlopen])
+AC_CHECK_LIB([dl], [dlopen], [AC_SUBST([CabalHaveLibdl], [True])], [AC_SUBST([CabalHaveLibdl], [False])])
 
 dnl --------------------------------------------------
 dnl * Miscellaneous feature tests
@@ -1010,7 +1087,8 @@ FP_LEADING_UNDERSCORE
 FP_VISIBILITY_HIDDEN
 
 dnl ** check for librt
-AC_CHECK_LIB(rt, clock_gettime)
+AC_CHECK_LIB([rt], [clock_gettime])
+AC_CHECK_LIB([rt], [clock_gettime], [AC_SUBST([CabalHaveLibrt], [True])], [AC_SUBST([CabalHaveLibrt], [False])])
 AC_CHECK_FUNCS(clock_gettime timer_settime)
 FP_CHECK_TIMER_CREATE
 
@@ -1037,15 +1115,18 @@ AC_MSG_CHECKING(whether -lpthread is needed for pthreads)
 AC_CHECK_FUNC(pthread_create,
     [
         AC_MSG_RESULT(no)
+        AC_SUBST([CabalNeedLibpthread],[False])
         need_lpthread=0
     ],
     [
         AC_CHECK_LIB(pthread, pthread_create,
             [
                 AC_MSG_RESULT(yes)
+                AC_SUBST([CabalNeedLibpthread],[True])
                 need_lpthread=1
             ],
             [
+                AC_SUBST([CabalNeedLibpthread],[False])
                 AC_MSG_RESULT([no pthreads support found.])
                 need_lpthread=0
             ])
@@ -1144,7 +1225,7 @@ case ${TargetOS} in
     linux|linux-android|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2)
         RtsLinkerUseMmap=1
         ;;
-    darwin|ios)
+    darwin|ios|watchos|tvos)
         # Don't use mmap on powerpc/darwin as the mmap there doesn't support
         # reallocating. Reallocating is needed to allocate jump islands just
         # after each object image. Jumps to these jump islands use relative
@@ -1178,6 +1259,9 @@ AC_ARG_ENABLE(dwarf-unwind,
 AC_SUBST(UseLibdw)
 if test $UseLibdw = "YES" ; then
 	USE_LIBDW=1
+  AC_SUBST([CabalHaveLibdw],[True])
+else
+  AC_SUBST([CabalHaveLibdw],[False])
 fi
 AC_DEFINE_UNQUOTED([USE_LIBDW], [$USE_LIBDW], [Set to 1 to use libdw])
 
@@ -1190,6 +1274,12 @@ if test "$ac_cv_header_numa_h$ac_cv_header_numaif_h" = "yesyes" ; then
     AC_CHECK_LIB(numa, numa_available,HaveLibNuma=1)
 fi
 AC_DEFINE_UNQUOTED([HAVE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
+if test $HaveLibNuma = "1" ; then
+  AC_SUBST([CabalHaveLibNuma],[True])
+else
+  AC_SUBST([CabalHaveLibNuma],[False])
+fi
+
 
 dnl ** Documentation
 dnl --------------------------------------------------------------
@@ -1249,7 +1339,7 @@ checkMake380() {
 checkMake380 make
 checkMake380 gmake
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt utils/mkUserGuidePart/mkUserGuidePart.cabal distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk rts/rts.cabal compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal utils/gen-dll/gen-dll.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal libraries/ghc-heap/ghc-heap.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
 AC_OUTPUT
 [
 if test "$print_make_warning" = "true"; then
@@ -1302,6 +1392,7 @@ echo "\
    ranlib       : $RanlibCmd
    windres      : $WindresCmd
    dllwrap      : $DllWrapCmd
+   genlib       : $GenlibCmd
    Happy        : $HappyCmd ($HappyVersion)
    Alex         : $AlexCmd ($AlexVersion)
    Perl         : $PerlCmd
@@ -1309,6 +1400,7 @@ echo "\
    xelatex      : $XELATEX
 
    Using LLVM tools
+      clang : $ClangCmd
       llc   : $LlcCmd
       opt   : $OptCmd"
 
