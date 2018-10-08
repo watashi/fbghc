@@ -406,6 +406,7 @@ eval_obj:
     case FUN_STATIC:
 #ifdef PROFILING
         if (cap->r.rCCCS != obj->header.prof.ccs) {
+            int arity = get_fun_itbl(obj)->f.arity;
             tagged_obj =
                 newEmptyPAP(cap,
                             arity <= TAG_MASK
