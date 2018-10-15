@@ -40,3 +40,8 @@ test('T14999',
       unless(opsys('linux') and arch('x86_64') and have_gdb() and
         have_readelf(), skip)],
      run_command, ['$MAKE -s --no-print-directory T14999'])
+
+test('T15723',
+  [ unless(have_profiling(), skip),
+    unless(have_dynamic(), skip),
+  ], run_command, ['$MAKE -s --no-print-directory T15723'])
