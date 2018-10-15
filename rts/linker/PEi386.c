@@ -1675,7 +1675,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
  * so simply set correct pointer here.
  */
 bool
-ocAllocateSymbolExtras_PEi386 ( ObjectCode* oc )
+ocAllocateExtras_PEi386 ( ObjectCode* oc )
 {
    oc->symbol_extras = (SymbolExtra*)(oc->image - PEi386_IMAGE_OFFSET
                                       + ((PEi386_IMAGE_OFFSET + oc->fileSize + 0x7) & ~0x7));

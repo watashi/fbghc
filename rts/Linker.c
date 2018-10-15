@@ -1290,6 +1290,8 @@ mkOc( pathchar *path, char *image, int imageSize,
 #if defined(NEED_SYMBOL_EXTRAS)
    oc->symbol_extras     = NULL;
 #endif
+   oc->bssBegin          = NULL;
+   oc->bssEnd            = NULL;
    oc->imageMapped       = mapped;
 
    oc->misalignment      = misalignment;
@@ -1515,17 +1517,17 @@ HsInt loadOc (ObjectCode* oc)
 
 #if defined(NEED_SYMBOL_EXTRAS)
 #  if defined(OBJFORMAT_MACHO)
-   r = ocAllocateSymbolExtras_MachO ( oc );
+   r = ocAllocateExtras_MachO ( oc );
    if (!r) {
        IF_DEBUG(linker,
-                debugBelch("loadOc: ocAllocateSymbolExtras_MachO failed\n"));
+                debugBelch("loadOc: ocAllocateExtras_MachO failed\n"));
        return r;
    }
 #  elif defined(OBJFORMAT_ELF)
-   r = ocAllocateSymbolExtras_ELF ( oc );
+   r = ocAllocateExtras_ELF ( oc );
    if (!r) {
        IF_DEBUG(linker,
-                debugBelch("loadOc: ocAllocateSymbolExtras_ELF failed\n"));
+                debugBelch("loadOc: ocAllocateExtras_ELF failed\n"));
        return r;
    }
 #  elif defined(OBJFORMAT_PEi386)
