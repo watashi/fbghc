@@ -135,6 +135,7 @@ data MiscFlags = MiscFlags
     , generateCrashDumpFile :: Bool
     , generateStackTrace    :: Bool
     , machineReadable       :: Bool
+    , linkerAlwaysPic       :: Bool
     , linkerMemBase         :: Word
       -- ^ address to ask the OS for memory for the linker, 0 ==> off
     } deriving (Show)
@@ -427,6 +428,8 @@ getMiscFlags = do
                   (#{peek MISC_FLAGS, generate_stack_trace} ptr :: IO CBool))
             <*> (toBool <$>
                   (#{peek MISC_FLAGS, machineReadable} ptr :: IO CBool))
+            <*> (toBool <$>
+                  (#{peek MISC_FLAGS, linkerAlwaysPic} ptr :: IO CBool))
             <*> #{peek MISC_FLAGS, linkerMemBase} ptr
 
 getDebugFlags :: IO DebugFlags
