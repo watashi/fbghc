@@ -119,7 +119,6 @@ deSugar hsc_env
                      (const ()) $
      do { -- Desugar the program
         ; let export_set = availsToNameSet exports
-              target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
         ; (binds_cvr, ds_hpc_info, modBreaks)
@@ -149,7 +148,7 @@ deSugar hsc_env
      do {       -- Add export flags to bindings
           keep_alive <- readIORef keep_var
         ; let (rules_for_locals, rules_for_imps) = partition isLocalRule all_rules
-              final_prs = addExportFlagsAndRules target export_set keep_alive
+              final_prs = addExportFlagsAndRules hsc_env export_set keep_alive
                                                  mod rules_for_locals
                                                  (fromOL all_prs)
 
@@ -281,9 +280,9 @@ deSugarExpr hsc_env tc_expr = do {
 -}
 
 addExportFlagsAndRules
-    :: HscTarget -> NameSet -> NameSet -> Module -> [CoreRule]
+    :: HscEnv -> NameSet -> NameSet -> Module -> [CoreRule]
     -> [(Id, t)] -> [(Id, t)]
-addExportFlagsAndRules target exports keep_alive mod rules prs
+addExportFlagsAndRules hsc_env exports keep_alive mod rules prs
   = mapFst add_one prs
   where
     add_one bndr = add_rules name (add_export name bndr)
@@ -328,9 +327,8 @@ addExportFlagsAndRules target exports keep_alive mod rules prs
         -- isExternalName separates the user-defined top-level names from those
         -- introduced by the type checker.
     is_exported :: Name -> Bool
-    is_exported | targetRetainsAllBindings target
-                  || isInteractiveModule mod      = isExternalName
-                | otherwise                       = (`elemNameSet` exports)
+    is_exported | moduleRetainsAllBindings hsc_env mod = isExternalName
+                | otherwise                            = (`elemNameSet` exports)
 
 {-
 Note [Adding export flags]
