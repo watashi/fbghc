@@ -36,6 +36,7 @@ module DynFlags (
         whenGeneratingDynamicToo, ifGeneratingDynamicToo,
         whenCannotGenerateDynamicToo,
         dynamicTooMkDynamicDynFlags,
+        BindingsRetentionMode(..),
         DynFlags(..),
         FlagSpec(..),
         HasDynFlags(..), ContainsDynFlags(..),
@@ -649,6 +650,8 @@ type SigOf = ModuleNameEnv Module
 getSigOf :: DynFlags -> ModuleName -> Maybe Module
 getSigOf dflags n = lookupUFM (sigOf dflags) n
 
+data BindingsRetentionMode = Minimal | Full
+
 -- | Contains not only a collection of 'GeneralFlag's but also a plethora of
 -- information relating to the compilation of a single file or GHC session
 data DynFlags = DynFlags {
@@ -671,6 +674,14 @@ data DynFlags = DynFlags {
                                         --   in --make mode, where Nothing ==> compile as
                                         --   many in parallel as there are CPUs.
 
+  bindingsRetentionMode :: BindingsRetentionMode, -- ^ Under interpreted mode, we retain *all*
+                                                 --   top-level bindings so that GHCi can call
+                                                 --   functions inside a module. However,
+                                                 --   this may consume too much memory and
+                                                 --   thus, we also provide a minimal mode
+                                                 --   where only bindings belong to modules
+                                                 --   that are in the target set, i.e. those
+                                                 --   added by GHC.setTargets or GHC.addTarget
   enableTimeStats       :: Bool,        -- ^ Enable RTS timing statistics?
   ghcHeapSize           :: Maybe Int,   -- ^ The heap size to set.
 
@@ -1124,16 +1135,11 @@ isObjectTarget HscAsm   = True
 isObjectTarget HscLlvm  = True
 isObjectTarget _        = False
 
--- | Does this target retain *all* top-level bindings for a module,
--- rather than just the exported bindings, in the TypeEnv and compiled
--- code (if any)?  In interpreted mode we do this, so that GHCi can
--- call functions inside a module.  In HscNothing mode we also do it,
--- so that Haddock can get access to the GlobalRdrEnv for a module
--- after typechecking it.
+-- | DEPRECATED. Please use moduleRetainsAllBindings in HscTypes instead.
 targetRetainsAllBindings :: HscTarget -> Bool
 targetRetainsAllBindings HscInterpreted = True
-targetRetainsAllBindings HscNothing     = True
-targetRetainsAllBindings _              = False
+targetRetainsAllBindings HscNothing = True
+targetRetainsAllBindings _ = False
 
 -- | The 'GhcMode' tells us whether we're doing multi-module
 -- compilation (controlled via the "GHC" API) or one-shot
@@ -1514,6 +1520,7 @@ defaultDynFlags mySettings =
         specConstrRecursive     = 3,
         liberateCaseThreshold   = Just 2000,
         floatLamArgs            = Just 0, -- Default: float only if no fvs
+        bindingsRetentionMode   = Full,
 
         historySize             = 20,
         strictnessBefore        = [],
@@ -2412,6 +2419,8 @@ dynamic_flags_deps = [
                  -- parallel builds is equal to the
                  -- result of getNumProcessors
   , make_ord_flag defFlag "sig-of"   (sepArg setSigOf)
+  , make_ord_flag defFlag "fminimal-bindings-retention" (NoArg (upd (\d ->
+                                        d { bindingsRetentionMode = Minimal })))
 
     -- RTS options -------------------------------------------------------------
   , make_ord_flag defFlag "H"           (HasArg (\s -> upd (\d ->
