@@ -74,6 +74,12 @@ BINDIST_WRAPPERS += $$($1_$2_SHELL_WRAPPER_NAME)
 
 install: install_$1_$2_wrapper
 
+# FB Note: the changes here make the scripts relocatable; directories
+# are computed relative to the base of the GHC installation.  We can't
+# upstream these changes, because they wire-in the relative locations
+# of bindir, libdir and datadir, which are normally configurable at
+# install-time for GHC.
+
 .PHONY: install_$1_$2_wrapper
 install_$1_$2_wrapper: WRAPPER=$$(DESTDIR)$$(bindir)/$(CrossCompilePrefix)$$($1_$2_INSTALL_SHELL_WRAPPER_NAME)
 install_$1_$2_wrapper:
@@ -81,12 +87,14 @@ install_$1_$2_wrapper:
 	$$(call removeFiles,                                        "$$(WRAPPER)")
 	$$(CREATE_SCRIPT)                                           "$$(WRAPPER)"
 	echo '#!/bin/sh'                                         >> "$$(WRAPPER)"
-	echo 'exedir="$$(ghclibexecdir)/bin"'                    >> "$$(WRAPPER)"
+	echo 'function d { local p=$$$$2; for (( i=0; i<$$$$1; i++ )); do p=$$$$(dirname $$$$p); done; echo "$$$$p"; }' >> "$$(WRAPPER)"
+	echo 'basedir="$$$$(d 2 $$$$(readlink -f $$$$0))"'       >> "$$(WRAPPER)"
+	echo 'exedir="$$$$basedir/lib/ghc-$$(ProjectVersion)/bin"'   >> "$$(WRAPPER)"
 	echo 'exeprog="$$($1_$2_PROG)"'                          >> "$$(WRAPPER)"
 	echo 'executablename="$$$$exedir/$$$$exeprog"'           >> "$$(WRAPPER)"
-	echo 'datadir="$$(datadir)"'                             >> "$$(WRAPPER)"
-	echo 'bindir="$$(bindir)"'                               >> "$$(WRAPPER)"
-	echo 'topdir="$$(topdir)"'                               >> "$$(WRAPPER)"
+	echo 'datadir="$$$$basedir/share"'                       >> "$$(WRAPPER)"
+	echo 'bindir="$$$$basedir/bin"'                          >> "$$(WRAPPER)"
+	echo 'topdir="$$$$basedir/lib/ghc-$$(ProjectVersion)"'   >> "$$(WRAPPER)"
 	$$($1_$2_SHELL_WRAPPER_EXTRA)
 	$$($1_$2_INSTALL_SHELL_WRAPPER_EXTRA)
 	cat $$($1_$2_SHELL_WRAPPER_NAME)                         >> "$$(WRAPPER)"
