@@ -499,7 +499,8 @@ addExportFlagsAndRules hsc_env mod exports keep_alive rules prs
         -- isExternalName separates the user-defined top-level names from those
         -- introduced by the type checker.
     is_exported :: Name -> Bool
-    is_exported | moduleRetainsAllBindings hsc_env mod = isExternalName
+    is_exported | moduleRetainsAllBindings hsc_env mod
+                  || isInteractiveModule mod           = isExternalName
                 | otherwise                            = (`elemNameSet` exports)
 
 {-
