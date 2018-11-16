@@ -87,8 +87,8 @@ install_$1_$2_wrapper:
 	$$(call removeFiles,                                        "$$(WRAPPER)")
 	$$(CREATE_SCRIPT)                                           "$$(WRAPPER)"
 	echo '#!/bin/sh'                                         >> "$$(WRAPPER)"
-	echo 'function d { local p=$$$$2; for (( i=0; i<$$$$1; i++ )); do p=$$$$(dirname $$$$p); done; echo "$$$$p"; }' >> "$$(WRAPPER)"
-	echo 'basedir="$$$$(d 2 $$$$(readlink -f $$$$0))"'       >> "$$(WRAPPER)"
+	echo 'function d { local p=$$$$2; for (( i=0; i<$$$$1; i++ )); do p=$$$$(dirname "$$$$p"); done; echo "$$$$p"; }' >> "$$(WRAPPER)"
+	echo 'basedir=$$$$(d 2 "$$$$(readlink -f "$$$$0")")'       >> "$$(WRAPPER)"
 	echo 'exedir="$$$$basedir/lib/ghc-$$(ProjectVersion)/bin"'   >> "$$(WRAPPER)"
 	echo 'exeprog="$$($1_$2_PROG)"'                          >> "$$(WRAPPER)"
 	echo 'executablename="$$$$exedir/$$$$exeprog"'           >> "$$(WRAPPER)"
