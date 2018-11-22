@@ -13,7 +13,7 @@ module FastFunctions (
 import GHC.Exts
 import GHC.IO   (IO(..))
 
--- Just like unsafePerformIO, but we inline it.
+-- Just like unsafeDupablePerformIO, but we inline it.
 {-# INLINE inlinePerformIO #-}
 inlinePerformIO :: IO a -> a
 inlinePerformIO (IO m) = case m realWorld# of (# _, r #)   -> r

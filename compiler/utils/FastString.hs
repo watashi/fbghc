@@ -108,13 +108,12 @@ import qualified Data.ByteString.Unsafe   as BS
 import Foreign.C
 import GHC.Exts
 import System.IO
-import System.IO.Unsafe ( unsafePerformIO )
 import Data.Data
 import Data.IORef
 import Data.Maybe       ( isJust )
 import Data.Char
 
-import GHC.IO           ( IO(..), unIO, unsafeDupablePerformIO )
+import GHC.IO
 
 #if __GLASGOW_HASKELL__ >= 709
 import Foreign
@@ -393,6 +392,9 @@ mkFastStringWith mk_fs !ptr !len = do
   case res of
     Just found -> return found
     Nothing -> do
+      -- The withMVar below is not dupable. It can lead to deadlock if it is
+      -- only run partially and putMVar is not called after takeMVar.
+      noDuplicate
       n <- get_uid
       new_fs <- mk_fs n
       withMVar lock $ \_ -> insert new_fs
