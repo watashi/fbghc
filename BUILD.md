@@ -25,6 +25,7 @@ The image hash is `cdb402158579` in the previous example
 3. Run the docker image and change directory into fbghc to build
 ```
 $ sudo docker run -it -v $(pwd):/fbghc cdb402158579  /bin/bash
+root@c039bd77f3e2:/# cd fbghc
 root@03465d0a7999:/fbghc# ./validate --build-only
 ```
 Please note that the string cdb402158579 should be the hash of the docker image you built in step 2 instead.
