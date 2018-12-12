@@ -411,7 +411,8 @@ GetString(FILE *infp)
 
     ch = getc(infp);  /* skip the '\"' that begins the string */
 
-    for (size_t i = 0; ; ++i) {
+    size_t i = 0;
+    for (i = 0; ; ++i) {
         if (ch == EOF) {
             Error("%s, line %d: EOF when expecting \"", hpfile, linenum, ch);
         }

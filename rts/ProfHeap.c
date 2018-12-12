@@ -361,7 +361,8 @@ void endProfiling( void )
 static void
 printEscapedString(const char* string)
 {
-    for (const char* p = string; *p != '\0'; ++p) {
+    const char* p;
+    for (p = string; *p != '\0'; ++p) {
         if (*p == '\"') {
             // Escape every " as ""
             fputc('"', hp_file);

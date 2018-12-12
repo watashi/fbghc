@@ -57,7 +57,6 @@ import Util
 
 import Data.ByteString (ByteString)
 import Data.Int
-import Data.Ratio
 import Data.Word
 import Data.Char
 import Data.Data ( Data, Typeable )
