@@ -555,6 +555,7 @@ data GeneralFlag
    -- output style opts
    | Opt_ErrorSpans -- Include full span info in error messages,
                     -- instead of just the start position.
+   | Opt_DeferDiagnostics
    | Opt_DiagnosticsShowCaret -- Show snippets of offending code
    | Opt_PprCaseAsLet
    | Opt_PprShowTicks
@@ -3850,6 +3851,7 @@ fFlagsDeps = [
   flagSpec "cse"                              Opt_CSE,
   flagSpec "stg-cse"                          Opt_StgCSE,
   flagSpec "cpr-anal"                         Opt_CprAnal,
+  flagSpec "defer-diagnostics"                Opt_DeferDiagnostics,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
   flagSpec "defer-out-of-scope-variables"     Opt_DeferOutOfScopeVariables,
