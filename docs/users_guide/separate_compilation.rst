@@ -260,6 +260,9 @@ Redirecting the compilation output(s)
     example, they would still be put in ``parse/Foo.hi``,
     ``parse/Bar.hi``, and ``gurgle/Bumble.hi``.
 
+    Please also note that when doing incremental compilation, this directory is
+    where GHC looks into to find object files from previous builds.
+
 .. ghc-flag:: -ohi ⟨file⟩
     :shortdesc: set the filename in which to put the interface
     :type: dynamic
@@ -287,6 +290,10 @@ Redirecting the compilation output(s)
 
     Redirects all generated interface files into ⟨dir⟩, instead of the
     default.
+
+    Please also note that when doing incremental compilation (by ``ghc --make``
+    or ``ghc -c``), this directory is where GHC looks into to find interface
+    files.
 
 .. ghc-flag:: -stubdir ⟨dir⟩
     :shortdesc: redirect FFI stub files
