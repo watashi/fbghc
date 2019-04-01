@@ -441,14 +441,14 @@ ccsSetSelected (CostCentreStack *ccs)
     if (RtsFlags.ProfFlags.modSelector) {
         if (! strMatchesSelector (ccs->cc->module,
                                   RtsFlags.ProfFlags.modSelector) ) {
-            ccs->selected = 0;
+            clearCCSBitFlag(ccs, CCS_SELECTED);
             return;
         }
     }
     if (RtsFlags.ProfFlags.ccSelector) {
         if (! strMatchesSelector (ccs->cc->label,
                                   RtsFlags.ProfFlags.ccSelector) ) {
-            ccs->selected = 0;
+            clearCCSBitFlag(ccs, CCS_SELECTED);
             return;
         }
     }
@@ -462,12 +462,12 @@ ccsSetSelected (CostCentreStack *ccs)
             }
         }
         if (c == NULL) {
-            ccs->selected = 0;
+            clearCCSBitFlag(ccs, CCS_SELECTED);
             return;
         }
     }
 
-    ccs->selected = 1;
+    setCCSBitFlag(ccs, CCS_SELECTED);
     return;
 }
 
@@ -628,6 +628,7 @@ actualPush_ (CostCentreStack *ccs, CostCentre *cc, CostCentreStack *new_ccs)
     new_ccs->prevStack = ccs;
     new_ccs->root = ccs->root;
     new_ccs->depth = ccs->depth + 1;
+    new_ccs->bitflags = 0;
 
     new_ccs->indexTable = EMPTY_TABLE;
 
@@ -997,6 +998,23 @@ fprintCCS_stderr (CostCentreStack *ccs, StgClosure *exception, StgTSO *tso)
         }
     }
 done:
+    return;
+}
+
+void setCCSBitFlag(CostCentreStack *ccs, StgWord flag)
+{
+    ccs->bitflags |= flag;
+    return;
+}
+
+bool testCCSBitFlag(CostCentreStack const *ccs, StgWord flag)
+{
+    return ccs->bitflags & flag;
+}
+
+void clearCCSBitFlag(CostCentreStack *ccs, StgWord flag)
+{
+    ccs->bitflags &= ~flag;
     return;
 }
 
