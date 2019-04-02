@@ -36,6 +36,7 @@ Library
     other-extensions: DeriveGeneric, RankNTypes, ScopedTypeVariables
 
     exposed-modules:
+            GHC.AtFile
             GHC.LanguageExtensions
             GHC.PackageDb
             GHC.Serialized

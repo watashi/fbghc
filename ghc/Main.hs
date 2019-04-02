@@ -40,6 +40,7 @@ import Module           ( ModuleName )
 
 
 -- Various other random stuff that we need
+import GHC.AtFile
 import Config
 import Constants
 import HscTypes
@@ -69,6 +70,7 @@ import System.IO
 import System.Environment
 import System.Exit
 import System.FilePath
+import Control.Exception
 import Control.Monad
 import Data.Char
 import Data.List
@@ -105,8 +107,10 @@ main = do
      hSetTranslit stderr
 
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
+    expanded <- expandAtFile =<< getArgs
+
     -- 1. extract the -B flag from the args
-    argv0 <- getArgs
+    argv0 <- either (throwIO . CmdLineError) return expanded
 
     let (minusB_args, argv1) = partition ("-B" `isPrefixOf`) argv0
         mbMinusB | null minusB_args = Nothing
