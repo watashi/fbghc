@@ -6,4 +6,3 @@ main
 :l []
 System.Mem.performGC
 System.Mem.performGC
-3+4

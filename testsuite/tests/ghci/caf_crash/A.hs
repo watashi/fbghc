@@ -1,18 +1,15 @@
-module A (caf, mainx, square) where
+module A (square
+  -- ,caf
+  ) where
 
-import B (idd)
+import B
+-- import BB
 
-caf :: Int
-caf = 23423
+-- caf :: [HH]
+-- caf = [HH 3 bb]
 
-mainx :: IO ()
-mainx = do
-    putStrLn $ show (caf + idd)
-    putStrLn "Hello"
-    putStrLn "World"
-
-square :: IO Int
+square :: IO ()
 square = do
-    let ss = "I'm a square"
-    putStrLn $ ss
-    return $ length ss
+    putStrLn $ show $ idd
+    -- print $ length caf
+    return ()

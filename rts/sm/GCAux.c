@@ -114,16 +114,15 @@ isAlive(StgClosure *p)
 void
 revertCAFs( void )
 {
-    StgIndStatic *c;
+    StgIndStatic *c, *d;
 
     for (c = revertible_caf_list;
          c != (StgIndStatic *)END_OF_CAF_LIST;
-         c = (StgIndStatic *)c->static_link)
+         d = c, c = (StgIndStatic *)c->static_link, d->static_link = NULL)
     {
         c = (StgIndStatic *)UNTAG_STATIC_LIST_PTR(c);
         SET_INFO((StgClosure *)c, c->saved_info);
         c->saved_info = NULL;
-        // could, but not necessary: c->static_link = NULL;
     }
     revertible_caf_list = (StgIndStatic*)END_OF_CAF_LIST;
 }
