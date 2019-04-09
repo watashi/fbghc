@@ -84,6 +84,7 @@ import qualified Data.IntMap.Merge.Lazy as M
 import Control.Applicative (Const (..))
 import qualified Data.Monoid as Mon
 #endif
+import Control.DeepSeq (NFData (..))
 import qualified Data.IntSet as S
 import Data.Typeable
 import Data.Data
@@ -91,7 +92,7 @@ import qualified Data.Semigroup as Semi
 
 
 newtype UniqFM ele = UFM (M.IntMap ele)
-  deriving (Data, Eq, Functor, Typeable)
+  deriving (Data, Eq, Functor, Typeable, NFData)
   -- We used to derive Traversable and Foldable, but they were nondeterministic
   -- and not obvious at the call site. You can use explicit nonDetEltsUFM
   -- and fold a list if needed.
